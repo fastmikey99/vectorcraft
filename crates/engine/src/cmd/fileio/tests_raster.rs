@@ -163,3 +163,14 @@ fn an_image_opens_at_the_size_its_resolution_declares() {
         assert!((art.width() - w).abs() < 1e-6 && (art.height() - h).abs() < 1e-6, "{what}: the image fills it, {art:?}");
     }
 }
+
+#[test]
+fn png_exports_say_their_colours_are_srgb() {
+    let mut s = session(72.0, 36.0, 1);
+    for format in ["png", "png8"] {
+        let png = b64(&s.execute("document.export", &json!({"format": format, "ppi": 150, "background": "transparent"})).unwrap());
+        assert_eq!(png_chunk(&png, b"sRGB"), Some([0u8].as_slice()), "{format}: an sRGB chunk, perceptual");
+        assert!(png_chunk(&png, b"pHYs").is_some(), "{format}: the resolution is still there");
+        assert!(image::load_from_memory(&png).is_ok(), "{format}: still a valid PNG");
+    }
+}
