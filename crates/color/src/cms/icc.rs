@@ -43,6 +43,21 @@ pub struct IccProfile {
     /// Direct transforms into other RGB profiles ([`Self::to_rgb_of`]), by destination, intent
     /// and black-point compensation.
     direct: Mutex<Vec<(DirectKey, Option<Arc<Direct>>)>>,
+    /// Direct transforms into CMYK profiles ([`Self::to_cmyk_of`]), keyed the same way.
+    direct_cmyk: Mutex<Vec<(DirectKey, Option<Arc<DirectCmyk>>)>>,
+}
+
+/// A transform into a CMYK profile without passing through sRGB: one step, or with black-point
+/// compensation two, through linear ProPhoto RGB (wide enough for any print gamut), where the
+/// source black is remapped onto the destination's.
+struct DirectCmyk {
+    /// Straight into the destination (no compensation).
+    one: Option<Arc<TransformF32Executor>>,
+    /// Into linear ProPhoto RGB, and from it into the destination (with compensation).
+    to_hub: Option<Arc<TransformF32Executor>>,
+    from_hub: Option<Arc<TransformF32Executor>>,
+    /// The source's and the destination's black, as luminance in the hub.
+    black: (f32, f32),
 }
 
 /// A transform from one profile into an RGB profile without passing through sRGB: into the
@@ -91,6 +106,7 @@ impl IccProfile {
             to_srgb: Default::default(),
             from_srgb: Default::default(),
             direct: Mutex::new(Vec::new()),
+            direct_cmyk: Mutex::new(Vec::new()),
         })
     }
 
@@ -221,10 +237,90 @@ impl IccProfile {
         Some(Direct { to_linear, to_dest: Some(to_dest), black })
     }
 
+    /// Device values (RGB / CMYK, 0..1) → `dest`'s CMYK, converted directly with `intent`: not
+    /// through sRGB, so a CMYK colour outside sRGB (CMYK cyan) reaches another CMYK profile
+    /// whole. With `bpc` and relative colorimetric, this profile's black maps onto the
+    /// destination's (black-point compensation); perceptual tables already map black. `None`
+    /// when `dest` isn't CMYK or no transform can be built.
+    pub fn to_cmyk_of(&self, dest: &IccProfile, v: &[f32], intent: Intent, bpc: bool) -> Option<[f32; 4]> {
+        let t = self.direct_cmyk_xf(dest, intent, bpc && intent == Intent::RelativeColorimetric)?;
+        let mut src = v.to_vec();
+        src.resize(self.channels(), 0.0);
+        let mut out = [0.0f32; 4];
+        match (&t.one, &t.to_hub, &t.from_hub) {
+            (Some(one), _, _) => one.transform(&src, &mut out).ok()?,
+            (None, Some(to), Some(from)) => {
+                let mut lin = [0.0f32; 3];
+                to.transform(&src, &mut lin).ok()?;
+                let (ks, kd) = t.black;
+                let lin = lin.map(|x| ((x - ks) / (1.0 - ks) * (1.0 - kd) + kd).clamp(0.0, 1.0));
+                from.transform(&lin, &mut out).ok()?;
+            }
+            _ => return None,
+        }
+        Some(out.map(|x| x.clamp(0.0, 1.0)))
+    }
+
+    fn direct_cmyk_xf(&self, dest: &IccProfile, intent: Intent, bpc: bool) -> Option<Arc<DirectCmyk>> {
+        if dest.kind != ProfileKind::Cmyk {
+            return None;
+        }
+        let key = (dest.name.clone(), intent_index(intent), bpc);
+        let mut cache = self.direct_cmyk.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, t)) = cache.iter().find(|(k, _)| *k == key) {
+            return t.clone();
+        }
+        let t = self.build_direct_cmyk(dest, intent, bpc).map(Arc::new);
+        cache.push((key, t.clone()));
+        t
+    }
+
+    fn build_direct_cmyk(&self, dest: &IccProfile, intent: Intent, bpc: bool) -> Option<DirectCmyk> {
+        // Always through the hub: moxcms's one-step link between two CMYK LUT profiles maps some
+        // colours badly under perceptual intent (CMYK cyan lost a quarter of its cyan ink), while
+        // each profile's own table into and out of a matrix space is sound.
+        let hub = linear_prophoto();
+        let opts = Self::opts(intent);
+        let to_hub = self.profile.create_transform_f32(self.layout(), &hub, Layout::Rgb, opts).ok()?;
+        let from_hub = hub.create_transform_f32(Layout::Rgb, &dest.profile, dest.layout(), opts).ok()?;
+        let black = if bpc {
+            let dest_to_hub = dest.profile.create_transform_f32(dest.layout(), &hub, Layout::Rgb, opts).ok()?;
+            (self.black_in(&hub, &*to_hub)?, dest.black_in(&hub, &*dest_to_hub)?)
+        } else {
+            (0.0, 0.0)
+        };
+        Some(DirectCmyk { one: None, to_hub: Some(to_hub), from_hub: Some(from_hub), black })
+    }
+
+    /// The darkest colour this profile reproduces, as luminance in linear matrix space `hub`
+    /// (reached by `to_hub`): black sent into the profile and read back, as lcms finds an output
+    /// profile's black point. An RGB matrix profile's black is 0.
+    fn black_in(&self, hub: &ColorProfile, to_hub: &TransformF32Executor) -> Option<f32> {
+        if self.kind != ProfileKind::Cmyk {
+            return Some(0.0);
+        }
+        let inks = self.from_srgb([0.0; 3], Intent::RelativeColorimetric)?;
+        let mut lin = [0.0f32; 3];
+        to_hub.transform(&inks, &mut lin).ok()?;
+        let y = |c: &moxcms::Xyzd| c.y as f32;
+        Some((lin[0] * y(&hub.red_colorant) + lin[1] * y(&hub.green_colorant) + lin[2] * y(&hub.blue_colorant)).clamp(0.0, 0.5))
+    }
+
     /// Whether transforms can be built for this profile (checked at registration).
     pub fn usable(&self) -> bool {
         self.to_xf(Intent::RelativeColorimetric).is_some() && self.inverse_xf(Intent::RelativeColorimetric).is_some()
     }
+}
+
+/// ProPhoto RGB with linear tone curves: a matrix space wide enough to hold any print gamut, used
+/// as the hub where black-point compensation remaps luminance.
+fn linear_prophoto() -> ColorProfile {
+    let mut p = ColorProfile::new_pro_photo_rgb();
+    for trc in [&mut p.red_trc, &mut p.green_trc, &mut p.blue_trc] {
+        *trc = Some(ToneReprCurve::Parametric(vec![1.0]));
+    }
+    p.cicp = None;
+    p
 }
 
 /// The primaries and tone curves of built-in RGB space `name`.
