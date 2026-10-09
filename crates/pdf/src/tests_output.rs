@@ -313,3 +313,37 @@ fn pdf_a_tags_cmyk_colours_with_the_cmyk_profile() {
     let r = pdf(&d, json!({"standard": "pdfA2b"}));
     assert!(icc_profiles(&r.bytes).iter().any(|p| p.0 == 4));
 }
+
+#[test]
+fn tagged_rgb_in_a_wide_space_keeps_its_numbers_and_embeds_its_profile() {
+    let wide = cms::WIDE_GAMUT_RGB;
+    let cyan = Color::cmyk(1.0, 0.0, 0.0, 0.0);
+    let mut d = doc(ColorMode::Cmyk, &[cyan]);
+    let img = image_doc(png([200, 40, 30]));
+    d.images.extend(img.images.clone());
+    let NodeKind::Layer { children, .. } = &img.layers[0].kind else { panic!() };
+    let l = d.layers[0].id;
+    d.insert(Some(l), 1, (*children[0]).clone()).unwrap();
+    let set = json!({"output": {"conversion": "destination", "destination": wide, "profiles": "destination", "outputIntent": wide}});
+    let r = pdf(&d, set);
+    // Not squeezed into sRGB: no warning, and the colour is the wide space's own numbers.
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    let dest = Cms::new(&ColorSettings { rgb: wide.into(), ..cms::active_settings() }).unwrap();
+    let Color::Rgb { r: red, g, b } = dest.convert(&cyan, cms::Model::Rgb, cms::active_settings().intent) else { panic!() };
+    let fills = colours(&r.bytes);
+    assert!(fills[0].0 == "scn" && close(&fills[0].1, &q8(&[red, g, b])), "{fills:?} vs {:?}", [red, g, b]);
+    // Its profile tags them (the only RGB one), and the output intent names the same profile.
+    let rgb: Vec<Vec<u8>> = icc_profiles(&r.bytes).into_iter().filter(|p| p.0 == 3).map(|p| p.1).collect();
+    assert_eq!(rgb, vec![cms::icc_bytes(wide).unwrap().to_vec()]);
+    output_intent(&r.bytes, None, |oi| {
+        let profile = oi.get::<Stream<'_>>(b"DestOutputProfile").unwrap();
+        assert_eq!(profile.decoded().unwrap().as_ref(), &*cms::icc_bytes(wide).unwrap());
+    });
+    // The image is converted into the space and tagged with it: read back through its profile,
+    // it shows its colour as it was.
+    let px = first_pixel(&r.bytes);
+    assert!(px.iter().zip([200u8, 40, 30]).all(|(a, b)| a.abs_diff(b) <= 3), "{px:?}");
+    // PDF/A keeps its sRGB output intent: there RGB is still written as sRGB, with the warning.
+    let a = pdf(&d, json!({"standard": "pdfA2b", "output": {"conversion": "destination", "destination": wide}}));
+    assert!(a.warnings.iter().any(|w| w.contains("sRGB")), "{:?}", a.warnings);
+}
