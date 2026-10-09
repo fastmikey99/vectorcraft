@@ -110,4 +110,8 @@ fn black_point_compensation_maps_the_darkest_ink_to_rgb_black() {
     assert!(white.iter().all(|v| *v > 0.99), "{white:?}");
     let abs = |bpc| icc_cmyk(bpc).cmyk_to_rgb(rich, Intent::AbsoluteColorimetric);
     assert_eq!(abs(true), abs(false));
+    // Perceptual tables already map black: compensation leaves them alone (as lcms and
+    // Ghostscript do).
+    let perceptual = |bpc| icc_cmyk(bpc).cmyk_to_rgb(rich, Intent::Perceptual);
+    assert_eq!(perceptual(true), perceptual(false));
 }

@@ -156,11 +156,12 @@ impl IccProfile {
 
     /// Device values (RGB / CMYK / Gray, 0..1) → `dest`'s RGB, converted directly with `intent`:
     /// not through sRGB, so colours outside sRGB keep their place in a wider space. With `bpc`
-    /// (and an intent other than absolute), this profile's black maps onto the destination's
-    /// black (black-point compensation, the darkest ink the profile prints becoming RGB 0 rather
-    /// than a dark grey). `None` when `dest` isn't RGB or no transform can be built.
+    /// and relative colorimetric, this profile's black maps onto the destination's black
+    /// (black-point compensation, the darkest ink the profile prints becoming RGB 0 rather than a
+    /// dark grey). Perceptual tables already map black, so compensation leaves them alone, as
+    /// lcms and Ghostscript do. `None` when `dest` isn't RGB or no transform can be built.
     pub fn to_rgb_of(&self, dest: &IccProfile, v: &[f32], intent: Intent, bpc: bool) -> Option<[f32; 3]> {
-        let t = self.direct_xf(dest, intent, bpc && intent != Intent::AbsoluteColorimetric)?;
+        let t = self.direct_xf(dest, intent, bpc && intent == Intent::RelativeColorimetric)?;
         let mut src = v.to_vec();
         src.resize(self.channels(), 0.0);
         let mut lin = [0.0f32; 3];
