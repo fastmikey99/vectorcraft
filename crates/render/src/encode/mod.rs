@@ -100,11 +100,13 @@ impl RasterExportOptions {
     }
 
     /// Encode a rendered image as `format`. A CMYK JPEG separates the screen colours, and a PSD is
-    /// flat; [`Renderer::export_region`] draws the inks and the layers instead.
+    /// flat; [`Renderer::export_region`] draws the inks and the layers instead. PNGs hold the
+    /// display's sRGB colours and say so (an `sRGB` chunk), so viewers needn't assume it.
     pub fn encode(&self, img: &Rendered, format: RasterFormat) -> Result<Vec<u8>, String> {
         match format {
             RasterFormat::Png => {
                 png::encode(&img.to_straight(), img.width, img.height, &png::PngOptions { ppi: Some(self.ppi), interlaced: self.interlaced })
+                    .map(png::with_srgb)
             }
             RasterFormat::Jpeg => {
                 let px = match self.jpeg.color_model {
@@ -118,7 +120,7 @@ impl RasterExportOptions {
                 let ix = quantize::quantize(&img.to_straight(), img.width, img.height, &self.palette);
                 match format {
                     RasterFormat::Gif => gif::encode(&ix, self.interlaced),
-                    _ => png::encode_indexed(&ix, &png::PngOptions { ppi: Some(self.ppi), interlaced: self.interlaced }),
+                    _ => png::encode_indexed(&ix, &png::PngOptions { ppi: Some(self.ppi), interlaced: self.interlaced }).map(png::with_srgb),
                 }
             }
             RasterFormat::Tiff => tiff::encode(img, self.ppi, &self.tiff),
