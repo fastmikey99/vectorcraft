@@ -282,7 +282,7 @@ impl ColorOut {
                     Model::Cmyk => {
                         let plane = |k: bool| {
                             ProofLut::build(|rgb| {
-                                let v = d.cms.srgb_to_cmyk(rgb, intent);
+                                let v = d.cms.srgb_into_cmyk(rgb, intent).unwrap_or_else(|| d.cms.srgb_to_cmyk(rgb, intent));
                                 if k { [v[3], 0.0, 0.0] } else { [v[0], v[1], v[2]] }
                             })
                         };
@@ -390,9 +390,15 @@ impl Dest {
                 *c
             }
             (Model::Cmyk, _) => {
-                // Through Lab (CMYK of another profile, Lab) or the display colour (RGB).
-                let [c, m, y, k] = match c {
-                    Color::Rgb { .. } => self.cms.srgb_to_cmyk(source.display_rgb(c), intent),
+                // ICC profiles convert straight into the destination; otherwise through Lab (CMYK
+                // of another profile, Lab) or the display colour (RGB).
+                let [c, m, y, k] = match *c {
+                    Color::Rgb { r, g, b } => {
+                        source.rgb_into_cmyk(&self.cms, [r, g, b], intent).unwrap_or_else(|| self.cms.srgb_to_cmyk(source.display_rgb(c), intent))
+                    }
+                    Color::Cmyk { c: cc, m, y, k } => {
+                        source.cmyk_into(&self.cms, [cc, m, y, k], intent).unwrap_or_else(|| self.cms.lab_to_cmyk(source.lab(c), intent))
+                    }
                     _ => self.cms.lab_to_cmyk(source.lab(c), intent),
                 };
                 Color::Cmyk { c, m, y, k }

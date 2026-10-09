@@ -115,3 +115,39 @@ fn black_point_compensation_maps_the_darkest_ink_to_rgb_black() {
     let perceptual = |bpc| icc_cmyk(bpc).cmyk_to_rgb(rich, Intent::Perceptual);
     assert_eq!(perceptual(true), perceptual(false));
 }
+
+#[test]
+fn icc_cmyk_converts_into_another_icc_cmyk_directly() {
+    // The same profile under two names. Where sRGB holds a colour, the direct conversion and a
+    // trip through sRGB agree (both carry the profile's own table round trip, black regenerated);
+    // CMYK cyan, which sRGB can't hold, stays cyan directly and loses about 30% through sRGB.
+    let bytes = icc_bytes(GENERIC_CMYK).unwrap();
+    let a = register_icc(&bytes, Some("Test ICC CMYK A".into())).unwrap().name;
+    let b = register_icc(&bytes, Some("Test ICC CMYK B".into())).unwrap().name;
+    let cms = |cmyk: &str, intent| Cms::new(&ColorSettings { cmyk: cmyk.into(), intent, bpc: false, ..ColorSettings::default() }).unwrap();
+    for intent in [Intent::Perceptual, Intent::RelativeColorimetric] {
+        let (src, dest) = (cms(&a, intent), cms(&b, intent));
+        for inks in [[0.0, 1.0, 1.0, 0.0], [0.2, 0.4, 0.6, 0.1], [0.0, 0.0, 0.0, 0.5]] {
+            let direct = src.cmyk_into(&dest, inks, intent).expect("both ICC");
+            let via = dest.srgb_to_cmyk(src.cmyk_to_srgb(inks, false), intent);
+            assert!(direct.iter().zip(via).all(|(x, y)| (x - y).abs() < 0.03), "{intent:?} {inks:?}: {direct:?} vs {via:?}");
+        }
+        let cyan = [1.0, 0.0, 0.0, 0.0];
+        let direct = src.cmyk_into(&dest, cyan, intent).unwrap();
+        let via = dest.srgb_to_cmyk(src.cmyk_to_srgb(cyan, false), intent);
+        assert!(direct[0] > 0.9 && via[0] < 0.8, "{intent:?}: direct {direct:?}, through sRGB {via:?}");
+    }
+    // Perceptual tables map black themselves: compensation leaves them alone.
+    let p = |bpc| {
+        let s = Cms::new(&ColorSettings { cmyk: a.clone(), intent: Intent::Perceptual, bpc, ..ColorSettings::default() }).unwrap();
+        let d = Cms::new(&ColorSettings { cmyk: b.clone(), intent: Intent::Perceptual, bpc, ..ColorSettings::default() }).unwrap();
+        s.cmyk_into(&d, [0.75, 0.68, 0.67, 0.9], Intent::Perceptual)
+    };
+    assert_eq!(p(true), p(false));
+    // The built-in spaces aren't ICC profiles: no direct route.
+    assert!(Cms::default().cmyk_into(&Cms::default(), [1.0, 0.0, 0.0, 0.0], Intent::Perceptual).is_none());
+    // RGB and display sRGB go straight into ICC CMYK too.
+    let dest = cms(&a, Intent::Perceptual);
+    assert!(dest.rgb_into_cmyk(&dest, [1.0, 0.0, 0.0], Intent::Perceptual).is_some());
+    assert!(dest.srgb_into_cmyk([0.0, 0.0, 1.0], Intent::Perceptual).is_some());
+}
