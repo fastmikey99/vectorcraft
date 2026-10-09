@@ -387,6 +387,34 @@ impl Cms {
             .and_then(|(s, d)| s.to_rgb_of(&d, &cmyk, intent, self.settings.bpc))
             .unwrap_or_else(|| self.srgb_to_rgb(self.cmyk_to_srgb(cmyk, false)))
     }
+    /// The working RGB profile (sRGB built in), for direct conversions.
+    fn rgb_icc(&self) -> Option<Arc<IccProfile>> {
+        match &self.rgb {
+            RgbSpace::Icc(p) => Some(p.clone()),
+            RgbSpace::Srgb => builtin_rgb_cache(SRGB),
+        }
+    }
+    fn cmyk_icc(&self) -> Option<Arc<IccProfile>> {
+        match &self.cmyk {
+            CmykSpace::Icc(p) => Some(p.clone()),
+            CmykSpace::Generic(_) | CmykSpace::Device => None,
+        }
+    }
+    /// CMYK in this working space → the CMYK of `dest`'s, directly from one ICC profile into the
+    /// other (not through sRGB, which clips CMYK colours it can't hold, such as cyan), with the
+    /// settings' black-point compensation. `None` unless both CMYK spaces are ICC profiles.
+    pub fn cmyk_into(&self, dest: &Cms, cmyk: [f32; 4], intent: Intent) -> Option<[f32; 4]> {
+        self.cmyk_icc()?.to_cmyk_of(&*dest.cmyk_icc()?, &cmyk.map(|v| v.clamp(0.0, 1.0)), intent, self.settings.bpc)
+    }
+    /// RGB in this working space → `dest`'s ICC CMYK, directly (see [`Self::cmyk_into`]).
+    pub fn rgb_into_cmyk(&self, dest: &Cms, rgb: [f32; 3], intent: Intent) -> Option<[f32; 4]> {
+        self.rgb_icc()?.to_cmyk_of(&*dest.cmyk_icc()?, &rgb.map(|v| v.clamp(0.0, 1.0)), intent, self.settings.bpc)
+    }
+    /// Display sRGB (an image's pixels) → this working ICC CMYK, directly, with the settings'
+    /// black-point compensation; `None` unless the CMYK space is an ICC profile.
+    pub fn srgb_into_cmyk(&self, srgb: [f32; 3], intent: Intent) -> Option<[f32; 4]> {
+        builtin_rgb_cache(SRGB)?.to_cmyk_of(&*self.cmyk_icc()?, &srgb.map(|v| v.clamp(0.0, 1.0)), intent, self.settings.bpc)
+    }
     /// Display sRGB → working CMYK with `intent`.
     pub fn srgb_to_cmyk(&self, srgb: [f32; 3], intent: Intent) -> [f32; 4] {
         Self::srgb_to_cmyk_in(&self.cmyk, srgb, intent, self.settings.bpc)
