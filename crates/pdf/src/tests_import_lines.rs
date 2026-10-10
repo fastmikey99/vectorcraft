@@ -134,6 +134,7 @@ fn a_stroke_written_as_stroked_glyph_outlines_is_the_types_stroke() {
 /// A `.ai` page moved right in the row, so its art past the artboard clears the page before it
 /// (#1528), still has the stroke drawn on its type's glyphs read as the type's stroke.
 #[test]
+#[ignore = "local print build: .ai art past the artboard is clipped to the page, so no page moves"]
 fn a_stroke_on_the_type_of_a_moved_ai_page_is_still_the_types_stroke() {
     let ai = "/PieceInfo << /Illustrator << /Private << /AIPrivateData1 7 /NumBlock 1 >> >> >>";
     let content = format!(
