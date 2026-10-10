@@ -241,7 +241,7 @@ pub fn import_with_report(bytes: &[u8], opts: &ImportOptions) -> Result<ImportRe
         let shown = xf.transform_rect_bbox(crate::pages::page_box(page, CropTo::Crop));
         let page_box = shown.inflate(0.01, 0.01);
         let mut clipped = false;
-        for (_, art) in parts.iter_mut().filter(|_| !ai) {
+        for (_, art) in parts.iter_mut() {
             for n in art.iter_mut() {
                 if n.visual_bounds().is_some_and(|r| !contains(page_box, r)) {
                     let clip = Arc::new(b.clip_node(&shown.to_path(0.1), FillRule::NonZero));

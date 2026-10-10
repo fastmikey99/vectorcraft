@@ -167,7 +167,8 @@ fn an_ai_file_notes_that_its_art_off_the_artboards_is_not_read() {
 
 fn path_count(d: &Document) -> usize {
     let mut n = 0;
-    d.walk(|c| n += usize::from(matches!(c.kind, NodeKind::Path { .. })));
+    // Local: art past the page keeps a clip to it in .ai files too; count art paths only.
+    d.walk(|c| n += usize::from(matches!(c.kind, NodeKind::Path { clipping: false, .. })));
     n
 }
 
@@ -380,9 +381,10 @@ fn art_past_the_page_is_clipped_in_a_pdf_but_not_in_an_ai_file() {
         let mut clips = 0;
         r.document.walk(|n| clips += usize::from(matches!(n.kind, NodeKind::Group { clip: true, .. })));
         let past = r.warnings.iter().any(|w| w == crate::import::PAST_PAGE_NOTE);
-        assert_eq!((clips, past), if ai { (0, false) } else { (1, true) }, "ai: {ai}: {:?}", r.warnings);
+        // Local (Supacolour print pipeline): .ai files are clipped to the page too.
+        assert_eq!((clips, past), (1, true), "ai: {ai}: {:?}", r.warnings);
         let art = r.document.art_bounds().unwrap();
-        assert_eq!(art.x1 > 100.5, ai, "ai: {ai}: {art:?}");
+        assert!(art.x1 <= 100.5, "ai: {ai}: {art:?}");
     }
 }
 
