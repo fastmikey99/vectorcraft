@@ -1,17 +1,21 @@
 //! The `postMessage` bridge to a same-origin parent page (`?host=parent`), for pages that embed
-//! VectorCraft in an `<iframe>` (such as a Nextcloud app). Messages are plain objects with a `type`:
+//! VectorCraft in an `<iframe>` (such as a Nextcloud app). The protocol is described for host
+//! authors in `docs/web-embed.md`; its rules are in `protocol` (tested natively). Messages are plain
+//! objects with a `type`:
 //!
 //! - `vectorcraft:ready` (to the parent): `{ version }`, the app is listening; send a file now.
 //! - `vectorcraft:open` (from the parent): `{ name, bytes }`, bytes an `ArrayBuffer` or
-//!   `Uint8Array`. It opens like a file picked with File › Open.
+//!   `Uint8Array`. It opens like a file picked with File › Open. Without a `name` or `bytes` it is
+//!   refused with `vectorcraft:failed`.
 //! - `vectorcraft:save` (to the parent): `{ name, bytes }` (a transferred `ArrayBuffer`) for every
 //!   file VectorCraft would otherwise download (`Services::download`): Save, Save As, Save a
 //!   Copy and exports. The parent stores it and reports failures itself.
 //! - `vectorcraft:dirty` (to the parent): `{ dirty }` whenever unsaved changes appear or go away.
-//! - `vectorcraft:failed` (to the parent): `{ error }` when the app couldn't start.
+//! - `vectorcraft:failed` (to the parent): `{ error }`. Before `ready`, the app couldn't start;
+//!   after it, the last `vectorcraft:open` was refused (the app keeps running).
 //!
-//! Only the parent window on the page's own origin is heard or answered. The parent guards leaving
-//! the page with unsaved changes.
+//! Only the parent window on the page's own origin is heard or answered, and a page with an opaque
+//! origin (`null`) has no bridge. The parent guards leaving the page with unsaved changes.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -21,6 +25,8 @@ use vectorcraft_ui_egui::{Services, VectorcraftApp};
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
+
+use crate::protocol;
 
 type Inbox = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
@@ -41,7 +47,7 @@ impl Bridge {
         if js_sys::Object::is(&parent, &window) {
             return None;
         }
-        let origin = window.location().origin().ok()?;
+        let origin = window.location().origin().ok().filter(|o| !protocol::is_opaque(o))?;
         Some(Self { window, parent, origin, reported: Rc::default() })
     }
 
@@ -82,22 +88,26 @@ impl Bridge {
     }
 
     /// Hear files from the parent: they go to the open inbox, which outlives graphics restarts.
-    /// `wake` asks the current runner for a frame.
+    /// `wake` asks the current runner for a frame. A `vectorcraft:open` that can't be opened is
+    /// answered with `vectorcraft:failed`; every other message is ignored (`protocol::accepts`).
     pub fn listen(&self, inbox: Inbox, wake: impl Fn() + 'static) {
-        let parent = self.parent.clone();
-        let origin = self.origin.clone();
+        let bridge = self.clone();
         let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
-            if event.origin() != origin || !event.source().is_some_and(|s| js_sys::Object::is(&s, &parent)) {
-                return;
-            }
+            let from_parent = event.source().is_some_and(|s| js_sys::Object::is(&s, &bridge.parent));
             let data = event.data();
-            if string(&data, "type").as_deref() != Some("vectorcraft:open") {
+            if !protocol::accepts(&bridge.origin, &event.origin(), from_parent, string(&data, "type").as_deref()) {
                 return;
             }
-            let name = string(&data, "name").filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Artwork.svg".to_string());
-            let Some(bytes) = bytes(&data) else { return };
-            inbox.lock().unwrap_or_else(|e| e.into_inner()).push((name, bytes));
-            wake();
+            match protocol::open(string(&data, "name"), bytes(&data)) {
+                Ok(open) => {
+                    inbox.lock().unwrap_or_else(|e| e.into_inner()).push((open.name, open.bytes));
+                    wake();
+                }
+                Err(error) => {
+                    log::warn!("refused a file from the page: {error}");
+                    bridge.post_failed(&error);
+                }
+            }
         });
         if self.window.add_event_listener_with_callback("message", on_message.as_ref().unchecked_ref()).is_ok() {
             // The listener lives as long as the page.
