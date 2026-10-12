@@ -21,7 +21,7 @@ craft-fonts checkout adds the fonts the site serves beside the wasm: Trunk's `po
 
 Any static file server works for `dist/web`, for example `python3 -m http.server 8766` inside that directory. The release `.wasm` is about 17.5 MB, or 7.1 MB gzipped, so serve it with compression.
 
-URL flag: `?webgl` forces the WebGL2 backend.
+URL flags: `?webgl` forces the WebGL2 backend; `?host=parent` lets a same-origin page that frames the app open files in it and store what it saves ([Embedding the web build](web-embed.md)).
 
 How the web shell (`apps/vectorcraft-web/src/web.rs`) differs from desktop:
 
