@@ -13,6 +13,12 @@
 //! - `vectorcraft:export` (from the parent): `{ id, format?, markSaved? }`, the active document
 //!   written as `format` (PDF without it), answered with a `vectorcraft:save` carrying `id`, or a
 //!   `vectorcraft:failed` carrying it when nothing is open or the format can't be written.
+//!   With `selectedOnly`, only the selection: one selected image in a raster format comes as its
+//!   own pixels as embedded, and the `save` carries the selection's `bounds` in document points.
+//! - `vectorcraft:place` (from the parent): `{ id?, name, bytes, at? }`, the file placed in place of
+//!   the one selected object (with nothing selected, at `at`), fitted inside `at` (default: that
+//!   object's bounds), one undo step, selected. Answered with `vectorcraft:placed { id, ids }` or
+//!   `vectorcraft:failed { error, id }`.
 //! - `vectorcraft:dirty` (to the parent): `{ dirty }` whenever unsaved changes appear or go away.
 //! - `vectorcraft:failed` (to the parent): `{ error }`. Before `ready`, the app couldn't start;
 //!   after it, the last `vectorcraft:open` was refused (the app keeps running). With an `id`, the
@@ -48,6 +54,8 @@ pub struct Bridge {
     reported: Rc<Cell<Option<bool>>>,
     /// Exports the parent asked for, run on the next frame (they need the app).
     exports: Rc<RefCell<Vec<(JsValue, protocol::Export)>>>,
+    /// Files the parent asked to place, run on the next frame.
+    places: Rc<RefCell<Vec<(JsValue, protocol::Place)>>>,
     /// The files the parent hands over (`Services::host_inbox`), which outlive graphics restarts.
     inbox: Inbox,
 }
@@ -61,7 +69,7 @@ impl Bridge {
             return None;
         }
         let origin = window.location().origin().ok().filter(|o| !protocol::is_opaque(o))?;
-        Some(Self { window, parent, origin, reported: Rc::default(), exports: Rc::default(), inbox: Inbox::default() })
+        Some(Self { window, parent, origin, reported: Rc::default(), exports: Rc::default(), places: Rc::default(), inbox: Inbox::default() })
     }
 
     /// Send what VectorCraft would download to the parent instead (each time the services are
@@ -72,7 +80,7 @@ impl Bridge {
         services.recovery_store = None;
         let bridge = self.clone();
         services.download = Some(Box::new(move |name: &str, bytes: &[u8]| {
-            if let Err(e) = bridge.post_file(name, bytes, None) {
+            if let Err(e) = bridge.post_file(name, bytes, None, None) {
                 log::error!("couldn't hand {name} to the page: {e}");
             }
         }));
@@ -86,7 +94,7 @@ impl Bridge {
         self.send(&[("type", "vectorcraft:failed".into()), ("error", error.into())]);
     }
 
-    /// The refusal of the `vectorcraft:export` with this `id`.
+    /// The refusal of the `vectorcraft:export` or `vectorcraft:place` with this `id`.
     fn post_export_failed(&self, id: &JsValue, error: &str) {
         log::warn!("refused an export for the page: {error}");
         self.send(&[("type", "vectorcraft:failed".into()), ("error", error.into()), ("id", id.clone())]);
@@ -97,10 +105,20 @@ impl Bridge {
         let asked = std::mem::take(&mut *self.exports.borrow_mut());
         for (id, export) in asked {
             match write_export(app, &export) {
-                Ok((name, bytes)) => {
-                    if let Err(e) = self.post_file(&name, &bytes, Some(&id)) {
+                Ok((name, bytes, bounds)) => {
+                    if let Err(e) = self.post_file(&name, &bytes, Some(&id), bounds) {
                         log::error!("couldn't hand {name} to the page: {e}");
                     }
+                }
+                Err(error) => self.post_export_failed(&id, &error),
+            }
+        }
+        let asked = std::mem::take(&mut *self.places.borrow_mut());
+        for (id, place) in asked {
+            match place_file(app, &place) {
+                Ok(ids) => {
+                    let ids: js_sys::Array = ids.into_iter().map(|i| JsValue::from_f64(i as f64)).collect();
+                    self.send(&[("type", "vectorcraft:placed".into()), ("id", id), ("ids", ids.into())]);
                 }
                 Err(error) => self.post_export_failed(&id, &error),
             }
@@ -116,11 +134,16 @@ impl Bridge {
     }
 
     /// A `vectorcraft:save`; `id` when it answers a `vectorcraft:export`.
-    fn post_file(&self, name: &str, bytes: &[u8], id: Option<&JsValue>) -> Result<(), String> {
+    fn post_file(&self, name: &str, bytes: &[u8], id: Option<&JsValue>, bounds: Option<vectorcraft_geom::Rect>) -> Result<(), String> {
         let buffer = js_sys::Uint8Array::from(bytes).buffer();
         let mut fields = vec![("type", "vectorcraft:save".into()), ("name", name.into()), ("bytes", buffer.clone().into())];
         if let Some(id) = id {
             fields.push(("id", id.clone()));
+        }
+        if let Some(b) = bounds
+            && let Some(o) = message(&[("x", b.x0.into()), ("y", b.y0.into()), ("width", b.width().into()), ("height", b.height().into())])
+        {
+            fields.push(("bounds", o.into()));
         }
         let message = message(&fields).ok_or_else(|| "couldn't build the message".to_string())?;
         self.parent
@@ -143,10 +166,21 @@ impl Bridge {
             }
             if string(&data, "type").as_deref() == Some("vectorcraft:export") {
                 let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
-                let mark_saved = js_sys::Reflect::get(&data, &JsValue::from_str("markSaved")).ok().and_then(|v| v.as_bool());
-                match protocol::export(string(&data, "format"), mark_saved) {
+                let flag = |k: &str| js_sys::Reflect::get(&data, &JsValue::from_str(k)).ok().and_then(|v| v.as_bool());
+                match protocol::export(string(&data, "format"), flag("markSaved"), flag("selectedOnly")) {
                     Ok(export) => {
                         bridge.exports.borrow_mut().push((id, export));
+                        wake();
+                    }
+                    Err(error) => bridge.post_export_failed(&id, &error),
+                }
+                return;
+            }
+            if string(&data, "type").as_deref() == Some("vectorcraft:place") {
+                let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
+                match protocol::place(string(&data, "name"), bytes(&data), rect(&data, "at")) {
+                    Ok(place) => {
+                        bridge.places.borrow_mut().push((id, place));
                         wake();
                     }
                     Err(error) => bridge.post_export_failed(&id, &error),
@@ -201,18 +235,82 @@ fn bytes(data: &JsValue) -> Option<Vec<u8>> {
 }
 
 /// The active document written as `export` asks → its file name and bytes.
-fn write_export(app: &mut VectorcraftApp, export: &protocol::Export) -> Result<(String, Vec<u8>), String> {
+fn write_export(app: &mut VectorcraftApp, export: &protocol::Export) -> Result<(String, Vec<u8>, Option<vectorcraft_geom::Rect>), String> {
     use vectorcraft_engine::cmd::fileio;
     let st = app.session.active().ok_or("vectorcraft:export: no document is open")?;
-    let params = serde_json::Value::Object(Default::default());
-    let doc = fileio::export_source(st, &params).map_err(|e| e.to_string())?;
-    let (bytes, _warnings) = fileio::encode_with_warnings(&doc, export.format, &params).map_err(|e| e.to_string())?;
     let title = st.title();
     let stem = std::path::Path::new(&title).file_stem().map_or_else(|| title.clone(), |s| s.to_string_lossy().to_string());
+    let selected = st.selection.objects.clone();
+    if export.selected_only && selected.is_empty() {
+        return Err("vectorcraft:export: select something to export (selectedOnly)".to_string());
+    }
+    // The selection's bounds in document points (what `vectorcraft:place` takes as `at`).
+    let bounds =
+        export.selected_only.then(|| selected.iter().filter_map(|id| st.doc.node(*id)?.geometric_bounds()).reduce(|a, b| a.union(b))).flatten();
+    // One selected image, asked for as a raster: its own pixels as embedded, not drawn again.
+    let one_image = match selected.as_slice() {
+        [id] if export.selected_only && is_raster(export.format) => {
+            st.doc.node(*id).filter(|n| matches!(n.kind, vectorcraft_doc::NodeKind::Image(_))).map(|_| *id)
+        }
+        _ => None,
+    };
+    if let Some(id) = one_image {
+        let r = app.session.execute("links.unembed", &serde_json::json!({ "id": id.0 })).map_err(|e| e.to_string())?;
+        let name = r.get("name").and_then(serde_json::Value::as_str).unwrap_or("image.png").to_string();
+        let data = r.get("dataBase64").and_then(serde_json::Value::as_str).and_then(vectorcraft_format::base64_decode);
+        return Ok((name, data.ok_or("vectorcraft:export: the image's pixels couldn't be read")?, bounds));
+    }
+    let params = serde_json::json!({ "selectedOnly": export.selected_only });
+    let doc = fileio::export_source(st, &params).map_err(|e| e.to_string())?;
+    let (bytes, _warnings) = fileio::encode_with_warnings(&doc, export.format, &params).map_err(|e| e.to_string())?;
     if export.mark_saved
         && let Some(st) = app.session.active_mut()
     {
         st.mark_saved();
     }
-    Ok((format!("{stem}.{}", export.extension), bytes))
+    Ok((format!("{stem}.{}", export.extension), bytes, bounds))
+}
+
+/// A raster format: an image's own pixels can stand for it.
+fn is_raster(format: &str) -> bool {
+    matches!(format, "png" | "jpeg" | "jpg" | "webp" | "gif" | "tiff" | "bmp")
+}
+
+/// Place `place`'s file in place of the one selected object (with nothing selected, at `at`) →
+/// the ids of what was placed. One undo step (`file.place`).
+fn place_file(app: &mut VectorcraftApp, place: &protocol::Place) -> Result<Vec<u64>, String> {
+    let st = app.session.active().ok_or("vectorcraft:place: no document is open")?;
+    let selected = st.selection.objects.clone();
+    let replace = match selected.as_slice() {
+        [] => false,
+        [_] => true,
+        _ => return Err("vectorcraft:place: select the one object to replace".to_string()),
+    };
+    let at = match (place.at, selected.first()) {
+        (Some([x, y, w, h]), _) => [x, y, w, h],
+        (None, Some(id)) => {
+            let b = st.doc.node(*id).and_then(vectorcraft_doc::Node::geometric_bounds).ok_or("vectorcraft:place: the selected object has no size")?;
+            [b.x0, b.y0, b.width(), b.height()]
+        }
+        (None, None) => return Err("vectorcraft:place: select the object to replace, or give `at`".to_string()),
+    };
+    let params = serde_json::json!({
+        "name": place.name,
+        "dataBase64": vectorcraft_format::base64_encode(&place.bytes),
+        "replace": replace,
+        "rect": at,
+        // The file's own frame (an SVG's viewBox, a PDF's page) is what fits `at`, not its art's
+        // bounds: a traced image whose art stops short of its edges keeps its size and place.
+        "crop": "crop",
+    });
+    let r = app.run("file.place", params)?;
+    Ok(r.get("ids").and_then(serde_json::Value::as_array).map(|ids| ids.iter().filter_map(serde_json::Value::as_u64).collect()).unwrap_or_default())
+}
+
+/// `{x, y, width, height}` under `key`, as four numbers (a value of another shape gives four that
+/// fail the check, so it is refused rather than ignored).
+fn rect(data: &JsValue, key: &str) -> Option<Vec<f64>> {
+    let v = js_sys::Reflect::get(data, &JsValue::from_str(key)).ok().filter(|v| !v.is_undefined() && !v.is_null())?;
+    let n = |k: &str| js_sys::Reflect::get(&v, &JsValue::from_str(k)).ok().and_then(|x| x.as_f64()).unwrap_or(f64::NAN);
+    Some(vec![n("x"), n("y"), n("width"), n("height")])
 }

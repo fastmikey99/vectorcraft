@@ -37,8 +37,10 @@ Every message is a plain object with a string `type`. VectorCraft posts only to 
 |---|---|---|---|
 | `vectorcraft:ready` | to the parent | `version` (string), `singleDocument` (`true`) | The app is running and listening. Send the file now. |
 | `vectorcraft:open` | from the parent | `name` (string), `bytes` (`ArrayBuffer` or `Uint8Array`) | Open this file, as if it were picked with File › Open. |
-| `vectorcraft:export` | from the parent | `id` (any), `format` (string, optional), `markSaved` (boolean, optional) | Write the active document as `format` (PDF without it) and send it back. |
-| `vectorcraft:save` | to the parent | `name` (string), `bytes` (`ArrayBuffer`, transferred), `id` (when it answers an export) | Store this file. |
+| `vectorcraft:export` | from the parent | `id` (any), `format` (string, optional), `markSaved` (boolean, optional), `selectedOnly` (boolean, optional) | Write the active document (or only the selection) as `format` (PDF without it) and send it back. |
+| `vectorcraft:place` | from the parent | `id` (any), `name` (string), `bytes` (`ArrayBuffer` or `Uint8Array`), `at` (`{x, y, width, height}`, optional) | Put this file in place of the selected object, fitted inside `at`. |
+| `vectorcraft:placed` | to the parent | `id`, `ids` (numbers) | The place with this `id` is done. |
+| `vectorcraft:save` | to the parent | `name` (string), `bytes` (`ArrayBuffer`, transferred), `id` (when it answers an export), `bounds` (with `selectedOnly`) | Store this file. |
 | `vectorcraft:dirty` | to the parent | `dirty` (boolean) | Unsaved changes appeared (`true`) or went away (`false`). |
 | `vectorcraft:failed` | to the parent | `error` (string), `id` (when it answers an export) | Before `ready`: the app couldn't start. After `ready`: the last `vectorcraft:open` was refused, or with an `id` that export was; the app keeps running. |
 
@@ -59,6 +61,15 @@ Every message is a plain object with a string `type`. VectorCraft posts only to 
 - The answer is a `vectorcraft:save` carrying the request's `id` (pass a number or string to match answers to requests), named after the document with the format's extension.
 - With `markSaved: true` the document counts as saved once written (the page is storing it as the saved file), and `dirty: false` follows. Otherwise exporting leaves the unsaved state as it was, as File › Export does.
 - With no document open, or a format the app doesn't write, the answer is `vectorcraft:failed` with the `error` and the same `id`.
+- With `selectedOnly: true`, only the selection is written, and the `save` carries its `bounds` (`{x, y, width, height}` in document points). One selected image asked for in a raster format (`png`, `jpeg`…) comes as its own pixels, as they are embedded (PNG, JPEG, GIF or WebP as stored, others as PNG), not drawn again at screen resolution: what a tracing or upscaling service needs. `markSaved` can't go with it (a part isn't the document), and with nothing selected the answer is `vectorcraft:failed`.
+
+**`vectorcraft:place`** puts a file into the open document, never opening it as a document of its own, so it works in host mode:
+
+- With one object selected, the file takes that object's place in the stacking order and is fitted inside `at` (default: that object's bounds), aspect kept. With nothing selected it is placed fitted inside `at`, which is then required. Several selected objects are refused.
+- It is one undo step: Undo brings back what it replaced. What it placed is selected.
+- The answer is `vectorcraft:placed` with the same `id` and the placed objects' `ids`, or `vectorcraft:failed` with the `error` and the `id`.
+
+Together they make a "trace this image" button: export the selected image with `selectedOnly`, send the pixels to a tracing service, and place its SVG back with `at` set to the `bounds` that came with the image.
 
 **`vectorcraft:dirty`** is sent after the first frame and then whenever the answer changes, so the first one is usually `dirty: false`. `true` means at least one open document has unsaved changes.
 
@@ -68,7 +79,7 @@ The bridge reads a message only when all of these hold:
 
 1. it comes from `window.parent` (`event.source`), not from another window or frame on the site;
 2. its origin (`event.origin`) is exactly the page's own: same scheme, host and port;
-3. its `type` is `vectorcraft:open` or `vectorcraft:export`.
+3. its `type` is `vectorcraft:open`, `vectorcraft:export` or `vectorcraft:place`.
 
 Anything else is ignored without a reply, so a page on another origin can neither open files in VectorCraft nor learn that it is there. Saves and other replies go only to `window.parent`, with the page's own origin as the target, so the browser delivers them to no other site. A same-origin parent can already script the frame directly, so the bridge gives it nothing it couldn't otherwise do; it only spares it reaching into the app's internals.
 

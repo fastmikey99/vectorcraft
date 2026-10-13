@@ -18,6 +18,8 @@ vectorcraft-engine = { workspace = true }
 vectorcraft-ui-egui = { workspace = true }
 vectorcraft-format = { workspace = true }
 vectorcraft-text = { workspace = true }
+vectorcraft-doc = { workspace = true }
+vectorcraft-geom = { workspace = true }
 egui = { workspace = true }
 log = { workspace = true }
 serde_json = { workspace = true }
