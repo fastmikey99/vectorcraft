@@ -23,6 +23,13 @@ Any static file server works for `dist/web`, for example `python3 -m http.server
 
 URL flag: `?webgl` forces the WebGL2 backend.
 
+**Embedding in another site** (`?embed=<origin>`, `apps/vectorcraft-web/src/embed.rs`): a page loads the editor in an `<iframe>` with `?embed=` set to its own origin (URL-encoded, e.g. `?embed=https%3A%2F%2Fexample.com`). The editor then takes `postMessage` messages only from its parent at that origin, and sends only to it:
+
+- to the editor: `{type: "vectorcraft:open", name, bytes}` opens a file as File › Open does; `{type: "vectorcraft:export", id?, format?, params?, markSaved?}` writes the active document (`format` defaults to `pdf`; `params` are that format's `document.export` options; `markSaved` records it as saved).
+- from the editor: `vectorcraft:ready` `{version}` once it runs; `vectorcraft:dirty` `{dirty}` when the active document's unsaved changes change; `vectorcraft:exported` `{id, name, format, bytes, dirty, warnings}` or `vectorcraft:error` `{id, message}` for an export; `vectorcraft:download` `{name, bytes}` for File › Save, Save As and Export, which would otherwise download.
+
+`bytes` are transferred `ArrayBuffer`s. Outside a frame, or with a value that isn't an origin, `?embed` is ignored.
+
 How the web shell (`apps/vectorcraft-web/src/web.rs`) differs from desktop:
 
 - **Open** sets `Services::open_async`, which shows `rfd::AsyncFileDialog`. The bytes arrive in `Services::inbox`, which the app drains every frame.

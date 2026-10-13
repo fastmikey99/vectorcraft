@@ -16,9 +16,10 @@ use vectorcraft_ui_egui::print::{PrintJob, PrintService, Printer};
 use vectorcraft_ui_egui::{Services, VectorcraftApp};
 use wasm_bindgen::JsCast as _;
 
+use crate::embed::Embed;
 use crate::locks::WebLocks;
 
-type Inbox = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+pub(crate) type Inbox = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
 /// Where the pointer was over the canvas during the last file drag (CSS px from its top-left) and
 /// whether Shift was held: where dropped files land.
@@ -52,6 +53,8 @@ struct Host {
     locks: Option<WebLocks>,
     /// Graphics restarts so far.
     restarts: u32,
+    /// The page the editor is embedded in (`?embed=<origin>`), if any.
+    embed: Option<Rc<Embed>>,
 }
 
 pub fn start() {
@@ -67,14 +70,17 @@ pub fn start() {
         // Fallback fonts the first frame needs (Noto Sans Arabic), fetched while the loading text
         // shows; the rest load in the background once the app runs.
         crate::fonts::load_startup_fonts().await;
+        let inbox: Inbox = Arc::default();
+        let embed = Embed::start(inbox.clone());
         let host = Host {
             runner: eframe::WebRunner::new(),
-            inbox: Arc::default(),
+            inbox,
             place_inbox: Arc::default(),
             drag: DragPos::default(),
             pasted: Rc::default(),
             locks,
             restarts: 0,
+            embed,
         };
         track_paste(&host.pasted);
         run(host, canvas, None).await;
@@ -111,7 +117,10 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
                     rs.device.set_device_lost_callback(move |reason, msg| loss.report(&ctx, format!("{reason:?}: {msg}")));
                 }
                 host.pasted.borrow_mut().ctx = Some(ctx.clone());
-                let services = services(host.inbox.clone(), host.place_inbox.clone(), ctx.clone(), host.locks.clone());
+                if let Some(embed) = &host.embed {
+                    embed.attach(ctx);
+                }
+                let services = services(host.inbox.clone(), host.place_inbox.clone(), ctx.clone(), host.locks.clone(), host.embed.clone());
                 let app = match taken.borrow_mut().take() {
                     Some(mut app) => {
                         // The old services asked the old context for frames.
@@ -166,7 +175,7 @@ fn detect_language() {
 }
 
 /// The value of `name=` in the address's query, if given.
-fn query_param(name: &str) -> Option<String> {
+pub(crate) fn query_param(name: &str) -> Option<String> {
     let query = query();
     query.trim_start_matches('?').split('&').find_map(|kv| kv.strip_prefix(name)?.strip_prefix('=').map(str::to_string)).filter(|v| !v.is_empty())
 }
@@ -378,6 +387,9 @@ impl eframe::App for WebShell {
             }
         }
         app.logic(ctx);
+        if let Some(embed) = &self.host.embed {
+            embed.frame(app);
+        }
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
@@ -393,7 +405,7 @@ impl eframe::App for WebShell {
     }
 }
 
-fn services(inbox: Inbox, place_inbox: PlaceInbox, ctx: egui::Context, locks: Option<WebLocks>) -> Services {
+fn services(inbox: Inbox, place_inbox: PlaceInbox, ctx: egui::Context, locks: Option<WebLocks>, embed: Option<Rc<Embed>>) -> Services {
     let open_inbox = inbox.clone();
     let picked = place_inbox.clone();
     let place_ctx = ctx.clone();
@@ -434,9 +446,13 @@ fn services(inbox: Inbox, place_inbox: PlaceInbox, ctx: egui::Context, locks: Op
                 ctx.request_repaint();
             });
         })),
-        download: Some(Box::new(|name: &str, bytes: &[u8]| {
-            if let Err(e) = download(name, bytes) {
-                log::error!("download of {name} failed: {e}");
+        // Embedded, the file goes to the embedding page instead.
+        download: Some(Box::new(move |name: &str, bytes: &[u8]| match &embed {
+            Some(embed) => embed.download(&fileio::file_name(name), bytes),
+            None => {
+                if let Err(e) = download(name, bytes) {
+                    log::error!("download of {name} failed: {e}");
+                }
             }
         })),
         inbox: Some(inbox),
