@@ -35,8 +35,8 @@ pub struct Export {
 }
 
 /// What a `vectorcraft:place` delivers: a file placed into the open document in place of the one
-/// selected object (or, with nothing selected, at `at`), fitted inside `at` (default: the selected
-/// object's bounds), aspect kept.
+/// selected object (or, with nothing selected, at `at`): fitted inside `at` when given, else onto the
+/// selected object's own frame through its transform (an image's pixel area), aspect kept.
 #[derive(Debug, PartialEq)]
 pub struct Place {
     pub name: String,

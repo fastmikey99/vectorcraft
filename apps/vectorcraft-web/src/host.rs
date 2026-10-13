@@ -16,8 +16,9 @@
 //!   With `selectedOnly`, only the selection: one selected image in a raster format comes as its
 //!   own pixels as embedded, and the `save` carries the selection's `bounds` in document points.
 //! - `vectorcraft:place` (from the parent): `{ id?, name, bytes, at? }`, the file placed in place of
-//!   the one selected object (with nothing selected, at `at`), fitted inside `at` (default: that
-//!   object's bounds), one undo step, selected. Answered with `vectorcraft:placed { id, ids }` or
+//!   the one selected object (with nothing selected, at `at`): fitted inside `at` when given, else
+//!   onto that object's own frame through its transform (an image's pixels, rotated or mirrored as
+//!   they are), one undo step, selected. Answered with `vectorcraft:placed { id, ids }` or
 //!   `vectorcraft:failed { error, id }`.
 //! - `vectorcraft:prefs` (both ways): `{ prefs }`, the preferences and workspace as JSON text. The
 //!   editor sends them when they change (the page stores them for the person signed in); the page
@@ -324,23 +325,26 @@ fn place_file(app: &mut VectorcraftApp, place: &protocol::Place) -> Result<Vec<u
         [_] => true,
         _ => return Err("vectorcraft:place: select the one object to replace".to_string()),
     };
-    let at = match (place.at, selected.first()) {
-        (Some([x, y, w, h]), _) => [x, y, w, h],
-        (None, Some(id)) => {
-            let b = st.doc.node(*id).and_then(vectorcraft_doc::Node::geometric_bounds).ok_or("vectorcraft:place: the selected object has no size")?;
-            [b.x0, b.y0, b.width(), b.height()]
-        }
-        (None, None) => return Err("vectorcraft:place: select the object to replace, or give `at`".to_string()),
-    };
-    let params = serde_json::json!({
+    let mut params = serde_json::json!({
         "name": place.name,
         "dataBase64": vectorcraft_format::base64_encode(&place.bytes),
         "replace": replace,
-        "rect": at,
-        // The file's own frame (an SVG's viewBox, a PDF's page) is what fits `at`, not its art's
+        // The file's own frame (an SVG's viewBox, a PDF's page) is what fits, not its art's
         // bounds: a traced image whose art stops short of its edges keeps its size and place.
         "crop": "crop",
     });
+    let Some(o) = params.as_object_mut() else { return Err("vectorcraft:place: couldn't build the command".to_string()) };
+    match (place.at, replace) {
+        (Some(at), _) => {
+            o.insert("rect".into(), serde_json::json!(at));
+        }
+        // No rect: the selected object's own frame, through its transform (an image rotated,
+        // mirrored or scaled keeps it, and art traced from its pixels lies where they did).
+        (None, true) => {
+            o.insert("fitReplaced".into(), true.into());
+        }
+        (None, false) => return Err("vectorcraft:place: select the object to replace, or give `at`".to_string()),
+    }
     let r = app.run("file.place", params)?;
     Ok(r.get("ids").and_then(serde_json::Value::as_array).map(|ids| ids.iter().filter_map(serde_json::Value::as_u64).collect()).unwrap_or_default())
 }

@@ -67,11 +67,11 @@ Every message is a plain object with a string `type`. VectorCraft posts only to 
 
 **`vectorcraft:place`** puts a file into the open document, never opening it as a document of its own, so it works in host mode:
 
-- With one object selected, the file takes that object's place in the stacking order and is fitted inside `at` (default: that object's bounds), aspect kept. With nothing selected it is placed fitted inside `at`, which is then required. Several selected objects are refused.
+- With one object selected, the file takes that object's place in the stacking order. Without `at` it is fitted onto that object's own frame through its transform: for an image, the file's frame (an SVG's viewBox) goes onto the image's pixel area, rotated, mirrored, scaled or skewed as the image is, so a tracing of the image lies exactly where its pixels did. With `at` it is fitted inside that rect instead (upright). Aspect is kept either way. With nothing selected it is placed fitted inside `at`, which is then required. Several selected objects are refused.
 - It is one undo step: Undo brings back what it replaced. What it placed is selected.
 - The answer is `vectorcraft:placed` with the same `id` and the placed objects' `ids`, or `vectorcraft:failed` with the `error` and the `id`.
 
-Together they make a "trace this image" button: export the selected image with `selectedOnly`, send the pixels to a tracing service, and place its SVG back with `at` set to the `bounds` that came with the image.
+Together they make a "trace this image" button: export the selected image with `selectedOnly`, send the pixels to a tracing service, and place its SVG back (with no `at`) while the image is still selected.
 
 **`vectorcraft:prefs`** lets the page keep the editor's preferences and workspace (units, the panel layout, workspaces, recent fonts…) for each person rather than each browser:
 
