@@ -33,7 +33,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use vectorcraft_color::Paint;
-use vectorcraft_doc::{Appearance, Document, ImageObject, LinkInfo, Node, NodeId, NodeKind, Scaling};
+use vectorcraft_doc::{Appearance, AppearanceItem, Document, ImageObject, LinkInfo, Node, NodeId, NodeKind, Scaling};
 use vectorcraft_geom::{Affine, Point, Rect, shapes};
 use vectorcraft_pdf::CropTo;
 
@@ -57,7 +57,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Place…",
             ["File"],
             Some("Cmd+Shift+P"),
-            "{path | name | dataBase64 (a file's path, or its name with its bytes), link?: true (a raster image keeps its file's path; a VectorCraft document at path becomes one locked placed document showing artboard `page`, linked to the file and read again when it changes (links.update; saving it in this app updates it at once), drawn as vectors in every output; false: an editable copy of its art, as from dataBase64; other files are embedded), text?: {characterSet?: \"unicode\" (UTF-8, or UTF-16 with a byte-order mark; other bytes as the platform's 8-bit set) | \"ansi\" (the platform's 8-bit set), platform?: \"windows\" (Windows-1252) | \"mac\" (Mac Roman), removeLineReturns?: false (each block of lines becomes one paragraph; blank lines end paragraphs), removeParagraphReturns?: false (drop blank lines), replaceSpaces?: n (runs of n ≥ 2 spaces become a tab)} (a .txt file, placed as area type filling rect, the replaced object's bounds, or else the artboard less a 36 pt margin), template?: false (onto a new locked template layer below the current layer), replace?: false (swap the one selected object, keeping its stacking place, and its transform unless rect is given; no at), fitReplaced?: false (with replace: fitted inside the replaced object's own frame, aspect kept: an image's pixel area through its transform, rotated, mirrored, scaled or skewed as it is, else its bounds; no rect), at?: [x, y] centre (default: the first artboard's centre), rect?: [x, y, width, height] fit inside; aspect kept (wins over at), page?: 1 (PDF/.ai page, or a native document's artboard), crop?: \"crop\" (clipped to that page or artboard, default; an SVG, only when given: framed and clipped by its viewBox, else by its art's bounds) | \"bounding\" (the art's bounds) | \"art\" | \"trim\" | \"bleed\" | \"media\" (a PDF page's boxes), password? (an encrypted PDF), dxf?: {…the DXF options of document.open} (a .dxf drawing: fit fills the artboard under at, else the first; fitted or uncentred art lands with its drawing's artboard on that artboard, else it is centred on at)} → {ids, name, format, linked, width, height, warnings}. Raster images come in at 100% of their physical size (the file's ppi, else 72); SVG, DXF, PDF/.ai, EMF/WMF (clipped to the picture's frame), EPS (clipped to its bounding box; as document.open reads it) and native documents as one group, with the images, symbols, patterns and swatches they use. One undo step; selects what it placed (unless on a template layer); never touches the clipboard",
+            "{path | name | dataBase64 (a file's path, or its name with its bytes), link?: true (a raster image keeps its file's path; a VectorCraft document at path becomes one locked placed document showing artboard `page`, linked to the file and read again when it changes (links.update; saving it in this app updates it at once), drawn as vectors in every output; false: an editable copy of its art, as from dataBase64; other files are embedded), text?: {characterSet?: \"unicode\" (UTF-8, or UTF-16 with a byte-order mark; other bytes as the platform's 8-bit set) | \"ansi\" (the platform's 8-bit set), platform?: \"windows\" (Windows-1252) | \"mac\" (Mac Roman), removeLineReturns?: false (each block of lines becomes one paragraph; blank lines end paragraphs), removeParagraphReturns?: false (drop blank lines), replaceSpaces?: n (runs of n ≥ 2 spaces become a tab)} (a .txt file, placed as area type filling rect, the replaced object's bounds, or else the artboard less a 36 pt margin), template?: false (onto a new locked template layer below the current layer), replace?: false (swap the one selected object, keeping its stacking place, its opacity, blending mode, isolation, knockout, opacity mask and effects, and its transform unless rect is given; an image with fills or strokes of its own is refused, as the art can't take them over; no at), fitReplaced?: false (with replace: fitted inside the replaced object's own frame, aspect kept: an image's pixel area through its transform, rotated, mirrored, scaled or skewed as it is, else its bounds; no rect), at?: [x, y] centre (default: the first artboard's centre), rect?: [x, y, width, height] fit inside; aspect kept (wins over at), page?: 1 (PDF/.ai page, or a native document's artboard), crop?: \"crop\" (clipped to that page or artboard, default; an SVG, only when given: framed and clipped by its viewBox, else by its art's bounds) | \"bounding\" (the art's bounds) | \"art\" | \"trim\" | \"bleed\" | \"media\" (a PDF page's boxes), password? (an encrypted PDF), dxf?: {…the DXF options of document.open} (a .dxf drawing: fit fills the artboard under at, else the first; fitted or uncentred art lands with its drawing's artboard on that artboard, else it is centred on at)} → {ids, name, format, linked, width, height, warnings}. Raster images come in at 100% of their physical size (the file's ppi, else 72); SVG, DXF, PDF/.ai, EMF/WMF (clipped to the picture's frame), EPS (clipped to its bounding box; as document.open reads it) and native documents as one group, with the images, symbols, patterns and swatches they use. One undo step; selects what it placed (unless on a template layer); never touches the clipboard",
             has_doc,
             place
         ),
@@ -347,6 +347,52 @@ fn replace_xf(d: &Document, old: &Node, natural: Rect, image_xf: bool) -> Affine
     Affine::translate(c - natural.center())
 }
 
+/// How a replaced object composites (its transparency, opacity mask and effects), for what replaces
+/// it.
+struct Look {
+    opacity: f32,
+    blend: vectorcraft_color::BlendMode,
+    isolate: bool,
+    knockout: vectorcraft_doc::Knockout,
+    knockout_shape: bool,
+    mask: Option<Box<vectorcraft_doc::OpacityMask>>,
+    effects: Vec<vectorcraft_doc::Effect>,
+}
+
+impl Look {
+    fn of(n: &Node) -> Self {
+        Look {
+            opacity: n.opacity,
+            blend: n.blend,
+            isolate: n.isolate,
+            knockout: n.knockout,
+            knockout_shape: n.knockout_shape,
+            mask: n.extras().mask.clone(),
+            effects: n.appearance.effects.clone(),
+        }
+    }
+
+    /// Put it on `n` (the placed art). Effects go on only where `n` has none of its own to mix them
+    /// with.
+    fn put_on(self, n: &mut Node) -> Result<()> {
+        n.opacity = self.opacity;
+        n.blend = self.blend;
+        n.isolate = self.isolate;
+        n.knockout = self.knockout;
+        n.knockout_shape = self.knockout_shape;
+        n.extras_mut().mask = self.mask;
+        if !self.effects.is_empty() {
+            if !n.appearance.effects.is_empty() {
+                return Err(bad(PLACE, "replace can't keep the replaced object's effects: the placed art has effects of its own"));
+            }
+            let mut ap = (*n.appearance).clone();
+            ap.effects = self.effects;
+            n.appearance = ap.into();
+        }
+        Ok(())
+    }
+}
+
 /// `natural` fitted inside `old`'s own frame (aspect kept, centred): an image's pixel area carried
 /// by the image's transform, so art traced from its pixels lies where they did whatever the image's
 /// rotation, mirroring, scale or skew; anything else's bounds.
@@ -416,13 +462,32 @@ fn place(s: &mut Session, p: &Value) -> Result<Value> {
             Affine::translate(c - natural.center())
         }
     };
+    // What the replaced object looks like beyond its geometry, kept on what replaces it.
+    let look = match old_node {
+        // An image's own fills and strokes (rare) can't go onto art; a shape's are its content,
+        // which what replaces it doesn't take. Ones that paint nothing don't count.
+        Some(o)
+            if matches!(o.kind, NodeKind::Image(_))
+                && o.appearance.items.iter().any(|i| match i {
+                    AppearanceItem::Fill(f) => !f.paint.is_none(),
+                    AppearanceItem::Stroke(st) => !st.paint.is_none(),
+                }) =>
+        {
+            return Err(bad(PLACE, "replace can't keep the replaced image's own fills and strokes on the placed art"));
+        }
+        Some(o) => Some(Look::of(o)),
+        None => None,
+    };
     let parent = st.insertion_parent();
     let below = st.current_layer().or_else(|| parent.and_then(|p| st.doc.layer_of(p)));
     let link = loaded.link.take().filter(|_| bool_or(p, "link", true));
     let linked = link.is_some();
     let (name, format, warnings) = (loaded.name.clone(), loaded.format.id, std::mem::take(&mut loaded.warnings));
     let (id, size) = s.edit("Place", |d, sel| {
-        let node = transformed(build(d, loaded, link), m);
+        let mut node = transformed(build(d, loaded, link), m);
+        if let Some(look) = look {
+            look.put_on(&mut node)?;
+        }
         let size = node.geometric_bounds().unwrap_or_default();
         let (into, index) = match old {
             Some(old) => {

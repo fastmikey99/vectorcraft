@@ -246,6 +246,44 @@ fn fit_replaced_maps_the_art_onto_a_transformed_images_pixels() {
     assert_eq!(top_children(&s)[0].id.0, first.as_u64().unwrap(), "one undo step brings the image back");
 }
 
+/// Replace keeps how the replaced object composites: an image at 50% in Multiply with a mask stays
+/// that way once its traced art takes its place. An object with fills or strokes of its own can't
+/// hand them to the art, so it is refused rather than losing them.
+#[test]
+fn replace_keeps_the_replaced_objects_transparency_mask_and_effects() {
+    let mut s = session();
+    let first = place(&mut s, "a.png", &png(100, 50, [255, 0, 0, 255], None), json!({"at": [150, 150]}))["ids"][0].clone();
+    s.execute("transparency.set", &json!({"ids": [first], "opacity": 50, "blend": "multiply", "isolate": true, "knockout": "on"})).unwrap();
+    // A rectangle above it becomes its opacity mask.
+    let b = node(&s, &first).geometric_bounds().unwrap();
+    let mask = s.execute("shape.rectangle", &json!({"x": b.x0, "y": b.y0, "width": 30, "height": 30})).unwrap();
+    let mask_id = mask.get("id").or_else(|| mask.get("ids").and_then(|v| v.get(0))).cloned().unwrap();
+    s.execute("transparency.makeOpacityMask", &json!({"ids": [first, mask_id]})).unwrap();
+    s.execute("select.set", &json!({"ids": [first]})).unwrap();
+    let before = node(&s, &first).clone();
+    assert!(before.extras().mask.is_some(), "the image has a mask");
+    let svg =
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50" viewBox="0 0 100 50"><rect width="100" height="50" fill="lime"/></svg>"#;
+    let r = place(&mut s, "traced.svg", svg, json!({"replace": true, "fitReplaced": true, "crop": "crop"}));
+    let after = node(&s, &r["ids"][0]);
+    assert_eq!(
+        (after.opacity, after.blend, after.isolate, after.knockout, after.knockout_shape),
+        (before.opacity, before.blend, before.isolate, before.knockout, before.knockout_shape)
+    );
+    assert!(close(f64::from(after.opacity), 0.5), "{}", after.opacity);
+    assert_eq!(after.extras().mask.as_ref().map(|m| m.art.id), before.extras().mask.as_ref().map(|m| m.art.id), "the mask goes with it");
+    s.execute("edit.undo", &json!({})).unwrap();
+    // An image with a stroke of its own can't hand it on: refused, nothing changed.
+    s.execute("select.set", &json!({"ids": [first]})).unwrap();
+    let mut doc = (*s.doc().unwrap().doc).clone();
+    let id = vectorcraft_doc::NodeId(first.as_u64().unwrap());
+    let n = doc.node_mut(id).unwrap();
+    n.appearance = vectorcraft_doc::Appearance::basic(Paint::None, Paint::solid(vectorcraft_color::Color::rgb(0.0, 0.0, 1.0)), 2.0).into();
+    s.doc_mut().unwrap().doc = Arc::new(doc);
+    let e = s.execute("file.place", &json!({"replace": true, "name": "t.svg", "dataBase64": vectorcraft_format::base64_encode(svg)})).unwrap_err();
+    assert!(e.to_string().contains("fills and strokes"), "{e}");
+}
+
 #[test]
 fn replace_needs_exactly_one_selected_object() {
     let mut s = session();
