@@ -42,7 +42,7 @@ pub fn app_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
                 ui.add_space(6.0);
             }
             let on_home = menus::home_showing(app);
-            if widgets::icon_button(ui, "house", tl!("Home"), on_home, 20.0).clicked() {
+            if !app.services.single_document && widgets::icon_button(ui, "house", tl!("Home"), on_home, 20.0).clicked() {
                 app.run("app.home", json!({})).ok();
             }
             ui.add_space(2.0);
@@ -410,11 +410,16 @@ pub fn doc_tabs(app: &mut VectorcraftApp, ui: &mut Ui) {
         // The × where each platform puts a tab's: before the title on macOS, after it elsewhere
         // (#673).
         let (x_center, title_left) = if CLOSE_BEFORE_TITLE { (r.left() + 16.0, r.left() + 32.0) } else { (r.right() - 16.0, r.left() + 14.0) };
-        let xr = egui::Rect::from_center_size(egui::pos2(x_center, r.center().y), vec2(12.0, 12.0));
-        let xresp = ui.interact(xr.expand(3.0), ui.id().with(("tabx", i)), Sense::click());
-        icons::paint(ui, "x", xr, if xresp.hovered() { t.text_strong } else { t.text });
+        // A single-document editor has no × (its one document isn't closed).
+        let mut x_clicked = false;
+        if !app.services.single_document {
+            let xr = egui::Rect::from_center_size(egui::pos2(x_center, r.center().y), vec2(12.0, 12.0));
+            let xresp = ui.interact(xr.expand(3.0), ui.id().with(("tabx", i)), Sense::click());
+            icons::paint(ui, "x", xr, if xresp.hovered() { t.text_strong } else { t.text });
+            x_clicked = xresp.clicked();
+        }
         ui.painter().galley(egui::pos2(title_left, r.center().y - galley.size().y / 2.0), galley.clone(), t.text);
-        if xresp.clicked() {
+        if x_clicked {
             close = Some(i);
         } else if resp.clicked() {
             activate = Some(i);

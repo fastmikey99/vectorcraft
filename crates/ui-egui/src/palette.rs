@@ -80,7 +80,13 @@ pub fn show(app: &mut VectorcraftApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
     let q = app.ui.palette_query.to_lowercase();
     let entries = entries(ctx, crate::i18n::current());
-    let matches: Vec<&Entry> = entries.iter().filter(|e| q.split_whitespace().all(|w| e.haystack.contains(w))).take(14).collect();
+    let single = app.services.single_document;
+    let matches: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| !(single && menus::blocked_in_single_document(&e.id)))
+        .filter(|e| q.split_whitespace().all(|w| e.haystack.contains(w)))
+        .take(14)
+        .collect();
     let mut run: Option<String> = None;
     egui::Area::new(egui::Id::new("palette")).order(egui::Order::Foreground).anchor(egui::Align2::CENTER_TOP, [0.0, 90.0]).show(ctx, |ui| {
         egui::Frame::popup(ui.style()).fill(t.panel).inner_margin(egui::Margin::same(10)).show(ui, |ui| {

@@ -17,13 +17,25 @@ What changes in host mode:
 - Everything VectorCraft would download goes to the parent as `vectorcraft:save` instead: Save, Save As, Save a Copy and the exports. There is still no save panel, so the parent decides where each file goes.
 - The parent is told when unsaved changes appear or go away (`vectorcraft:dirty`). VectorCraft doesn't ask before the page is left; guarding that is the parent's job.
 
+## One document
+
+In host mode the editor works on the file the page hands over, and only that:
+
+- Nothing creates, opens or closes a document: File › New, New from Template, Open, Open Recent and Close are gone, as are the Home screen and its buttons. The command palette and shortcuts don't run them either.
+- A file the person drops or picks opens only when it isn't a document (a swatch or graphic style library, presets, a plug-in). A document is turned away with a note in the status bar.
+- Each `vectorcraft:open` takes the open document's place. It doesn't ask to save the one it replaces: the page knows from `vectorcraft:dirty` whether it has unsaved changes and decides.
+- Data Recovery is off, since restoring copies would add documents.
+- `vectorcraft:ready` carries `singleDocument: true`, so a page can tell that the build it loaded works this way.
+
+So `dirty` and every `save` are about that one document.
+
 ## Messages
 
 Every message is a plain object with a string `type`. VectorCraft posts only to `window.parent`, with its own origin as the target origin.
 
 | `type` | Direction | Fields | Meaning |
 |---|---|---|---|
-| `vectorcraft:ready` | to the parent | `version` (string) | The app is running and listening. Send the file now. |
+| `vectorcraft:ready` | to the parent | `version` (string), `singleDocument` (`true`) | The app is running and listening. Send the file now. |
 | `vectorcraft:open` | from the parent | `name` (string), `bytes` (`ArrayBuffer` or `Uint8Array`) | Open this file, as if it were picked with File › Open. |
 | `vectorcraft:export` | from the parent | `id` (any), `format` (string, optional), `markSaved` (boolean, optional) | Write the active document as `format` (PDF without it) and send it back. |
 | `vectorcraft:save` | to the parent | `name` (string), `bytes` (`ArrayBuffer`, transferred), `id` (when it answers an export) | Store this file. |

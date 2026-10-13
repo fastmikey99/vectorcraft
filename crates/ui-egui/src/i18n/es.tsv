@@ -4687,3 +4687,4 @@ mark-style	Japanese	Japonesas
 @msg	unknown parameter `{key}`; the command takes: {keys}	parámetro desconocido `{key}`; el comando acepta: {keys}
 	Load EPS into Clipboard	Cargar EPS en el portapapeles
 @msg	an image of {w} × {h} pixels is too large to draw	una imagen de {w} × {h} píxeles es demasiado grande para dibujarse
+@msg	{what}: this editor works on one file only	{what}: este editor trabaja con un solo archivo

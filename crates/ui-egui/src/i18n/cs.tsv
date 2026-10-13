@@ -4746,3 +4746,4 @@ mark-style	Japanese	Japonské
 @msg	unknown parameter `{key}`; the command takes: {keys}	neznámý parametr `{key}`; příkaz přijímá: {keys}
 	Load EPS into Clipboard	Načíst EPS do schránky
 @msg	an image of {w} × {h} pixels is too large to draw	obraz o velikosti {w} × {h} obrazových bodů je příliš velký na vykreslení
+@msg	{what}: this editor works on one file only	{what}: tento editor pracuje jen s jedním souborem

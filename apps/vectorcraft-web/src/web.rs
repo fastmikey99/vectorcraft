@@ -84,7 +84,7 @@ pub fn start() {
         track_paste(&host.pasted);
         if let Some(bridge) = &host.bridge {
             let pasted = host.pasted.clone();
-            bridge.listen(host.inbox.clone(), move || {
+            bridge.listen(move || {
                 if let Some(ctx) = &pasted.borrow().ctx {
                     ctx.request_repaint();
                 }

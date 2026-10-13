@@ -136,6 +136,8 @@ mod tests_scrub;
 #[cfg(test)]
 mod tests_selectall;
 #[cfg(test)]
+mod tests_single_document;
+#[cfg(test)]
 mod tests_slices;
 #[cfg(test)]
 mod tests_svg;
@@ -261,6 +263,15 @@ pub struct Services {
     /// [`Self::start_pick`]'s dialogs are sheets on the window (macOS): while one is open the app
     /// neither quits nor closes documents, as under the modal dialog before.
     pub dialogs_are_sheets: bool,
+    /// One document only, as when a page embeds the editor for the file it hands over (the web
+    /// build's `?host=parent`): nothing creates, opens or closes a document
+    /// ([`menus::blocked_in_single_document`]), the Home screen stays away, files the person opens
+    /// themselves open only when they aren't documents (libraries, presets, plug-ins), and a file
+    /// from [`Self::host_inbox`] takes the open document's place.
+    pub single_document: bool,
+    /// Files the embedding page hands over, each opened in place of the open document when
+    /// [`Self::single_document`] is on.
+    pub host_inbox: Option<Inbox>,
 }
 
 /// Cached canvas raster.
@@ -622,6 +633,10 @@ impl VectorcraftApp {
     /// [`Self::run`] it, inside what asks for file dialogs.
     fn run_now(&mut self, id: &str, params: Value) -> Result<Value, String> {
         self.run_count = self.run_count.wrapping_add(1);
+        if self.services.single_document && menus::blocked_in_single_document(id) {
+            let what = id;
+            return Err(format!("{what}: this editor works on one file only"));
+        }
         // In debug builds the app's own calls are held to the params descriptions too (#1442): a
         // panel passing a key its command doesn't read shows up in the tests.
         if cfg!(debug_assertions) {
@@ -898,14 +913,56 @@ impl VectorcraftApp {
     }
 
     fn drain_inbox(&mut self) {
-        let arrived: Vec<(String, Vec<u8>)> =
-            self.services.inbox.as_ref().map(|q| std::mem::take(&mut *q.lock().unwrap_or_else(|e| e.into_inner()))).unwrap_or_default();
+        let take = |q: Option<&Inbox>| q.map(|q| std::mem::take(&mut *q.lock().unwrap_or_else(|e| e.into_inner()))).unwrap_or_default();
+        let (arrived, handed) = (take(self.services.inbox.as_ref()), take(self.services.host_inbox.as_ref()));
         for (name, bytes) in arrived {
+            // With one document, what the person opens themselves opens only when it isn't a
+            // document: a library, presets or a plug-in.
+            if self.services.single_document && io::opens_as(&name).is_none() {
+                let what = &name;
+                self.status(format!("{what}: this editor works on one file only"));
+                continue;
+            }
             if let Err(e) = io::open_bytes(self, &name, &bytes, None) {
                 io::report_open_error(self, &name, &e);
             }
         }
+        for (name, bytes) in handed {
+            let before: Vec<u64> = self.session.documents().iter().map(|d| d.uid).collect();
+            match io::open_bytes(self, &name, &bytes, None) {
+                // It takes the place of what was open (a file that opens later, after a dialog,
+                // does when it arrives: `keep_one_document`).
+                Ok(_) if self.services.single_document && self.session.documents().len() > before.len() => {
+                    self.close_documents(&before);
+                }
+                Ok(_) => {}
+                Err(e) => io::report_open_error(self, &name, &e),
+            }
+        }
+        if self.services.single_document {
+            self.keep_one_document();
+        }
         place::drain(self);
+    }
+
+    /// Close the documents with these uids without asking to save them.
+    fn close_documents(&mut self, uids: &[u64]) {
+        while let Some(i) = self.session.documents().iter().rposition(|d| uids.contains(&d.uid)) {
+            if let Err(e) = unsaved::close_now(self, i) {
+                log::error!("couldn't close document {i}: {e}");
+                return;
+            }
+        }
+    }
+
+    /// With one document only, a second that came in anyway (a file that opened after a dialog)
+    /// takes the place of the others: the newest stays.
+    fn keep_one_document(&mut self) {
+        let docs = self.session.documents();
+        if docs.len() > 1 {
+            let older: Vec<u64> = docs[..docs.len() - 1].iter().map(|d| d.uid).collect();
+            self.close_documents(&older);
+        }
     }
 }
 

@@ -3684,3 +3684,4 @@ lighting	Light	光源
 @msg	unknown parameter `{key}`; the command takes: {keys}	未知的參數 `{key}`；此指令接受：{keys}
 	Load EPS into Clipboard	將 EPS 載入剪貼簿
 @msg	an image of {w} × {h} pixels is too large to draw	{w} × {h} 像素的影像過大，無法繪製
+@msg	{what}: this editor works on one file only	{what}：此編輯器只處理一個檔案

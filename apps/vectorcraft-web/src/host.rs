@@ -18,6 +18,11 @@
 //!   after it, the last `vectorcraft:open` was refused (the app keeps running). With an `id`, the
 //!   `vectorcraft:export` of that `id` was refused.
 //!
+//! The editor works on that one file (`Services::single_document`): nothing the person does
+//! creates, opens or closes a document, there is no Home screen, and each `vectorcraft:open` takes
+//! the open document's place without asking to save it (the page guards that with `dirty`). Data
+//! Recovery is off, since restoring would add documents. `ready` says so with `singleDocument`.
+//!
 //! Only the parent window on the page's own origin is heard or answered, and a page with an opaque
 //! origin (`null`) has no bridge. The parent guards leaving the page with unsaved changes.
 
@@ -43,6 +48,8 @@ pub struct Bridge {
     reported: Rc<Cell<Option<bool>>>,
     /// Exports the parent asked for, run on the next frame (they need the app).
     exports: Rc<RefCell<Vec<(JsValue, protocol::Export)>>>,
+    /// The files the parent hands over (`Services::host_inbox`), which outlive graphics restarts.
+    inbox: Inbox,
 }
 
 impl Bridge {
@@ -54,12 +61,15 @@ impl Bridge {
             return None;
         }
         let origin = window.location().origin().ok().filter(|o| !protocol::is_opaque(o))?;
-        Some(Self { window, parent, origin, reported: Rc::default(), exports: Rc::default() })
+        Some(Self { window, parent, origin, reported: Rc::default(), exports: Rc::default(), inbox: Inbox::default() })
     }
 
     /// Send what VectorCraft would download to the parent instead (each time the services are
     /// made, also after a graphics restart).
     pub fn connect(&self, services: &mut Services) {
+        services.single_document = true;
+        services.host_inbox = Some(self.inbox.clone());
+        services.recovery_store = None;
         let bridge = self.clone();
         services.download = Some(Box::new(move |name: &str, bytes: &[u8]| {
             if let Err(e) = bridge.post_file(name, bytes, None) {
@@ -69,7 +79,7 @@ impl Bridge {
     }
 
     pub fn post_ready(&self) {
-        self.send(&[("type", "vectorcraft:ready".into()), ("version", env!("CARGO_PKG_VERSION").into())]);
+        self.send(&[("type", "vectorcraft:ready".into()), ("version", env!("CARGO_PKG_VERSION").into()), ("singleDocument", true.into())]);
     }
 
     pub fn post_failed(&self, error: &str) {
@@ -118,11 +128,12 @@ impl Bridge {
             .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))
     }
 
-    /// Hear files from the parent: they go to the open inbox, which outlives graphics restarts.
+    /// Hear files from the parent: they go to its own inbox (`Services::host_inbox`), where each
+    /// takes the open document's place; it outlives graphics restarts.
     /// `wake` asks the current runner for a frame. A `vectorcraft:open` that can't be opened is
     /// answered with `vectorcraft:failed`; a `vectorcraft:export` waits for the next frame
     /// ([`Bridge::run_exports`]); every other message is ignored (`protocol::accepts`).
-    pub fn listen(&self, inbox: Inbox, wake: impl Fn() + 'static) {
+    pub fn listen(&self, wake: impl Fn() + 'static) {
         let bridge = self.clone();
         let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
             let from_parent = event.source().is_some_and(|s| js_sys::Object::is(&s, &bridge.parent));
@@ -144,7 +155,7 @@ impl Bridge {
             }
             match protocol::open(string(&data, "name"), bytes(&data)) {
                 Ok(open) => {
-                    inbox.lock().unwrap_or_else(|e| e.into_inner()).push((open.name, open.bytes));
+                    bridge.inbox.lock().unwrap_or_else(|e| e.into_inner()).push((open.name, open.bytes));
                     wake();
                 }
                 Err(error) => {
