@@ -212,6 +212,40 @@ fn replace_into_a_rect_keeps_the_stacking_place_and_fits_the_rect() {
     assert!(s.execute("file.place", &json!({"replace": true, "at": [0, 0], "rect": rect, "name": "t.svg", "dataBase64": svg64})).is_err());
 }
 
+/// fitReplaced: art traced from an image's pixels takes the image's place through its transform, so a
+/// rotated, squashed image's vectors lie where its pixels did (the SVG's frame on the pixel area).
+#[test]
+fn fit_replaced_maps_the_art_onto_a_transformed_images_pixels() {
+    let mut s = session();
+    let first = place(&mut s, "a.png", &png(100, 50, [255, 0, 0, 255], None), json!({"at": [150, 150]}))["ids"][0].clone();
+    s.execute("object.rotate", &json!({"angle": 90})).unwrap();
+    s.execute("object.scale", &json!({"sx": 50, "sy": 120})).unwrap();
+    let NodeKind::Image(im) = &node(&s, &first).kind else { panic!() };
+    let xf = im.xf;
+    let before = node(&s, &first).geometric_bounds().unwrap();
+    // The tracer's SVG at the image's pixel size: left half red, right half blue.
+    let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50" viewBox="0 0 100 50"><rect width="50" height="50" fill="red"/><rect x="50" width="50" height="50" fill="blue"/></svg>"#;
+    let svg64 = vectorcraft_format::base64_encode(svg);
+    assert!(s.execute("file.place", &json!({"fitReplaced": true, "name": "t.svg", "dataBase64": svg64})).is_err(), "needs replace");
+    let r = place(&mut s, "traced.svg", svg, json!({"replace": true, "fitReplaced": true, "crop": "crop"}));
+    let id = &r["ids"][0];
+    assert_eq!(top_children(&s)[0].id.0, id.as_u64().unwrap(), "same place in the stacking order");
+    let after = node(&s, id).geometric_bounds().unwrap();
+    for (got, want) in [(after.x0, before.x0), (after.y0, before.y0), (after.x1, before.x1), (after.y1, before.y1)] {
+        assert!(close(got, want), "{after:?} vs the image's {before:?}");
+    }
+    // Each half lands where that half of the image's pixels was.
+    let img = vectorcraft_testkit::raster::render_region(&s.doc().unwrap().doc, before, 1.0);
+    let at = |px: f64, py: f64| {
+        let p = xf * vectorcraft_geom::Point::new(px, py);
+        img.over_white((p.x - before.x0) as u32, (p.y - before.y0) as u32)
+    };
+    assert_eq!(at(25.0, 25.0), [255, 0, 0], "the left half of the pixels");
+    assert_eq!(at(75.0, 25.0), [0, 0, 255], "the right half of the pixels");
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(top_children(&s)[0].id.0, first.as_u64().unwrap(), "one undo step brings the image back");
+}
+
 #[test]
 fn replace_needs_exactly_one_selected_object() {
     let mut s = session();
