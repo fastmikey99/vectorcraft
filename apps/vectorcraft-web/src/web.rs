@@ -418,6 +418,7 @@ impl eframe::App for WebShell {
         if let Some(app) = &mut self.app {
             app.ui(ui);
             if let Some(bridge) = &self.host.bridge {
+                bridge.run_exports(app);
                 bridge.report_dirty(app);
             }
         }
