@@ -28,6 +28,19 @@ static BUNDLED: &[&[u8]] = &[
     include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf"),
 ];
 
+/// Faces the web build adds to [`BUNDLED`]: browsers can't read the installed fonts, and a print
+/// workflow's generated files (gang sheet guides from Enfocus Switch) set their labels in Fira Sans
+/// Extra Condensed, which their PDFs embed only as a subset. Ready before any file opens.
+#[cfg(target_arch = "wasm32")]
+static BUNDLED_WEB: &[&[u8]] = &[
+    include_bytes!("../../../assets/fonts/FiraSansExtraCondensed-Regular.ttf"),
+    include_bytes!("../../../assets/fonts/FiraSansExtraCondensed-Medium.ttf"),
+    include_bytes!("../../../assets/fonts/FiraSansExtraCondensed-SemiBold.ttf"),
+    include_bytes!("../../../assets/fonts/FiraSansExtraCondensed-Bold.ttf"),
+];
+#[cfg(not(target_arch = "wasm32"))]
+static BUNDLED_WEB: &[&[u8]] = &[];
+
 /// An axis setting of a variable font: the axis tag (`wght`) and its value in user units (700).
 pub type Variation = ([u8; 4], f32);
 
@@ -1453,7 +1466,7 @@ impl FontDb {
         // first, then Arabic with Noto Sans Arabic first. They are fallbacks for those scripts
         // after the requested and bundled fonts, and families users can pick by name.
         let craft = crate::craft_fonts::document_fonts().into_iter().map(|f| f.bytes);
-        for data in BUNDLED.iter().copied().chain(craft) {
+        for data in BUNDLED.iter().chain(BUNDLED_WEB).copied().chain(craft) {
             for (i, spec) in enumerate_faces(data) {
                 if let Some(f) = make_face(FontBytes::Static(data), i, spec, None) {
                     faces.push(Arc::new(f));
