@@ -19,6 +19,10 @@
 //!   the one selected object (with nothing selected, at `at`), fitted inside `at` (default: that
 //!   object's bounds), one undo step, selected. Answered with `vectorcraft:placed { id, ids }` or
 //!   `vectorcraft:failed { error, id }`.
+//! - `vectorcraft:prefs` (both ways): `{ prefs }`, the preferences and workspace as JSON text. The
+//!   editor sends them when they change (the page stores them for the person signed in); the page
+//!   sends them back before opening a file, and the editor takes them on. In host mode the editor
+//!   keeps none of its own in the browser, so they follow the person, not the computer.
 //! - `vectorcraft:dirty` (to the parent): `{ dirty }` whenever unsaved changes appear or go away.
 //! - `vectorcraft:failed` (to the parent): `{ error }`. Before `ready`, the app couldn't start;
 //!   after it, the last `vectorcraft:open` was refused (the app keeps running). With an `id`, the
@@ -56,6 +60,8 @@ pub struct Bridge {
     exports: Rc<RefCell<Vec<(JsValue, protocol::Export)>>>,
     /// Files the parent asked to place, run on the next frame.
     places: Rc<RefCell<Vec<(JsValue, protocol::Place)>>>,
+    /// Preferences the parent handed back, put on at the next frame (the last one wins).
+    prefs: Rc<RefCell<Option<String>>>,
     /// The files the parent hands over (`Services::host_inbox`), which outlive graphics restarts.
     inbox: Inbox,
 }
@@ -69,7 +75,16 @@ impl Bridge {
             return None;
         }
         let origin = window.location().origin().ok().filter(|o| !protocol::is_opaque(o))?;
-        Some(Self { window, parent, origin, reported: Rc::default(), exports: Rc::default(), places: Rc::default(), inbox: Inbox::default() })
+        Some(Self {
+            window,
+            parent,
+            origin,
+            reported: Rc::default(),
+            exports: Rc::default(),
+            places: Rc::default(),
+            prefs: Rc::default(),
+            inbox: Inbox::default(),
+        })
     }
 
     /// Send what VectorCraft would download to the parent instead (each time the services are
@@ -125,6 +140,16 @@ impl Bridge {
         }
     }
 
+    /// Preferences the parent handed back since the last frame, if any.
+    pub fn take_prefs(&self) -> Option<String> {
+        self.prefs.borrow_mut().take()
+    }
+
+    /// Hand the parent the preferences and workspace (they changed); false if it couldn't be sent.
+    pub fn post_prefs(&self, text: &str) -> bool {
+        self.send(&[("type", "vectorcraft:prefs".into()), ("prefs", text.into())])
+    }
+
     /// After each frame: tell the parent when unsaved changes appear or go away.
     pub fn report_dirty(&self, app: &VectorcraftApp) {
         let dirty = app.session.documents().iter().any(|d| d.is_dirty());
@@ -173,6 +198,16 @@ impl Bridge {
                         wake();
                     }
                     Err(error) => bridge.post_export_failed(&id, &error),
+                }
+                return;
+            }
+            if string(&data, "type").as_deref() == Some("vectorcraft:prefs") {
+                match protocol::prefs(string(&data, "prefs")) {
+                    Ok(text) => {
+                        *bridge.prefs.borrow_mut() = Some(text);
+                        wake();
+                    }
+                    Err(error) => bridge.post_failed(&error),
                 }
                 return;
             }

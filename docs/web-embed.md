@@ -41,6 +41,7 @@ Every message is a plain object with a string `type`. VectorCraft posts only to 
 | `vectorcraft:place` | from the parent | `id` (any), `name` (string), `bytes` (`ArrayBuffer` or `Uint8Array`), `at` (`{x, y, width, height}`, optional) | Put this file in place of the selected object, fitted inside `at`. |
 | `vectorcraft:placed` | to the parent | `id`, `ids` (numbers) | The place with this `id` is done. |
 | `vectorcraft:save` | to the parent | `name` (string), `bytes` (`ArrayBuffer`, transferred), `id` (when it answers an export), `bounds` (with `selectedOnly`) | Store this file. |
+| `vectorcraft:prefs` | both ways | `prefs` (string: JSON text) | From the editor: its preferences and workspace changed; store them. From the parent: put these on. |
 | `vectorcraft:dirty` | to the parent | `dirty` (boolean) | Unsaved changes appeared (`true`) or went away (`false`). |
 | `vectorcraft:failed` | to the parent | `error` (string), `id` (when it answers an export) | Before `ready`: the app couldn't start. After `ready`: the last `vectorcraft:open` was refused, or with an `id` that export was; the app keeps running. |
 
@@ -71,6 +72,12 @@ Every message is a plain object with a string `type`. VectorCraft posts only to 
 - The answer is `vectorcraft:placed` with the same `id` and the placed objects' `ids`, or `vectorcraft:failed` with the `error` and the `id`.
 
 Together they make a "trace this image" button: export the selected image with `selectedOnly`, send the pixels to a tracing service, and place its SVG back with `at` set to the `bounds` that came with the image.
+
+**`vectorcraft:prefs`** lets the page keep the editor's preferences and workspace (units, the panel layout, workspaces, recent fonts…) for each person rather than each browser:
+
+- In host mode the editor keeps none in the browser's storage. When they change (checked every two seconds) it sends them as `prefs`, JSON text the page stores as it is, for whoever is signed in.
+- Send them back, as they came, after `ready` and before `vectorcraft:open`; the editor puts them on. Text that isn't what the editor gave (not a JSON object, or over 1 MB) is refused with `vectorcraft:failed`.
+- Someone with nothing stored starts from the defaults; their first change is sent to the page.
 
 **`vectorcraft:dirty`** is sent after the first frame and then whenever the answer changes, so the first one is usually `dirty: false`. `true` means at least one open document has unsaved changes.
 

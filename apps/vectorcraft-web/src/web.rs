@@ -138,7 +138,10 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
                     }
                     None => {
                         let mut app = VectorcraftApp::new(Session::new(), services);
-                        restore_prefs(&mut app);
+                        // Embedded, the page hands over the preferences of the person signed in.
+                        let saved =
+                            if host.bridge.is_some() { None } else { local_storage().ok().and_then(|s| s.get_item(PREFS_KEY).ok().flatten()) };
+                        restore_prefs(&mut app, saved);
                         if let Some(bridge) = &host.bridge {
                             bridge.post_ready();
                         }
@@ -355,16 +358,16 @@ struct WebShell {
 }
 
 /// Where the preferences and the workspace (the interface's state, as the desktop app keeps them
-/// in its preferences file) live in the browser's storage, shared by the site's tabs.
+/// in its preferences file) live in the browser's storage, shared by the site's tabs. Embedded
+/// (`?host=parent`) they go to the page instead (`vectorcraft:prefs`), which keeps them per person.
 const PREFS_KEY: &str = "vectorcraft-prefs";
 /// How often the app's preferences are compared with the stored ones (ms). Browsers don't say
 /// reliably when a tab closes, so they are written as they change rather than on the way out.
 const PREFS_EVERY_MS: f64 = 2000.0;
 
-/// The stored preferences and workspace, when there are any, put back (as the desktop app does at
-/// start-up); then the preferences applied to the session.
-fn restore_prefs(app: &mut VectorcraftApp) {
-    let saved = local_storage().ok().and_then(|s| s.get_item(PREFS_KEY).ok().flatten());
+/// The stored preferences and workspace (`saved`), when there are any, put back (as the desktop app
+/// does at start-up); then the preferences applied to the session.
+fn restore_prefs(app: &mut VectorcraftApp, saved: Option<String>) {
     match saved.map(|t| serde_json::from_str::<vectorcraft_ui_egui::UiState>(&t)) {
         Some(Ok(ui)) => app.ui = ui.sanitized(),
         Some(Err(e)) => log::warn!("vectorcraft-web: the stored preferences couldn't be read, so the defaults apply: {e}"),
@@ -381,8 +384,16 @@ fn prefs_json(app: &VectorcraftApp) -> Option<String> {
 }
 
 impl WebShell {
-    /// Every [`PREFS_EVERY_MS`]: write the preferences and workspace when they changed.
+    /// Every [`PREFS_EVERY_MS`]: write the preferences and workspace when they changed (embedded:
+    /// hand them to the page). Preferences the page handed back are put on first.
     fn save_prefs(&mut self) {
+        if let (Some(bridge), Some(app)) = (&self.host.bridge, &mut self.app)
+            && let Some(text) = bridge.take_prefs()
+        {
+            restore_prefs(app, Some(text.clone()));
+            // What the page holds already: not handed back unless it changes.
+            self.prefs_saved = prefs_json(app).or(Some(text));
+        }
         let now = js_sys::Date::now();
         if now - self.prefs_checked < PREFS_EVERY_MS {
             return;
@@ -390,6 +401,12 @@ impl WebShell {
         self.prefs_checked = now;
         let Some(json) = self.app.as_ref().and_then(prefs_json) else { return };
         if self.prefs_saved.as_deref() == Some(json.as_str()) {
+            return;
+        }
+        if let Some(bridge) = &self.host.bridge {
+            if bridge.post_prefs(&json) {
+                self.prefs_saved = Some(json);
+            }
             return;
         }
         match local_storage().and_then(|s| s.set_item(PREFS_KEY, &json).map_err(js_err)) {

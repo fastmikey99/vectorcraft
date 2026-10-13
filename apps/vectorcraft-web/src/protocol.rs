@@ -11,7 +11,10 @@ pub struct Open {
 }
 
 /// The messages the bridge reads.
-pub const HEARD: [&str; 3] = ["vectorcraft:open", "vectorcraft:export", "vectorcraft:place"];
+pub const HEARD: [&str; 4] = ["vectorcraft:open", "vectorcraft:export", "vectorcraft:place", "vectorcraft:prefs"];
+
+/// The longest preferences text a page may hand over (bytes).
+pub const MAX_PREFS: usize = 1 << 20;
 
 /// What a `vectorcraft:export` asks for: the active document written in a format, sent back as a
 /// `vectorcraft:save` that carries the request's `id`.
@@ -93,6 +96,22 @@ pub fn export(
         return Err(format!("vectorcraft:export: preserveEditing is for pdf, not `{}`", f.id));
     }
     Ok(Export { format: f.id, extension, mark_saved, selected_only, preserve_editing })
+}
+
+/// Check a `vectorcraft:prefs` the bridge accepted: `prefs` is the text a `vectorcraft:prefs` from
+/// the editor gave (a JSON object), handed back as it was. The error is the text of the
+/// `vectorcraft:failed` reply.
+pub fn prefs(text: Option<String>) -> Result<String, String> {
+    let Some(text) = text else {
+        return Err("vectorcraft:prefs needs `prefs`, the text a vectorcraft:prefs from the editor gave".to_string());
+    };
+    if text.len() > MAX_PREFS {
+        return Err(format!("vectorcraft:prefs: `prefs` is longer than {MAX_PREFS} bytes"));
+    }
+    if !serde_json::from_str::<serde_json::Value>(&text).is_ok_and(|v| v.is_object()) {
+        return Err("vectorcraft:prefs: `prefs` isn't the text a vectorcraft:prefs from the editor gave".to_string());
+    }
+    Ok(text)
 }
 
 /// Check a `vectorcraft:place` the bridge accepted: a file name, its bytes, and `at` (when given) as
@@ -209,6 +228,15 @@ mod tests {
         assert!(place(Some("t.svg".into()), None, None).is_err_and(|e| e.contains("`bytes`")));
         for at in [vec![1.0, 2.0, 3.0], vec![0.0, 0.0, 0.0, 10.0], vec![0.0, 0.0, 10.0, -1.0], vec![f64::NAN, 0.0, 1.0, 1.0]] {
             assert!(place(Some("t.svg".into()), Some(vec![1]), Some(at.clone())).is_err_and(|e| e.contains("`at`")), "{at:?}");
+        }
+    }
+
+    #[test]
+    fn takes_back_the_preferences_it_gave() {
+        assert!(accepts(SITE, SITE, true, Some("vectorcraft:prefs")));
+        assert_eq!(prefs(Some(r#"{"engine_prefs":{"units":"mm"}}"#.into())), Ok(r#"{"engine_prefs":{"units":"mm"}}"#.into()));
+        for bad in [None, Some(String::new()), Some("[]".into()), Some("not json".into()), Some("x".repeat(MAX_PREFS + 1))] {
+            assert!(prefs(bad.clone()).is_err(), "{:?}", bad.map(|b| b.chars().take(20).collect::<String>()));
         }
     }
 
