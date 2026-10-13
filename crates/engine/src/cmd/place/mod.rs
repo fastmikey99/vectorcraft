@@ -57,7 +57,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Place…",
             ["File"],
             Some("Cmd+Shift+P"),
-            "{path | name | dataBase64 (a file's path, or its name with its bytes), link?: true (a raster image keeps its file's path; a VectorCraft document at path becomes one locked placed document showing artboard `page`, linked to the file and read again when it changes (links.update; saving it in this app updates it at once), drawn as vectors in every output; false: an editable copy of its art, as from dataBase64; other files are embedded), text?: {characterSet?: \"unicode\" (UTF-8, or UTF-16 with a byte-order mark; other bytes as the platform's 8-bit set) | \"ansi\" (the platform's 8-bit set), platform?: \"windows\" (Windows-1252) | \"mac\" (Mac Roman), removeLineReturns?: false (each block of lines becomes one paragraph; blank lines end paragraphs), removeParagraphReturns?: false (drop blank lines), replaceSpaces?: n (runs of n ≥ 2 spaces become a tab)} (a .txt file, placed as area type filling rect, the replaced object's bounds, or else the artboard less a 36 pt margin), template?: false (onto a new locked template layer below the current layer), replace?: false (swap the one selected object, keeping its stacking place and transform; no at/rect), at?: [x, y] centre (default: the first artboard's centre), rect?: [x, y, width, height] fit inside; aspect kept (wins over at), page?: 1 (PDF/.ai page, or a native document's artboard), crop?: \"crop\" (clipped to that page or artboard, default; an SVG, only when given: framed and clipped by its viewBox, else by its art's bounds) | \"bounding\" (the art's bounds) | \"art\" | \"trim\" | \"bleed\" | \"media\" (a PDF page's boxes), password? (an encrypted PDF), dxf?: {…the DXF options of document.open} (a .dxf drawing: fit fills the artboard under at, else the first; fitted or uncentred art lands with its drawing's artboard on that artboard, else it is centred on at)} → {ids, name, format, linked, width, height, warnings}. Raster images come in at 100% of their physical size (the file's ppi, else 72); SVG, DXF, PDF/.ai, EMF/WMF (clipped to the picture's frame), EPS (clipped to its bounding box; as document.open reads it) and native documents as one group, with the images, symbols, patterns and swatches they use. One undo step; selects what it placed (unless on a template layer); never touches the clipboard",
+            "{path | name | dataBase64 (a file's path, or its name with its bytes), link?: true (a raster image keeps its file's path; a VectorCraft document at path becomes one locked placed document showing artboard `page`, linked to the file and read again when it changes (links.update; saving it in this app updates it at once), drawn as vectors in every output; false: an editable copy of its art, as from dataBase64; other files are embedded), text?: {characterSet?: \"unicode\" (UTF-8, or UTF-16 with a byte-order mark; other bytes as the platform's 8-bit set) | \"ansi\" (the platform's 8-bit set), platform?: \"windows\" (Windows-1252) | \"mac\" (Mac Roman), removeLineReturns?: false (each block of lines becomes one paragraph; blank lines end paragraphs), removeParagraphReturns?: false (drop blank lines), replaceSpaces?: n (runs of n ≥ 2 spaces become a tab)} (a .txt file, placed as area type filling rect, the replaced object's bounds, or else the artboard less a 36 pt margin), template?: false (onto a new locked template layer below the current layer), replace?: false (swap the one selected object, keeping its stacking place, and its transform unless rect is given; no at), at?: [x, y] centre (default: the first artboard's centre), rect?: [x, y, width, height] fit inside; aspect kept (wins over at), page?: 1 (PDF/.ai page, or a native document's artboard), crop?: \"crop\" (clipped to that page or artboard, default; an SVG, only when given: framed and clipped by its viewBox, else by its art's bounds) | \"bounding\" (the art's bounds) | \"art\" | \"trim\" | \"bleed\" | \"media\" (a PDF page's boxes), password? (an encrypted PDF), dxf?: {…the DXF options of document.open} (a .dxf drawing: fit fills the artboard under at, else the first; fitted or uncentred art lands with its drawing's artboard on that artboard, else it is centred on at)} → {ids, name, format, linked, width, height, warnings}. Raster images come in at 100% of their physical size (the file's ppi, else 72); SVG, DXF, PDF/.ai, EMF/WMF (clipped to the picture's frame), EPS (clipped to its bounding box; as document.open reads it) and native documents as one group, with the images, symbols, patterns and swatches they use. One undo step; selects what it placed (unless on a template layer); never touches the clipboard",
             has_doc,
             place
         ),
@@ -359,8 +359,8 @@ fn place(s: &mut Session, p: &Value) -> Result<Value> {
     let template = bool_or(p, "template", false);
     let at = at_param(p)?;
     let rect = rect_param(p)?;
-    if replace && (template || at.is_some() || rect.is_some()) {
-        return Err(bad(PLACE, "replace keeps the replaced object's place and transform: drop template, at and rect"));
+    if replace && (template || at.is_some()) {
+        return Err(bad(PLACE, "replace keeps the replaced object's place (and with no rect its transform): drop template and at"));
     }
     let corners = [at, rect.map(|r| r.origin()), rect.map(|r| Point::new(r.x1, r.y1))];
     if corners.iter().flatten().any(|c| !(c.x.abs() <= MAX_COORD && c.y.abs() <= MAX_COORD)) {
@@ -379,16 +379,17 @@ fn place(s: &mut Session, p: &Value) -> Result<Value> {
     let is_text = matches!(loaded.art, Art::Text(_));
     if is_text {
         let size = match (old_node.and_then(Node::geometric_bounds), rect) {
-            (Some(b), _) => b.size(),
-            (None, Some(r)) => r.size(),
+            (_, Some(r)) => r.size(),
+            (Some(b), None) => b.size(),
             (None, None) => text_frame(&st.doc, at).size(),
         };
         loaded.natural = Rect::from_origin_size(Point::ORIGIN, size);
     }
     let natural = loaded.natural;
     let m = match (old_node, rect) {
-        (Some(o), _) => replace_xf(&st.doc, o, natural, !is_text),
-        (None, Some(r)) => fit(natural, r),
+        // Replace into a rect: the replaced object's place in the stack, the rect's position and size.
+        (_, Some(r)) => fit(natural, r),
+        (Some(o), None) => replace_xf(&st.doc, o, natural, !is_text),
         // Its artboard's bottom-left corner on the target's.
         (None, None) if let (Some(src), Some(to)) = (loaded.board, target) => Affine::translate((to.x0 - src.x0, to.y1 - src.y1)),
         (None, None) => {
