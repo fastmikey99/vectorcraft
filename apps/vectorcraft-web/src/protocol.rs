@@ -1,6 +1,6 @@
 //! The rules of the embedding protocol (`host`, `docs/web-embed.md`), kept free of browser types so
-//! they are tested natively: which messages the bridge reads, and what a `vectorcraft:open` must
-//! carry.
+//! they are tested natively: which messages the bridge reads, and what a `vectorcraft:open` or a
+//! `vectorcraft:export` must carry.
 
 /// What a `vectorcraft:open` delivers: a file to open like one picked with File › Open.
 #[derive(Debug, PartialEq, Eq)]
@@ -10,15 +10,30 @@ pub struct Open {
     pub bytes: Vec<u8>,
 }
 
-/// Whether the bridge reads a message at all: a `vectorcraft:open` from the parent window, on the
-/// page's own origin. Anything else is ignored without a reply, so another page learns nothing.
+/// The messages the bridge reads.
+pub const HEARD: [&str; 2] = ["vectorcraft:open", "vectorcraft:export"];
+
+/// What a `vectorcraft:export` asks for: the active document written in a format, sent back as a
+/// `vectorcraft:save` that carries the request's `id`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Export {
+    /// The format's id (`pdf`, `svg`, `png`…; any format File › Export writes).
+    pub format: &'static str,
+    /// The format's extension, for the file's name.
+    pub extension: &'static str,
+    /// Record the document as saved once written: the parent stores it as the saved file.
+    pub mark_saved: bool,
+}
+
+/// Whether the bridge reads a message at all: a `vectorcraft:open` or `vectorcraft:export` from the
+/// parent window, on the page's own origin. Anything else is ignored without a reply, so another page learns nothing.
 ///
 /// `own_origin` is the page's origin and `origin` the event's; `from_parent` says whether the
 /// event's source is the parent window; `kind` is the message's `type`, when it is a string. An
 /// opaque origin (`"null"`: a sandboxed frame, a `file:` page) can't be told apart from another
 /// page's, so the bridge hears nothing there.
 pub fn accepts(own_origin: &str, origin: &str, from_parent: bool, kind: Option<&str>) -> bool {
-    from_parent && !is_opaque(own_origin) && origin == own_origin && kind == Some("vectorcraft:open")
+    from_parent && !is_opaque(own_origin) && origin == own_origin && kind.is_some_and(|k| HEARD.contains(&k))
 }
 
 /// An origin that names no site (`"null"`).
@@ -37,6 +52,16 @@ pub fn open(name: Option<String>, bytes: Option<Vec<u8>>) -> Result<Open, String
         return Err(format!("vectorcraft:open of {name} needs the file's contents (`bytes`, an ArrayBuffer or Uint8Array)"));
     };
     Ok(Open { name, bytes })
+}
+
+/// Check a `vectorcraft:export` the bridge accepted: `format` is optional (PDF without it) but must
+/// be one the app writes. The error is the text of the `vectorcraft:failed` reply.
+pub fn export(format: Option<String>, mark_saved: Option<bool>) -> Result<Export, String> {
+    let asked = format.unwrap_or_else(|| "pdf".to_string());
+    let f = vectorcraft_engine::cmd::fileio::writable_format(Some(asked.trim()), None)
+        .map_err(|e| format!("vectorcraft:export can't write `{asked}`: {e}"))?;
+    let extension = f.extensions.first().copied().unwrap_or(f.id);
+    Ok(Export { format: f.id, extension, mark_saved: mark_saved.unwrap_or(false) })
 }
 
 #[cfg(test)]
@@ -70,6 +95,29 @@ mod tests {
     fn ignores_another_window_on_the_same_origin() {
         // Such as another tab of the same site, or a frame the parent page holds.
         assert!(!accepts(SITE, SITE, false, OPEN));
+    }
+
+    #[test]
+    fn accepts_an_export_from_the_parent_on_the_same_origin() {
+        assert!(accepts(SITE, SITE, true, Some("vectorcraft:export")));
+        assert!(!accepts(SITE, "https://evil.example", true, Some("vectorcraft:export")));
+        assert!(!accepts(SITE, SITE, false, Some("vectorcraft:export")));
+    }
+
+    #[test]
+    fn exports_pdf_unless_asked_for_another_format() {
+        assert_eq!(export(None, None), Ok(Export { format: "pdf", extension: "pdf", mark_saved: false }));
+        assert_eq!(export(Some("svg".into()), Some(true)), Ok(Export { format: "svg", extension: "svg", mark_saved: true }));
+        // An extension names its format too.
+        assert_eq!(export(Some("png".into()), None).map(|e| e.format), Ok("png"));
+    }
+
+    #[test]
+    fn refuses_an_export_in_a_format_the_app_doesnt_write() {
+        for format in ["", "docx", "PDF but not really", "vectorcraft:pdf"] {
+            let error = export(Some(format.to_string()), None).err();
+            assert!(error.as_deref().is_some_and(|e| e.starts_with("vectorcraft:export can't write")), "{format:?}: {error:?}");
+        }
     }
 
     #[test]

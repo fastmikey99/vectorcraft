@@ -25,9 +25,10 @@ Every message is a plain object with a string `type`. VectorCraft posts only to 
 |---|---|---|---|
 | `vectorcraft:ready` | to the parent | `version` (string) | The app is running and listening. Send the file now. |
 | `vectorcraft:open` | from the parent | `name` (string), `bytes` (`ArrayBuffer` or `Uint8Array`) | Open this file, as if it were picked with File › Open. |
-| `vectorcraft:save` | to the parent | `name` (string), `bytes` (`ArrayBuffer`, transferred) | Store this file. |
+| `vectorcraft:export` | from the parent | `id` (any), `format` (string, optional), `markSaved` (boolean, optional) | Write the active document as `format` (PDF without it) and send it back. |
+| `vectorcraft:save` | to the parent | `name` (string), `bytes` (`ArrayBuffer`, transferred), `id` (when it answers an export) | Store this file. |
 | `vectorcraft:dirty` | to the parent | `dirty` (boolean) | Unsaved changes appeared (`true`) or went away (`false`). |
-| `vectorcraft:failed` | to the parent | `error` (string) | Before `ready`: the app couldn't start. After `ready`: the last `vectorcraft:open` was refused; the app keeps running. |
+| `vectorcraft:failed` | to the parent | `error` (string), `id` (when it answers an export) | Before `ready`: the app couldn't start. After `ready`: the last `vectorcraft:open` was refused, or with an `id` that export was; the app keeps running. |
 
 **`vectorcraft:ready`** comes once, when the app has started. `version` is the app's version (`CARGO_PKG_VERSION`). A host that has heard neither `ready` nor `failed` after a reasonable time should assume the app couldn't start. The commonest reason is a browser without WebGPU or WebGL2.
 
@@ -40,6 +41,13 @@ Every message is a plain object with a string `type`. VectorCraft posts only to 
 
 **`vectorcraft:save`**: `name` is a bare file name with no folders, the name a download would have had. The parent stores the file and reports any failure to the user itself; nothing is sent back. VectorCraft treats the save as done, as it does a download: after Save or Save As the document counts as saved, and `dirty: false` follows.
 
+**`vectorcraft:export`** lets the page's own button (a "Save to job", say) ask for the file instead of relying on File › Save or Export:
+
+- `format` is any format File › Export writes, by id or extension (`pdf`, `svg`, `png`…); without it, PDF. The file is written with that format's default options.
+- The answer is a `vectorcraft:save` carrying the request's `id` (pass a number or string to match answers to requests), named after the document with the format's extension.
+- With `markSaved: true` the document counts as saved once written (the page is storing it as the saved file), and `dirty: false` follows. Otherwise exporting leaves the unsaved state as it was, as File › Export does.
+- With no document open, or a format the app doesn't write, the answer is `vectorcraft:failed` with the `error` and the same `id`.
+
 **`vectorcraft:dirty`** is sent after the first frame and then whenever the answer changes, so the first one is usually `dirty: false`. `true` means at least one open document has unsaved changes.
 
 ## Who is heard
@@ -48,7 +56,7 @@ The bridge reads a message only when all of these hold:
 
 1. it comes from `window.parent` (`event.source`), not from another window or frame on the site;
 2. its origin (`event.origin`) is exactly the page's own: same scheme, host and port;
-3. its `type` is `vectorcraft:open`.
+3. its `type` is `vectorcraft:open` or `vectorcraft:export`.
 
 Anything else is ignored without a reply, so a page on another origin can neither open files in VectorCraft nor learn that it is there. Saves and other replies go only to `window.parent`, with the page's own origin as the target, so the browser delivers them to no other site. A same-origin parent can already script the frame directly, so the bridge gives it nothing it couldn't otherwise do; it only spares it reaching into the app's internals.
 

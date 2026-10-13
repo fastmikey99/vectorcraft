@@ -10,14 +10,18 @@
 //! - `vectorcraft:save` (to the parent): `{ name, bytes }` (a transferred `ArrayBuffer`) for every
 //!   file VectorCraft would otherwise download (`Services::download`): Save, Save As, Save a
 //!   Copy and exports. The parent stores it and reports failures itself.
+//! - `vectorcraft:export` (from the parent): `{ id, format?, markSaved? }`, the active document
+//!   written as `format` (PDF without it), answered with a `vectorcraft:save` carrying `id`, or a
+//!   `vectorcraft:failed` carrying it when nothing is open or the format can't be written.
 //! - `vectorcraft:dirty` (to the parent): `{ dirty }` whenever unsaved changes appear or go away.
 //! - `vectorcraft:failed` (to the parent): `{ error }`. Before `ready`, the app couldn't start;
-//!   after it, the last `vectorcraft:open` was refused (the app keeps running).
+//!   after it, the last `vectorcraft:open` was refused (the app keeps running). With an `id`, the
+//!   `vectorcraft:export` of that `id` was refused.
 //!
 //! Only the parent window on the page's own origin is heard or answered, and a page with an opaque
 //! origin (`null`) has no bridge. The parent guards leaving the page with unsaved changes.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -37,6 +41,8 @@ pub struct Bridge {
     origin: String,
     /// The unsaved-changes state last reported to the parent.
     reported: Rc<Cell<Option<bool>>>,
+    /// Exports the parent asked for, run on the next frame (they need the app).
+    exports: Rc<RefCell<Vec<(JsValue, protocol::Export)>>>,
 }
 
 impl Bridge {
@@ -48,7 +54,7 @@ impl Bridge {
             return None;
         }
         let origin = window.location().origin().ok().filter(|o| !protocol::is_opaque(o))?;
-        Some(Self { window, parent, origin, reported: Rc::default() })
+        Some(Self { window, parent, origin, reported: Rc::default(), exports: Rc::default() })
     }
 
     /// Send what VectorCraft would download to the parent instead (each time the services are
@@ -56,7 +62,7 @@ impl Bridge {
     pub fn connect(&self, services: &mut Services) {
         let bridge = self.clone();
         services.download = Some(Box::new(move |name: &str, bytes: &[u8]| {
-            if let Err(e) = bridge.post_save(name, bytes) {
+            if let Err(e) = bridge.post_file(name, bytes, None) {
                 log::error!("couldn't hand {name} to the page: {e}");
             }
         }));
@@ -70,6 +76,27 @@ impl Bridge {
         self.send(&[("type", "vectorcraft:failed".into()), ("error", error.into())]);
     }
 
+    /// The refusal of the `vectorcraft:export` with this `id`.
+    fn post_export_failed(&self, id: &JsValue, error: &str) {
+        log::warn!("refused an export for the page: {error}");
+        self.send(&[("type", "vectorcraft:failed".into()), ("error", error.into()), ("id", id.clone())]);
+    }
+
+    /// Each frame: write the exports the parent asked for and send them back.
+    pub fn run_exports(&self, app: &mut VectorcraftApp) {
+        let asked = std::mem::take(&mut *self.exports.borrow_mut());
+        for (id, export) in asked {
+            match write_export(app, &export) {
+                Ok((name, bytes)) => {
+                    if let Err(e) = self.post_file(&name, &bytes, Some(&id)) {
+                        log::error!("couldn't hand {name} to the page: {e}");
+                    }
+                }
+                Err(error) => self.post_export_failed(&id, &error),
+            }
+        }
+    }
+
     /// After each frame: tell the parent when unsaved changes appear or go away.
     pub fn report_dirty(&self, app: &VectorcraftApp) {
         let dirty = app.session.documents().iter().any(|d| d.is_dirty());
@@ -78,10 +105,14 @@ impl Bridge {
         }
     }
 
-    fn post_save(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
+    /// A `vectorcraft:save`; `id` when it answers a `vectorcraft:export`.
+    fn post_file(&self, name: &str, bytes: &[u8], id: Option<&JsValue>) -> Result<(), String> {
         let buffer = js_sys::Uint8Array::from(bytes).buffer();
-        let message = message(&[("type", "vectorcraft:save".into()), ("name", name.into()), ("bytes", buffer.clone().into())])
-            .ok_or_else(|| "couldn't build the message".to_string())?;
+        let mut fields = vec![("type", "vectorcraft:save".into()), ("name", name.into()), ("bytes", buffer.clone().into())];
+        if let Some(id) = id {
+            fields.push(("id", id.clone()));
+        }
+        let message = message(&fields).ok_or_else(|| "couldn't build the message".to_string())?;
         self.parent
             .post_message_with_transfer(&message, &self.origin, &js_sys::Array::of1(&buffer))
             .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))
@@ -89,13 +120,26 @@ impl Bridge {
 
     /// Hear files from the parent: they go to the open inbox, which outlives graphics restarts.
     /// `wake` asks the current runner for a frame. A `vectorcraft:open` that can't be opened is
-    /// answered with `vectorcraft:failed`; every other message is ignored (`protocol::accepts`).
+    /// answered with `vectorcraft:failed`; a `vectorcraft:export` waits for the next frame
+    /// ([`Bridge::run_exports`]); every other message is ignored (`protocol::accepts`).
     pub fn listen(&self, inbox: Inbox, wake: impl Fn() + 'static) {
         let bridge = self.clone();
         let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
             let from_parent = event.source().is_some_and(|s| js_sys::Object::is(&s, &bridge.parent));
             let data = event.data();
             if !protocol::accepts(&bridge.origin, &event.origin(), from_parent, string(&data, "type").as_deref()) {
+                return;
+            }
+            if string(&data, "type").as_deref() == Some("vectorcraft:export") {
+                let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
+                let mark_saved = js_sys::Reflect::get(&data, &JsValue::from_str("markSaved")).ok().and_then(|v| v.as_bool());
+                match protocol::export(string(&data, "format"), mark_saved) {
+                    Ok(export) => {
+                        bridge.exports.borrow_mut().push((id, export));
+                        wake();
+                    }
+                    Err(error) => bridge.post_export_failed(&id, &error),
+                }
                 return;
             }
             match protocol::open(string(&data, "name"), bytes(&data)) {
@@ -143,4 +187,21 @@ fn bytes(data: &JsValue) -> Option<Vec<u8>> {
     } else {
         None
     }
+}
+
+/// The active document written as `export` asks → its file name and bytes.
+fn write_export(app: &mut VectorcraftApp, export: &protocol::Export) -> Result<(String, Vec<u8>), String> {
+    use vectorcraft_engine::cmd::fileio;
+    let st = app.session.active().ok_or("vectorcraft:export: no document is open")?;
+    let params = serde_json::Value::Object(Default::default());
+    let doc = fileio::export_source(st, &params).map_err(|e| e.to_string())?;
+    let (bytes, _warnings) = fileio::encode_with_warnings(&doc, export.format, &params).map_err(|e| e.to_string())?;
+    let title = st.title();
+    let stem = std::path::Path::new(&title).file_stem().map_or_else(|| title.clone(), |s| s.to_string_lossy().to_string());
+    if export.mark_saved
+        && let Some(st) = app.session.active_mut()
+    {
+        st.mark_saved();
+    }
+    Ok((format!("{stem}.{}", export.extension), bytes))
 }
