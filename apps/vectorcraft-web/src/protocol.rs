@@ -32,6 +32,40 @@ pub struct Export {
     /// PDF only: keep (`true`) or leave out (`false`) the native document the PDF carries for
     /// editing it again; `None` is the format's default (kept).
     pub preserve_editing: Option<bool>,
+    /// Only one selected image's own pixels will do (a raster format; implies `selected_only`):
+    /// anything else selected is refused rather than drawn, so a page paying a tracing service per
+    /// image never sends it a render of a group or a page.
+    pub image_only: bool,
+}
+
+/// What a selected object is, for [`image_only_refusal`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Picked {
+    Image,
+    Group,
+    Path,
+    Type,
+    Other,
+}
+
+/// Why an `imageOnly` export can't go ahead with `selected` (the selected objects), if it can't:
+/// it needs exactly one image. The text of the `vectorcraft:failed` reply.
+pub fn image_only_refusal(selected: &[Picked]) -> Option<String> {
+    let what = match selected {
+        [Picked::Image] => return None,
+        [] => "nothing is selected".to_string(),
+        [Picked::Group] => "a group is selected".to_string(),
+        [Picked::Path] => "a path is selected".to_string(),
+        [Picked::Type] => "type is selected".to_string(),
+        [_] => "the selected object isn't an image".to_string(),
+        many => format!("{} objects are selected", many.len()),
+    };
+    Some(format!("vectorcraft:export: select one image ({what})"))
+}
+
+/// A raster format, whose file an image's own pixels can be.
+pub fn is_raster(format: &str) -> bool {
+    matches!(format, "png" | "jpeg" | "jpg" | "webp" | "gif" | "tiff" | "bmp")
 }
 
 /// What a `vectorcraft:place` delivers: a file placed into the open document in place of the one
@@ -81,12 +115,17 @@ pub fn export(
     mark_saved: Option<bool>,
     selected_only: Option<bool>,
     preserve_editing: Option<bool>,
+    image_only: Option<bool>,
 ) -> Result<Export, String> {
     let asked = format.unwrap_or_else(|| "pdf".to_string());
     let f = vectorcraft_engine::cmd::fileio::writable_format(Some(asked.trim()), None)
         .map_err(|e| format!("vectorcraft:export can't write `{asked}`: {e}"))?;
     let extension = f.extensions.first().copied().unwrap_or(f.id);
-    let (mark_saved, selected_only) = (mark_saved.unwrap_or(false), selected_only.unwrap_or(false));
+    let image_only = image_only.unwrap_or(false);
+    if image_only && !is_raster(f.id) {
+        return Err(format!("vectorcraft:export: imageOnly gives an image's own pixels: ask for a raster format such as png, not `{}`", f.id));
+    }
+    let (mark_saved, selected_only) = (mark_saved.unwrap_or(false), selected_only.unwrap_or(false) || image_only);
     // A part of the document isn't the document: it can't count as saving it.
     if mark_saved && selected_only {
         return Err("vectorcraft:export: markSaved can't go with selectedOnly".to_string());
@@ -95,7 +134,7 @@ pub fn export(
     if preserve_editing.is_some() && f.id != "pdf" {
         return Err(format!("vectorcraft:export: preserveEditing is for pdf, not `{}`", f.id));
     }
-    Ok(Export { format: f.id, extension, mark_saved, selected_only, preserve_editing })
+    Ok(Export { format: f.id, extension, mark_saved, selected_only, preserve_editing, image_only })
 }
 
 /// Check a `vectorcraft:prefs` the bridge accepted: `prefs` is the text a `vectorcraft:prefs` from
@@ -175,21 +214,21 @@ mod tests {
     #[test]
     fn exports_pdf_unless_asked_for_another_format() {
         assert_eq!(
-            export(None, None, None, None),
-            Ok(Export { format: "pdf", extension: "pdf", mark_saved: false, selected_only: false, preserve_editing: None })
+            export(None, None, None, None, None),
+            Ok(Export { format: "pdf", extension: "pdf", mark_saved: false, selected_only: false, preserve_editing: None, image_only: false })
         );
         assert_eq!(
-            export(Some("svg".into()), Some(true), None, None),
-            Ok(Export { format: "svg", extension: "svg", mark_saved: true, selected_only: false, preserve_editing: None })
+            export(Some("svg".into()), Some(true), None, None, None),
+            Ok(Export { format: "svg", extension: "svg", mark_saved: true, selected_only: false, preserve_editing: None, image_only: false })
         );
         // An extension names its format too.
-        assert_eq!(export(Some("png".into()), None, None, None).map(|e| e.format), Ok("png"));
+        assert_eq!(export(Some("png".into()), None, None, None, None).map(|e| e.format), Ok("png"));
     }
 
     #[test]
     fn refuses_an_export_in_a_format_the_app_doesnt_write() {
         for format in ["", "docx", "PDF but not really", "vectorcraft:pdf"] {
-            let error = export(Some(format.to_string()), None, None, None).err();
+            let error = export(Some(format.to_string()), None, None, None, None).err();
             assert!(error.as_deref().is_some_and(|e| e.starts_with("vectorcraft:export can't write")), "{format:?}: {error:?}");
         }
     }
@@ -202,17 +241,37 @@ mod tests {
     }
 
     #[test]
+    fn an_image_only_export_needs_one_image_and_says_what_else_is_selected() {
+        let e = export(Some("png".into()), None, None, None, Some(true)).unwrap();
+        assert!(e.image_only && e.selected_only, "imageOnly is about the selection");
+        assert!(export(Some("pdf".into()), None, None, None, Some(true)).is_err_and(|e| e.contains("raster")));
+        assert!(export(Some("png".into()), Some(true), None, None, Some(true)).is_err_and(|e| e.contains("markSaved")));
+        assert_eq!(image_only_refusal(&[Picked::Image]), None);
+        for (picked, why) in [
+            (vec![], "nothing is selected"),
+            (vec![Picked::Group], "a group is selected"),
+            (vec![Picked::Path], "a path is selected"),
+            (vec![Picked::Type], "type is selected"),
+            (vec![Picked::Other], "isn't an image"),
+            (vec![Picked::Image, Picked::Image], "2 objects are selected"),
+        ] {
+            let e = image_only_refusal(&picked).unwrap();
+            assert!(e.starts_with("vectorcraft:export: select one image (") && e.contains(why), "{picked:?}: {e}");
+        }
+    }
+
+    #[test]
     fn leaves_the_editing_data_out_of_a_pdf_when_asked() {
-        assert_eq!(export(None, Some(true), None, Some(false)).map(|e| e.preserve_editing), Ok(Some(false)));
-        assert_eq!(export(None, None, None, None).map(|e| e.preserve_editing), Ok(None));
-        assert!(export(Some("svg".into()), None, None, Some(false)).is_err_and(|e| e.contains("preserveEditing")));
+        assert_eq!(export(None, Some(true), None, Some(false), None).map(|e| e.preserve_editing), Ok(Some(false)));
+        assert_eq!(export(None, None, None, None, None).map(|e| e.preserve_editing), Ok(None));
+        assert!(export(Some("svg".into()), None, None, Some(false), None).is_err_and(|e| e.contains("preserveEditing")));
     }
 
     #[test]
     fn exports_the_selection_but_not_as_the_saved_document() {
-        assert_eq!(export(Some("png".into()), None, Some(true), None).map(|e| (e.format, e.selected_only)), Ok(("png", true)));
-        assert!(export(Some("png".into()), Some(true), Some(true), None).is_err_and(|e| e.contains("markSaved")));
-        assert_eq!(export(None, Some(true), None, None).map(|e| e.selected_only), Ok(false));
+        assert_eq!(export(Some("png".into()), None, Some(true), None, None).map(|e| (e.format, e.selected_only)), Ok(("png", true)));
+        assert!(export(Some("png".into()), Some(true), Some(true), None, None).is_err_and(|e| e.contains("markSaved")));
+        assert_eq!(export(None, Some(true), None, None, None).map(|e| e.selected_only), Ok(false));
     }
 
     #[test]

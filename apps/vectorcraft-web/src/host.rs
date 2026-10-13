@@ -96,7 +96,7 @@ impl Bridge {
         services.recovery_store = None;
         let bridge = self.clone();
         services.download = Some(Box::new(move |name: &str, bytes: &[u8]| {
-            if let Err(e) = bridge.post_file(name, bytes, None, None) {
+            if let Err(e) = bridge.post_file(name, bytes, None, None, false) {
                 log::error!("couldn't hand {name} to the page: {e}");
             }
         }));
@@ -121,8 +121,8 @@ impl Bridge {
         let asked = std::mem::take(&mut *self.exports.borrow_mut());
         for (id, export) in asked {
             match write_export(app, &export) {
-                Ok((name, bytes, bounds)) => {
-                    if let Err(e) = self.post_file(&name, &bytes, Some(&id), bounds) {
+                Ok((name, bytes, bounds, native)) => {
+                    if let Err(e) = self.post_file(&name, &bytes, Some(&id), bounds, native) {
                         log::error!("couldn't hand {name} to the page: {e}");
                     }
                 }
@@ -160,11 +160,15 @@ impl Bridge {
     }
 
     /// A `vectorcraft:save`; `id` when it answers a `vectorcraft:export`.
-    fn post_file(&self, name: &str, bytes: &[u8], id: Option<&JsValue>, bounds: Option<vectorcraft_geom::Rect>) -> Result<(), String> {
+    /// `native`: the bytes are a selected image's own pixels, as embedded (not a render).
+    fn post_file(&self, name: &str, bytes: &[u8], id: Option<&JsValue>, bounds: Option<vectorcraft_geom::Rect>, native: bool) -> Result<(), String> {
         let buffer = js_sys::Uint8Array::from(bytes).buffer();
         let mut fields = vec![("type", "vectorcraft:save".into()), ("name", name.into()), ("bytes", buffer.clone().into())];
         if let Some(id) = id {
             fields.push(("id", id.clone()));
+        }
+        if native {
+            fields.push(("native", true.into()));
         }
         if let Some(b) = bounds
             && let Some(o) = message(&[("x", b.x0.into()), ("y", b.y0.into()), ("width", b.width().into()), ("height", b.height().into())])
@@ -193,7 +197,7 @@ impl Bridge {
             if string(&data, "type").as_deref() == Some("vectorcraft:export") {
                 let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
                 let flag = |k: &str| js_sys::Reflect::get(&data, &JsValue::from_str(k)).ok().and_then(|v| v.as_bool());
-                match protocol::export(string(&data, "format"), flag("markSaved"), flag("selectedOnly"), flag("preserveEditing")) {
+                match protocol::export(string(&data, "format"), flag("markSaved"), flag("selectedOnly"), flag("preserveEditing"), flag("imageOnly")) {
                     Ok(export) => {
                         bridge.exports.borrow_mut().push((id, export));
                         wake();
@@ -271,12 +275,30 @@ fn bytes(data: &JsValue) -> Option<Vec<u8>> {
 }
 
 /// The active document written as `export` asks → its file name and bytes.
-fn write_export(app: &mut VectorcraftApp, export: &protocol::Export) -> Result<(String, Vec<u8>, Option<vectorcraft_geom::Rect>), String> {
+/// → the file's name, its bytes, the selection's bounds (with `selected_only`), and whether the bytes
+/// are a selected image's own pixels.
+fn write_export(app: &mut VectorcraftApp, export: &protocol::Export) -> Result<(String, Vec<u8>, Option<vectorcraft_geom::Rect>, bool), String> {
     use vectorcraft_engine::cmd::fileio;
     let st = app.session.active().ok_or("vectorcraft:export: no document is open")?;
     let title = st.title();
     let stem = std::path::Path::new(&title).file_stem().map_or_else(|| title.clone(), |s| s.to_string_lossy().to_string());
     let selected = st.selection.objects.clone();
+    // Only one image's own pixels will do: anything else is refused, saying what is selected.
+    if export.image_only {
+        let picked: Vec<protocol::Picked> = selected
+            .iter()
+            .map(|id| match st.doc.node(*id).map(|n| &n.kind) {
+                Some(vectorcraft_doc::NodeKind::Image(_)) => protocol::Picked::Image,
+                Some(vectorcraft_doc::NodeKind::Group { .. }) => protocol::Picked::Group,
+                Some(vectorcraft_doc::NodeKind::Path { .. }) => protocol::Picked::Path,
+                Some(vectorcraft_doc::NodeKind::Text(_)) => protocol::Picked::Type,
+                _ => protocol::Picked::Other,
+            })
+            .collect();
+        if let Some(why) = protocol::image_only_refusal(&picked) {
+            return Err(why);
+        }
+    }
     if export.selected_only && selected.is_empty() {
         return Err("vectorcraft:export: select something to export (selectedOnly)".to_string());
     }
@@ -285,7 +307,7 @@ fn write_export(app: &mut VectorcraftApp, export: &protocol::Export) -> Result<(
         export.selected_only.then(|| selected.iter().filter_map(|id| st.doc.node(*id)?.geometric_bounds()).reduce(|a, b| a.union(b))).flatten();
     // One selected image, asked for as a raster: its own pixels as embedded, not drawn again.
     let one_image = match selected.as_slice() {
-        [id] if export.selected_only && is_raster(export.format) => {
+        [id] if export.selected_only && protocol::is_raster(export.format) => {
             st.doc.node(*id).filter(|n| matches!(n.kind, vectorcraft_doc::NodeKind::Image(_))).map(|_| *id)
         }
         _ => None,
@@ -294,7 +316,7 @@ fn write_export(app: &mut VectorcraftApp, export: &protocol::Export) -> Result<(
         let r = app.session.execute("links.unembed", &serde_json::json!({ "id": id.0 })).map_err(|e| e.to_string())?;
         let name = r.get("name").and_then(serde_json::Value::as_str).unwrap_or("image.png").to_string();
         let data = r.get("dataBase64").and_then(serde_json::Value::as_str).and_then(vectorcraft_format::base64_decode);
-        return Ok((name, data.ok_or("vectorcraft:export: the image's pixels couldn't be read")?, bounds));
+        return Ok((name, data.ok_or("vectorcraft:export: the image's pixels couldn't be read")?, bounds, true));
     }
     let mut params = serde_json::json!({ "selectedOnly": export.selected_only });
     if let (Some(keep), Some(o)) = (export.preserve_editing, params.as_object_mut()) {
@@ -307,12 +329,7 @@ fn write_export(app: &mut VectorcraftApp, export: &protocol::Export) -> Result<(
     {
         st.mark_saved();
     }
-    Ok((format!("{stem}.{}", export.extension), bytes, bounds))
-}
-
-/// A raster format: an image's own pixels can stand for it.
-fn is_raster(format: &str) -> bool {
-    matches!(format, "png" | "jpeg" | "jpg" | "webp" | "gif" | "tiff" | "bmp")
+    Ok((format!("{stem}.{}", export.extension), bytes, bounds, false))
 }
 
 /// Place `place`'s file in place of the one selected object (with nothing selected, at `at`) →
