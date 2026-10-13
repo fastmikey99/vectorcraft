@@ -26,6 +26,9 @@ pub struct Export {
     /// Only the selection: one selected image in a raster format comes as its own pixels, as
     /// embedded (not drawn again); anything else as the selected objects written in `format`.
     pub selected_only: bool,
+    /// PDF only: keep (`true`) or leave out (`false`) the native document the PDF carries for
+    /// editing it again; `None` is the format's default (kept).
+    pub preserve_editing: Option<bool>,
 }
 
 /// What a `vectorcraft:place` delivers: a file placed into the open document in place of the one
@@ -70,7 +73,12 @@ pub fn open(name: Option<String>, bytes: Option<Vec<u8>>) -> Result<Open, String
 
 /// Check a `vectorcraft:export` the bridge accepted: `format` is optional (PDF without it) but must
 /// be one the app writes. The error is the text of the `vectorcraft:failed` reply.
-pub fn export(format: Option<String>, mark_saved: Option<bool>, selected_only: Option<bool>) -> Result<Export, String> {
+pub fn export(
+    format: Option<String>,
+    mark_saved: Option<bool>,
+    selected_only: Option<bool>,
+    preserve_editing: Option<bool>,
+) -> Result<Export, String> {
     let asked = format.unwrap_or_else(|| "pdf".to_string());
     let f = vectorcraft_engine::cmd::fileio::writable_format(Some(asked.trim()), None)
         .map_err(|e| format!("vectorcraft:export can't write `{asked}`: {e}"))?;
@@ -80,7 +88,11 @@ pub fn export(format: Option<String>, mark_saved: Option<bool>, selected_only: O
     if mark_saved && selected_only {
         return Err("vectorcraft:export: markSaved can't go with selectedOnly".to_string());
     }
-    Ok(Export { format: f.id, extension, mark_saved, selected_only })
+    // Only a PDF carries the native document: refused elsewhere rather than ignored.
+    if preserve_editing.is_some() && f.id != "pdf" {
+        return Err(format!("vectorcraft:export: preserveEditing is for pdf, not `{}`", f.id));
+    }
+    Ok(Export { format: f.id, extension, mark_saved, selected_only, preserve_editing })
 }
 
 /// Check a `vectorcraft:place` the bridge accepted: a file name, its bytes, and `at` (when given) as
@@ -143,19 +155,22 @@ mod tests {
 
     #[test]
     fn exports_pdf_unless_asked_for_another_format() {
-        assert_eq!(export(None, None, None), Ok(Export { format: "pdf", extension: "pdf", mark_saved: false, selected_only: false }));
         assert_eq!(
-            export(Some("svg".into()), Some(true), None),
-            Ok(Export { format: "svg", extension: "svg", mark_saved: true, selected_only: false })
+            export(None, None, None, None),
+            Ok(Export { format: "pdf", extension: "pdf", mark_saved: false, selected_only: false, preserve_editing: None })
+        );
+        assert_eq!(
+            export(Some("svg".into()), Some(true), None, None),
+            Ok(Export { format: "svg", extension: "svg", mark_saved: true, selected_only: false, preserve_editing: None })
         );
         // An extension names its format too.
-        assert_eq!(export(Some("png".into()), None, None).map(|e| e.format), Ok("png"));
+        assert_eq!(export(Some("png".into()), None, None, None).map(|e| e.format), Ok("png"));
     }
 
     #[test]
     fn refuses_an_export_in_a_format_the_app_doesnt_write() {
         for format in ["", "docx", "PDF but not really", "vectorcraft:pdf"] {
-            let error = export(Some(format.to_string()), None, None).err();
+            let error = export(Some(format.to_string()), None, None, None).err();
             assert!(error.as_deref().is_some_and(|e| e.starts_with("vectorcraft:export can't write")), "{format:?}: {error:?}");
         }
     }
@@ -168,10 +183,17 @@ mod tests {
     }
 
     #[test]
+    fn leaves_the_editing_data_out_of_a_pdf_when_asked() {
+        assert_eq!(export(None, Some(true), None, Some(false)).map(|e| e.preserve_editing), Ok(Some(false)));
+        assert_eq!(export(None, None, None, None).map(|e| e.preserve_editing), Ok(None));
+        assert!(export(Some("svg".into()), None, None, Some(false)).is_err_and(|e| e.contains("preserveEditing")));
+    }
+
+    #[test]
     fn exports_the_selection_but_not_as_the_saved_document() {
-        assert_eq!(export(Some("png".into()), None, Some(true)).map(|e| (e.format, e.selected_only)), Ok(("png", true)));
-        assert!(export(Some("png".into()), Some(true), Some(true)).is_err_and(|e| e.contains("markSaved")));
-        assert_eq!(export(None, Some(true), None).map(|e| e.selected_only), Ok(false));
+        assert_eq!(export(Some("png".into()), None, Some(true), None).map(|e| (e.format, e.selected_only)), Ok(("png", true)));
+        assert!(export(Some("png".into()), Some(true), Some(true), None).is_err_and(|e| e.contains("markSaved")));
+        assert_eq!(export(None, Some(true), None, None).map(|e| e.selected_only), Ok(false));
     }
 
     #[test]

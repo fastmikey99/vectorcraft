@@ -167,7 +167,7 @@ impl Bridge {
             if string(&data, "type").as_deref() == Some("vectorcraft:export") {
                 let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
                 let flag = |k: &str| js_sys::Reflect::get(&data, &JsValue::from_str(k)).ok().and_then(|v| v.as_bool());
-                match protocol::export(string(&data, "format"), flag("markSaved"), flag("selectedOnly")) {
+                match protocol::export(string(&data, "format"), flag("markSaved"), flag("selectedOnly"), flag("preserveEditing")) {
                     Ok(export) => {
                         bridge.exports.borrow_mut().push((id, export));
                         wake();
@@ -260,7 +260,10 @@ fn write_export(app: &mut VectorcraftApp, export: &protocol::Export) -> Result<(
         let data = r.get("dataBase64").and_then(serde_json::Value::as_str).and_then(vectorcraft_format::base64_decode);
         return Ok((name, data.ok_or("vectorcraft:export: the image's pixels couldn't be read")?, bounds));
     }
-    let params = serde_json::json!({ "selectedOnly": export.selected_only });
+    let mut params = serde_json::json!({ "selectedOnly": export.selected_only });
+    if let (Some(keep), Some(o)) = (export.preserve_editing, params.as_object_mut()) {
+        o.insert("preserveEditing".into(), keep.into());
+    }
     let doc = fileio::export_source(st, &params).map_err(|e| e.to_string())?;
     let (bytes, _warnings) = fileio::encode_with_warnings(&doc, export.format, &params).map_err(|e| e.to_string())?;
     if export.mark_saved

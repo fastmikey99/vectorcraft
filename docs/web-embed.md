@@ -37,7 +37,7 @@ Every message is a plain object with a string `type`. VectorCraft posts only to 
 |---|---|---|---|
 | `vectorcraft:ready` | to the parent | `version` (string), `singleDocument` (`true`) | The app is running and listening. Send the file now. |
 | `vectorcraft:open` | from the parent | `name` (string), `bytes` (`ArrayBuffer` or `Uint8Array`) | Open this file, as if it were picked with File › Open. |
-| `vectorcraft:export` | from the parent | `id` (any), `format` (string, optional), `markSaved` (boolean, optional), `selectedOnly` (boolean, optional) | Write the active document (or only the selection) as `format` (PDF without it) and send it back. |
+| `vectorcraft:export` | from the parent | `id` (any), `format` (string, optional), `markSaved` (boolean, optional), `selectedOnly` (boolean, optional), `preserveEditing` (boolean, optional, PDF only) | Write the active document (or only the selection) as `format` (PDF without it) and send it back. |
 | `vectorcraft:place` | from the parent | `id` (any), `name` (string), `bytes` (`ArrayBuffer` or `Uint8Array`), `at` (`{x, y, width, height}`, optional) | Put this file in place of the selected object, fitted inside `at`. |
 | `vectorcraft:placed` | to the parent | `id`, `ids` (numbers) | The place with this `id` is done. |
 | `vectorcraft:save` | to the parent | `name` (string), `bytes` (`ArrayBuffer`, transferred), `id` (when it answers an export), `bounds` (with `selectedOnly`) | Store this file. |
@@ -61,6 +61,7 @@ Every message is a plain object with a string `type`. VectorCraft posts only to 
 - The answer is a `vectorcraft:save` carrying the request's `id` (pass a number or string to match answers to requests), named after the document with the format's extension.
 - With `markSaved: true` the document counts as saved once written (the page is storing it as the saved file), and `dirty: false` follows. Otherwise exporting leaves the unsaved state as it was, as File › Export does.
 - With no document open, or a format the app doesn't write, the answer is `vectorcraft:failed` with the `error` and the same `id`.
+- `preserveEditing: false` (PDF only) leaves out the native document a PDF otherwise carries for editing it again (File › Save as PDF's Preserve Editing Capabilities): the file is about the size of the art alone, and reopening it reads the PDF as printed. Left out, the PDF keeps it. With another format it is refused.
 - With `selectedOnly: true`, only the selection is written, and the `save` carries its `bounds` (`{x, y, width, height}` in document points). One selected image asked for in a raster format (`png`, `jpeg`…) comes as its own pixels, as they are embedded (PNG, JPEG, GIF or WebP as stored, others as PNG), not drawn again at screen resolution: what a tracing or upscaling service needs. `markSaved` can't go with it (a part isn't the document), and with nothing selected the answer is `vectorcraft:failed`.
 
 **`vectorcraft:place`** puts a file into the open document, never opening it as a document of its own, so it works in host mode:
