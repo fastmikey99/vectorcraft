@@ -137,13 +137,15 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
                         app
                     }
                     None => {
+                        let mut app = VectorcraftApp::new(Session::new(), services);
+                        restore_prefs(&mut app);
                         if let Some(bridge) = &host.bridge {
                             bridge.post_ready();
                         }
-                        VectorcraftApp::new(Session::new(), services)
+                        app
                     }
                 };
-                Ok(Box::new(WebShell { app: Some(app), host, canvas: page, loss }))
+                Ok(Box::new(WebShell { app: Some(app), host, canvas: page, loss, prefs_saved: None, prefs_checked: 0.0 }))
             }),
         )
         .await;
@@ -346,9 +348,57 @@ struct WebShell {
     host: Host,
     canvas: web_sys::HtmlCanvasElement,
     loss: GraphicsLoss,
+    /// The preferences and workspace last written to the browser's storage ([`PREFS_KEY`]), and
+    /// when they were last compared with the app's (ms since the epoch).
+    prefs_saved: Option<String>,
+    prefs_checked: f64,
+}
+
+/// Where the preferences and the workspace (the interface's state, as the desktop app keeps them
+/// in its preferences file) live in the browser's storage, shared by the site's tabs.
+const PREFS_KEY: &str = "vectorcraft-prefs";
+/// How often the app's preferences are compared with the stored ones (ms). Browsers don't say
+/// reliably when a tab closes, so they are written as they change rather than on the way out.
+const PREFS_EVERY_MS: f64 = 2000.0;
+
+/// The stored preferences and workspace, when there are any, put back (as the desktop app does at
+/// start-up); then the preferences applied to the session.
+fn restore_prefs(app: &mut VectorcraftApp) {
+    let saved = local_storage().ok().and_then(|s| s.get_item(PREFS_KEY).ok().flatten());
+    match saved.map(|t| serde_json::from_str::<vectorcraft_ui_egui::UiState>(&t)) {
+        Some(Ok(ui)) => app.ui = ui.sanitized(),
+        Some(Err(e)) => log::warn!("vectorcraft-web: the stored preferences couldn't be read, so the defaults apply: {e}"),
+        None => {}
+    }
+    vectorcraft_ui_egui::prefs_dialog::restore(app);
+}
+
+/// The app's preferences and workspace as stored.
+fn prefs_json(app: &VectorcraftApp) -> Option<String> {
+    let mut ui = app.ui.clone();
+    ui.engine_prefs = app.session.prefs.to_json();
+    serde_json::to_string(&ui).ok()
 }
 
 impl WebShell {
+    /// Every [`PREFS_EVERY_MS`]: write the preferences and workspace when they changed.
+    fn save_prefs(&mut self) {
+        let now = js_sys::Date::now();
+        if now - self.prefs_checked < PREFS_EVERY_MS {
+            return;
+        }
+        self.prefs_checked = now;
+        let Some(json) = self.app.as_ref().and_then(prefs_json) else { return };
+        if self.prefs_saved.as_deref() == Some(json.as_str()) {
+            return;
+        }
+        match local_storage().and_then(|s| s.set_item(PREFS_KEY, &json).map_err(js_err)) {
+            Ok(()) => self.prefs_saved = Some(json),
+            // Best effort, as on the desktop: the next change tries again.
+            Err(e) => log::warn!("vectorcraft-web: couldn't store the preferences: {e}"),
+        }
+    }
+
     /// The graphics were lost (`why`): keep recovery copies, then start again on a new canvas
     /// with the same app once this frame is over (the runner is busy with it until then).
     fn restart(&mut self, why: &str) {
@@ -406,6 +456,7 @@ impl eframe::App for WebShell {
             }
         }
         app.logic(ctx);
+        self.save_prefs();
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
