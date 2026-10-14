@@ -4296,3 +4296,6 @@ lighting	Light	Світло
 	Load EPS into Clipboard	Завантажити EPS у буфер обміну
 @msg	an image of {w} × {h} pixels is too large to draw	зображення розміром {w} × {h} пікселів завелике для відображення
 @msg	{what}: this editor works on one file only	{what}: цей редактор працює лише з одним файлом
+@msg	Line weight check failed: {e}	Не вдалося перевірити товщину ліній: {e}
+	Check Line Weight	Перевірити товщину ліній
+	Clear Line Weight Check	Очистити перевірку товщини ліній

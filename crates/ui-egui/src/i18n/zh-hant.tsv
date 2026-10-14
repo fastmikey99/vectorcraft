@@ -3685,3 +3685,6 @@ lighting	Light	光源
 	Load EPS into Clipboard	將 EPS 載入剪貼簿
 @msg	an image of {w} × {h} pixels is too large to draw	{w} × {h} 像素的影像過大，無法繪製
 @msg	{what}: this editor works on one file only	{what}：此編輯器只處理一個檔案
+@msg	Line weight check failed: {e}	線寬檢查失敗：{e}
+	Check Line Weight	檢查線寬
+	Clear Line Weight Check	清除線寬檢查

@@ -4316,3 +4316,6 @@ lighting	Light	Luce
 	Load EPS into Clipboard	Carica EPS negli appunti
 @msg	an image of {w} × {h} pixels is too large to draw	un'immagine di {w} × {h} pixel è troppo grande per essere disegnata
 @msg	{what}: this editor works on one file only	{what}: questo editor lavora su un solo file
+@msg	Line weight check failed: {e}	Controllo dello spessore delle linee non riuscito: {e}
+	Check Line Weight	Controlla spessore linee
+	Clear Line Weight Check	Cancella controllo spessore linee

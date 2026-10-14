@@ -4747,3 +4747,6 @@ mark-style	Japanese	Japonské
 	Load EPS into Clipboard	Načíst EPS do schránky
 @msg	an image of {w} × {h} pixels is too large to draw	obraz o velikosti {w} × {h} obrazových bodů je příliš velký na vykreslení
 @msg	{what}: this editor works on one file only	{what}: tento editor pracuje jen s jedním souborem
+@msg	Line weight check failed: {e}	Kontrola tloušťky čar selhala: {e}
+	Check Line Weight	Zkontrolovat tloušťku čar
+	Clear Line Weight Check	Vymazat kontrolu tloušťky čar

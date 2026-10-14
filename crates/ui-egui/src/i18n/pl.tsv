@@ -4589,3 +4589,6 @@ mark-style	Japanese	Japońskie
 	Load EPS into Clipboard	Wczytaj EPS do schowka
 @msg	an image of {w} × {h} pixels is too large to draw	obraz o wymiarach {w} × {h} pikseli jest zbyt duży, aby go narysować
 @msg	{what}: this editor works on one file only	{what}: ten edytor pracuje tylko na jednym pliku
+@msg	Line weight check failed: {e}	Sprawdzanie grubości linii nie powiodło się: {e}
+	Check Line Weight	Sprawdź grubość linii
+	Clear Line Weight Check	Wyczyść sprawdzanie grubości linii

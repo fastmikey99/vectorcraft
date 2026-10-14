@@ -4688,3 +4688,6 @@ mark-style	Japanese	Japonesas
 	Load EPS into Clipboard	Cargar EPS en el portapapeles
 @msg	an image of {w} × {h} pixels is too large to draw	una imagen de {w} × {h} píxeles es demasiado grande para dibujarse
 @msg	{what}: this editor works on one file only	{what}: este editor trabaja con un solo archivo
+@msg	Line weight check failed: {e}	No se pudo comprobar el grosor de línea: {e}
+	Check Line Weight	Comprobar grosor de línea
+	Clear Line Weight Check	Borrar comprobación de grosor de línea

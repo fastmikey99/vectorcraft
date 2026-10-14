@@ -4298,3 +4298,6 @@ theme	Appearance	Giao diện
 	Load EPS into Clipboard	Tải EPS vào bảng tạm
 @msg	an image of {w} × {h} pixels is too large to draw	ảnh {w} × {h} điểm ảnh quá lớn nên không thể vẽ
 @msg	{what}: this editor works on one file only	{what}: trình soạn thảo này chỉ làm việc với một tệp
+@msg	Line weight check failed: {e}	Kiểm tra độ dày nét thất bại: {e}
+	Check Line Weight	Kiểm tra độ dày nét
+	Clear Line Weight Check	Xóa kiểm tra độ dày nét

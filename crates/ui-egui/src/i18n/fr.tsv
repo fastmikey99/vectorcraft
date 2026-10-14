@@ -4747,3 +4747,6 @@ theme	Appearance	Apparence
 	Load EPS into Clipboard	Charger un EPS dans le presse-papiers
 @msg	an image of {w} × {h} pixels is too large to draw	une image de {w} × {h} pixels est trop grande pour être dessinée
 @msg	{what}: this editor works on one file only	{what} : cet éditeur ne travaille que sur un seul fichier
+@msg	Line weight check failed: {e}	Échec de la vérification de l’épaisseur des traits : {e}
+	Check Line Weight	Vérifier l’épaisseur des traits
+	Clear Line Weight Check	Effacer la vérification de l’épaisseur des traits

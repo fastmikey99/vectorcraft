@@ -1807,6 +1807,8 @@ mod tests_layers;
 #[cfg(test)]
 mod tests_library;
 #[cfg(test)]
+mod tests_lineweight;
+#[cfg(test)]
 mod tests_linked_stops;
 #[cfg(test)]
 mod tests_linkfiles;

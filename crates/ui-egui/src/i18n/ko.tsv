@@ -4280,3 +4280,6 @@ lighting	Light	광원
 	Load EPS into Clipboard	EPS를 클립보드로 불러오기
 @msg	an image of {w} × {h} pixels is too large to draw	{w} × {h}픽셀 이미지는 너무 커서 그릴 수 없습니다
 @msg	{what}: this editor works on one file only	{what}: 이 편집기는 파일 하나만 다룹니다
+@msg	Line weight check failed: {e}	선 두께 검사 실패: {e}
+	Check Line Weight	선 두께 검사
+	Clear Line Weight Check	선 두께 검사 지우기

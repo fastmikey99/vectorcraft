@@ -4310,3 +4310,6 @@ lighting	Light	ライト
 	Load EPS into Clipboard	EPS をクリップボードに読み込む
 @msg	an image of {w} × {h} pixels is too large to draw	{w} × {h} ピクセルの画像は大きすぎて描画できません
 @msg	{what}: this editor works on one file only	{what}: このエディターで扱えるファイルは 1 つだけです
+@msg	Line weight check failed: {e}	線幅のチェックに失敗しました: {e}
+	Check Line Weight	線幅をチェック
+	Clear Line Weight Check	線幅チェックを消去
