@@ -82,6 +82,7 @@ pub fn start() {
             bridge: if query_param("host").as_deref() == Some("parent") { crate::host::Bridge::new() } else { None },
         };
         track_paste(&host.pasted);
+        keep_shortcuts_from_the_browser();
         if let Some(bridge) = &host.bridge {
             let pasted = host.pasted.clone();
             bridge.listen(move || {
@@ -226,6 +227,44 @@ fn track_drag(canvas: &web_sys::HtmlCanvasElement, pos: &DragPos) {
     }
     // The listener lives as long as the canvas.
     on_drag.forget();
+}
+
+/// The browser acts on some of the editor's shortcuts as well, unless told not to: Ctrl+2 locks the
+/// selection and switched to the browser's second tab too, Ctrl+= zoomed the page as well as the view,
+/// Ctrl+D bookmarked it. A key press that is one of the editor's command shortcuts in effect
+/// (`shortcuts::is_bound`) doesn't get the browser's action; the editor still gets the key (no
+/// `stopPropagation`). Copy, cut and paste are left alone: the editor works from the browser's own
+/// clipboard events. The shortcuts browsers keep for themselves (new tab, close tab…) can't be
+/// taken, so they still act.
+fn keep_shortcuts_from_the_browser() {
+    let Some(window) = web_sys::window() else { return };
+    let mac = window.navigator().platform().is_ok_and(|p| p.to_ascii_lowercase().contains("mac"));
+    let on_key = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
+        if !(e.ctrl_key() || e.meta_key()) {
+            return;
+        }
+        // `code` is the physical key, whatever the layout (Digit2, KeyG, Equal…), as egui names it.
+        let Some(key) = egui::Key::from_name(&e.code()) else { return };
+        if matches!(key, egui::Key::C | egui::Key::V | egui::Key::X) {
+            return;
+        }
+        let m = egui::Modifiers {
+            alt: e.alt_key(),
+            ctrl: e.ctrl_key(),
+            shift: e.shift_key(),
+            mac_cmd: mac && e.meta_key(),
+            command: if mac { e.meta_key() } else { e.ctrl_key() },
+        };
+        if vectorcraft_ui_egui::shortcuts::is_bound(key, m) {
+            e.prevent_default();
+        }
+    });
+    // Captured, so it is decided before anything else on the page acts on the key.
+    if let Err(e) = window.add_event_listener_with_callback_and_bool("keydown", on_key.as_ref().unchecked_ref(), true) {
+        log::error!("couldn't follow keydown events: {e:?}");
+    }
+    // The listener lives as long as the page.
+    on_key.forget();
 }
 
 /// Take pictures and files pasted into the page (egui reads a paste's text only): a paste without
