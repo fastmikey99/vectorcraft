@@ -39,6 +39,7 @@ mod intertwine;
 mod layer;
 mod layerpanel;
 pub mod library;
+pub mod lineweight;
 pub mod linkfiles;
 pub mod links;
 mod live;
@@ -297,6 +298,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(cut::specs());
         v.extend(halftone::specs());
         v.extend(perspgrid::specs());
+        v.extend(lineweight::specs());
         v.extend(shortcutset::specs());
         v.extend(importmatches::specs());
         v
