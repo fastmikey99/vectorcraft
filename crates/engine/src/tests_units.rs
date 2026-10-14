@@ -132,3 +132,28 @@ fn distance_params_take_a_unit() {
     let st = t.first_style();
     assert_eq!((st.size, st.leading, st.tracking), (36.0, Some(72.0), 20.0));
 }
+
+/// A file that doesn't say which units it was drawn in (a PDF, an SVG in pixels) opens in Preferences ›
+/// Units › General, as Illustrator opens it; one that does (an SVG sized in mm, a native document)
+/// keeps its own. Someone who works in millimetres sees millimetres in whatever they open.
+#[test]
+fn files_without_units_of_their_own_open_in_the_preferred_units() {
+    let mut s = Session::new();
+    s.execute("prefs.set", &json!({"key": "unitsGeneral", "value": "millimeters"})).unwrap();
+    let pdf = vectorcraft_testkit::pdf::pdf(&[vectorcraft_testkit::pdf::PdfPage::new(100.0, 100.0, "0 g 10 10 20 20 re f")], None);
+    crate::cmd::fileio::open_bytes(&mut s, "job.pdf", &pdf, None).unwrap();
+    assert_eq!(units(&s), Unit::Millimeters, "a PDF");
+    let px = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="10" height="10"/></svg>"#;
+    crate::cmd::fileio::open_bytes(&mut s, "web.svg", px, None).unwrap();
+    assert_eq!(units(&s), Unit::Millimeters, "an SVG in pixels");
+    // Its own unit wins: an SVG sized in inches stays in inches.
+    let inches = br#"<svg xmlns="http://www.w3.org/2000/svg" width="2in" height="1in" viewBox="0 0 200 100"><rect width="10" height="10"/></svg>"#;
+    crate::cmd::fileio::open_bytes(&mut s, "print.svg", inches, None).unwrap();
+    assert_eq!(units(&s), Unit::Inches, "an SVG sized in inches");
+    // A native document keeps the units it was saved in.
+    s.execute("file.new", &json!({"width": 100, "height": 100, "units": "Points"})).unwrap();
+    assert_eq!(units(&s), Unit::Points);
+    let native = vectorcraft_format::save_file(&s.doc().unwrap().doc);
+    crate::cmd::fileio::open_bytes(&mut s, "saved.vectorcraft", &native, None).unwrap();
+    assert_eq!(units(&s), Unit::Points, "a native document");
+}
