@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "apps/*", "xtask"]
+exclude = ["vendor"]
 default-members = ["crates/*", "apps/vectorcraft", "apps/vectorcraft-cli", "xtask"]
 
 [workspace.package]
@@ -109,3 +110,8 @@ opt-level = 1
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# hayro-interpret 0.7.0 with the pending clip applied after fills and strokes
+# (vendor/hayro-interpret/src/interpret/path.rs, apply_pending_clip). Drop when hayro ships the fix.
+[patch.crates-io]
+hayro-interpret = { path = "vendor/hayro-interpret" }
