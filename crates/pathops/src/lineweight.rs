@@ -362,7 +362,7 @@ fn check_cluster(s: &PathData, r: f64, reach: f64, gaps: bool, min_area: f64) ->
         // The far part: farther than `reach` from the opening (the shrunk art grown by
         // `r + reach`).
         let near = if eroded.is_empty() { PathData::default() } else { offset(&eroded, r + reach)? };
-        significant(&thin_all, &difference(&thin_all, &near)?, min_area)?
+        significant(&thin_all, &difference(&thin_all, &near)?, min_area, r + reach)?
     };
     if !gaps {
         return Ok((thin, vec![]));
@@ -378,30 +378,37 @@ fn check_cluster(s: &PathData, r: f64, reach: f64, gaps: bool, min_area: f64) ->
         // `r + reach`).
         let core = offset(&grown, -(r + reach))?;
         let far = if core.is_empty() { PathData::default() } else { try_boolean(&gaps_all, nz, &core, nz, BoolOp::Intersect, DEFAULT_PRECISION)? };
-        significant(&gaps_all, &far, min_area)?
+        significant(&gaps_all, &far, min_area, r + reach)?
     };
     Ok((thin, narrow))
 }
 
 /// The regions of `all` (one path per outline with its holes) that hold a piece of `far` of at
-/// least `min_area`.
-fn significant(all: &PathData, far: &PathData, min_area: f64) -> Result<Vec<PathData>, PathOpsError> {
+/// least `min_area`, each cut to within `grow` of those pieces.
+///
+/// The cut keeps a region to the feature that made it: the refit of the offsets leaves slivers a
+/// hundredth of a point wide along the edges of the art, and one that touches a real thin part
+/// would otherwise make the whole edge part of it (the tip of a long wedge reported as the wedge's
+/// whole outline). Everything of a real thin part or gap lies within `r + reach` of its far part.
+fn significant(all: &PathData, far: &PathData, min_area: f64, grow: f64) -> Result<Vec<PathData>, PathOpsError> {
     if far.is_empty() {
         return Ok(vec![]);
     }
-    // A point inside each piece of `far` big enough to count.
+    // The pieces of `far` big enough to count, and a point inside each.
     let far_contours = normalize_bez(&fill_bezpath(far), FillRule::NonZero)?;
     let tidy = Tidy::free(DEFAULT_PRECISION);
-    let points: Vec<Point> = components(&far_contours)
+    let pieces: Vec<PathData> = components(&far_contours)
         .iter()
         .map(|c| contours_to_path(&far_contours, c.contours.iter().copied(), &tidy))
         .filter(|p| crate::area(p, FillRule::NonZero) >= min_area)
-        .filter_map(|p| interior_point(&p))
         .collect();
+    let points: Vec<Point> = pieces.iter().filter_map(interior_point).collect();
     if points.is_empty() {
         return Ok(vec![]);
     }
-    let all_contours = normalize_bez(&fill_bezpath(all), FillRule::NonZero)?;
+    let zone = offset(&PathData::new(pieces.into_iter().flat_map(|p| p.subpaths).collect()), grow)?;
+    let cut = try_boolean(all, FillRule::NonZero, &zone, FillRule::NonZero, BoolOp::Intersect, DEFAULT_PRECISION)?;
+    let all_contours = normalize_bez(&fill_bezpath(&cut), FillRule::NonZero)?;
     let mut out = vec![];
     for c in components(&all_contours) {
         let mut region = BezPath::new();
@@ -594,6 +601,18 @@ mod tests {
         let found = line_weight(&[(&art, FillRule::NonZero)], LineWeightOptions::new(min), || true).unwrap();
         let b = found.thin[0].bounds().unwrap();
         assert!(b.y0.abs() < 0.01 && ((b.x0 + b.x1) / 2.0 - 1.5 * MM).abs() < 0.01, "{b:?}");
+    }
+
+    #[test]
+    fn the_tip_of_a_long_wedge_is_reported_not_its_whole_edge() {
+        // A 60 mm wedge 3 mm wide at its base: narrower than 0.2 mm for its last 4 mm. Refit
+        // slivers along its long edges must not make the whole wedge the region.
+        let pts = [(0.0, 0.0), (60.0, -1.5), (60.0, 1.5)].map(|(x, y)| vectorcraft_geom::Point::new(x * MM, y * MM));
+        let art = PathData::single(vectorcraft_geom::SubPath::polyline(&pts, true));
+        let found = line_weight(&[(&art, FillRule::NonZero)], LineWeightOptions::new(0.2 * MM), || true).unwrap();
+        assert_eq!(found.thin.len(), 1, "{found:?}");
+        let b = bounds_mm(&found.thin[0]);
+        assert!(b[0].abs() < 0.01 && b[2] > 3.5 && b[2] < 6.0, "{b:?}");
     }
 
     #[test]
