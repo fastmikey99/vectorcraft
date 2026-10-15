@@ -3756,3 +3756,6 @@ axis	Both	Ambos
 	Pattern Images	Imagens em padrões
 	Export Pattern Image	Exportar imagem do padrão
 	Replace Pattern Image	Substituir imagem do padrão
+@msg	Line weight check failed: {e}	Falha ao verificar a espessura das linhas: {e}
+	Check Line Weight	Verificar espessura das linhas
+	Clear Line Weight Check	Limpar verificação de espessura das linhas

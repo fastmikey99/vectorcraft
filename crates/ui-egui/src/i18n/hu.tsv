@@ -4739,3 +4739,6 @@ imageTrace	Outline	Körvonal
 	Pattern Images	Képek a mintázatokban
 	Export Pattern Image	Mintázat képének exportálása
 	Replace Pattern Image	Mintázat képének cseréje
+@msg	Line weight check failed: {e}	A vonalvastagság ellenőrzése nem sikerült: {e}
+	Check Line Weight	Vonalvastagság ellenőrzése
+	Clear Line Weight Check	Vonalvastagság-ellenőrzés törlése

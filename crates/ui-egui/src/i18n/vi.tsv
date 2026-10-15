@@ -4324,3 +4324,6 @@ theme	Appearance	Giao diện
 	Pattern Images	Hình ảnh trong họa tiết
 	Export Pattern Image	Xuất hình ảnh trong họa tiết
 	Replace Pattern Image	Thay thế hình ảnh trong họa tiết
+@msg	Line weight check failed: {e}	Kiểm tra độ dày nét thất bại: {e}
+	Check Line Weight	Kiểm tra độ dày nét
+	Clear Line Weight Check	Xóa kiểm tra độ dày nét

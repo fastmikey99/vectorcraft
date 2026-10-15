@@ -3707,3 +3707,6 @@ lighting	Light	光源
 	Pattern Images	圖樣中的影像
 	Export Pattern Image	匯出圖樣影像
 	Replace Pattern Image	取代圖樣影像
+@msg	Line weight check failed: {e}	線寬檢查失敗：{e}
+	Check Line Weight	檢查線寬
+	Clear Line Weight Check	清除線寬檢查

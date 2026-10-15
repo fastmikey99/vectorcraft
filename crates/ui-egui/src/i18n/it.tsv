@@ -4342,3 +4342,6 @@ lighting	Light	Luce
 	Pattern Images	Immagini nei motivi
 	Export Pattern Image	Esporta immagine del motivo
 	Replace Pattern Image	Sostituisci immagine del motivo
+@msg	Line weight check failed: {e}	Controllo dello spessore delle linee non riuscito: {e}
+	Check Line Weight	Controlla spessore linee
+	Clear Line Weight Check	Cancella controllo spessore linee

@@ -4322,3 +4322,6 @@ lighting	Light	Світло
 	Pattern Images	Зображення у візерунках
 	Export Pattern Image	Експорт зображення візерунка
 	Replace Pattern Image	Замінити зображення візерунка
+@msg	Line weight check failed: {e}	Не вдалося перевірити товщину ліній: {e}
+	Check Line Weight	Перевірити товщину ліній
+	Clear Line Weight Check	Очистити перевірку товщини ліній

@@ -436,6 +436,23 @@ fn a_shape_filled_with_a_shading_becomes_one_path_with_the_gradient() {
     }
 }
 
+/// A clip set on a path that is also painted (`W* f*`, `W S`) still clips what follows: the
+/// shading is clipped to the diamond, not spread across the page (DF35861: badge lettering came
+/// in as page-sized gradient rectangles).
+#[test]
+fn a_clip_on_a_painted_path_still_clips_what_follows() {
+    let shading = "<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [10 0 90 0] /Extend [true true] /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >>";
+    let resources = format!("/Shading << /Sh0 {shading} >>");
+    for paint in ["W* f*", "W f", "W S", "W* B*"] {
+        let d = open(&one_page(&format!("q 10 50 m 50 90 l 90 50 l 50 10 l h {paint} /Sh0 sh Q"), &resources, &[]));
+        let graded: Vec<Node> = all(&d).into_iter().filter(|n| matches!(n.appearance.fill().map(|f| &f.paint), Some(Paint::Gradient(_)))).collect();
+        let [g] = graded.as_slice() else { panic!("{paint}: one gradient object: {graded:#?}") };
+        let clipped = all(&d).into_iter().find(|n| matches!(n.kind, NodeKind::Group { clip: true, .. }));
+        let b = clipped.as_ref().unwrap_or(g).geometric_bounds().unwrap();
+        assert!(near(b, Rect::new(10.0, 10.0, 90.0, 90.0)), "{paint}: clipped to the diamond, got {b:?}");
+    }
+}
+
 #[test]
 fn appearance_items_are_untouched_for_plain_art() {
     // Plain art keeps importing as before: no masks, groups or clips appear.

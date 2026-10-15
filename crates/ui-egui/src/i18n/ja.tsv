@@ -4336,3 +4336,6 @@ lighting	Light	ライト
 	Pattern Images	パターン内の画像
 	Export Pattern Image	パターン内の画像を書き出し
 	Replace Pattern Image	パターン内の画像を置換
+@msg	Line weight check failed: {e}	線幅のチェックに失敗しました: {e}
+	Check Line Weight	線幅をチェック
+	Clear Line Weight Check	線幅チェックを消去

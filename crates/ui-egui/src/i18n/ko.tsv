@@ -4306,3 +4306,6 @@ lighting	Light	광원
 	Pattern Images	패턴 이미지
 	Export Pattern Image	패턴 이미지 내보내기
 	Replace Pattern Image	패턴 이미지 바꾸기
+@msg	Line weight check failed: {e}	선 두께 검사 실패: {e}
+	Check Line Weight	선 두께 검사
+	Clear Line Weight Check	선 두께 검사 지우기

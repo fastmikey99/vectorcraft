@@ -4297,3 +4297,6 @@ theme	Appearance	Erscheinungsbild
 	Pattern Images	Bilder in Mustern
 	Export Pattern Image	Bild aus Muster exportieren
 	Replace Pattern Image	Bild im Muster ersetzen
+@msg	Line weight check failed: {e}	Prüfung der Linienstärke fehlgeschlagen: {e}
+	Check Line Weight	Linienstärke prüfen
+	Clear Line Weight Check	Linienstärkeprüfung löschen

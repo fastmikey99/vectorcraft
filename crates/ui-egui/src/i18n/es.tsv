@@ -4713,3 +4713,6 @@ mark-style	Japanese	Japonesas
 	Pattern Images	Imágenes de motivos
 	Export Pattern Image	Exportar imagen de motivo
 	Replace Pattern Image	Reemplazar imagen de motivo
+@msg	Line weight check failed: {e}	No se pudo comprobar el grosor de línea: {e}
+	Check Line Weight	Comprobar grosor de línea
+	Clear Line Weight Check	Borrar comprobación de grosor de línea

@@ -4772,3 +4772,6 @@ mark-style	Japanese	Japonské
 	Pattern Images	Obrazy ve vzorcích
 	Export Pattern Image	Exportovat obraz ze vzorku
 	Replace Pattern Image	Nahradit obraz ve vzorku
+@msg	Line weight check failed: {e}	Kontrola tloušťky čar selhala: {e}
+	Check Line Weight	Zkontrolovat tloušťku čar
+	Clear Line Weight Check	Vymazat kontrolu tloušťky čar

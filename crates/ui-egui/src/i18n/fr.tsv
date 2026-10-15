@@ -4772,3 +4772,6 @@ theme	Appearance	Apparence
 	Pattern Images	Images des motifs
 	Export Pattern Image	Exporter une image de motif
 	Replace Pattern Image	Remplacer une image de motif
+@msg	Line weight check failed: {e}	Échec de la vérification de l’épaisseur des traits : {e}
+	Check Line Weight	Vérifier l’épaisseur des traits
+	Clear Line Weight Check	Effacer la vérification de l’épaisseur des traits

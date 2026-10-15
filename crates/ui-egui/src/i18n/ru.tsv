@@ -4338,3 +4338,6 @@ lighting	Light	Свет
 	Pattern Images	Изображения в узорах
 	Export Pattern Image	Экспорт изображения узора
 	Replace Pattern Image	Заменить изображение узора
+@msg	Line weight check failed: {e}	Не удалось проверить толщину линий: {e}
+	Check Line Weight	Проверить толщину линий
+	Clear Line Weight Check	Очистить проверку толщины линий

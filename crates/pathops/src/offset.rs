@@ -77,8 +77,18 @@ pub fn stroke_region(outlines: &[BezPath]) -> PathData {
 /// Closed subpaths are treated as a non-zero filled region; open subpaths are outlined with a
 /// stroke of width `2|delta|` (butt caps).
 pub fn offset_path(path: &PathData, delta: f64, join: Join, miter_limit: f64) -> PathData {
-    if !delta.is_finite() || path.is_empty() {
-        return PathData::default();
+    try_offset_path(path, delta, join, miter_limit).unwrap_or_default()
+}
+
+/// Fallible [`offset_path`]: an error when the sweep can't resolve the offset, where
+/// [`offset_path`] gives an empty path (which is also the right answer for an inset larger than
+/// the shapes, so callers that must tell the two apart use this).
+pub fn try_offset_path(path: &PathData, delta: f64, join: Join, miter_limit: f64) -> Result<PathData, crate::PathOpsError> {
+    if !delta.is_finite() {
+        return Err(crate::PathOpsError::NonFinite);
+    }
+    if path.is_empty() {
+        return Ok(PathData::default());
     }
     let closed = PathData::new(path.subpaths.iter().filter(|s| s.closed && s.anchors.len() > 1).cloned().collect());
     let open: Vec<SubPath> = path.subpaths.iter().filter(|s| !s.closed && s.anchors.len() > 1).cloned().collect();
@@ -90,9 +100,7 @@ pub fn offset_path(path: &PathData, delta: f64, join: Join, miter_limit: f64) ->
     } else {
         BezPath::new()
     };
-    let Ok(arr) = Arrangement::new(vec![(fill, FillRule::NonZero), (ring, FillRule::NonZero), (open_bp, FillRule::NonZero)]) else {
-        return PathData::default();
-    };
+    let arr = Arrangement::new(vec![(fill, FillRule::NonZero), (ring, FillRule::NonZero), (open_bp, FillRule::NonZero)])?;
     let c = if delta >= 0.0 { arr.contours(|m| m[0] || m[1] || m[2]) } else { arr.contours(|m| m[0] && !m[1]) };
     // When `d` exceeds a curvature radius the stroker's inner offset inverts and its loops cancel
     // winding, leaving faces uncovered that are really within `d` of the path. Every face of the
@@ -100,13 +108,47 @@ pub fn offset_path(path: &PathData, delta: f64, join: Join, miter_limit: f64) ->
     // it lies closer than `d`: holes when growing, islands when insetting.
     let src = path.to_bezpath();
     let drop_outer = delta < 0.0;
-    let spurious: Vec<bool> =
-        c.contours().map(|k| k.outer == drop_outer && deep_point(&k.path).is_some_and(|p| dist_to(&src, p) < d * (1.0 - 1e-4) - 1e-6)).collect();
+    // The deep point is looked for in the face a contour bounds: the contour with the contours
+    // directly inside it (an outline with its holes, a hole with its islands). Looked for in the
+    // contour alone, it could land in a hole, close to the path, and drop a good outline with
+    // everything inside it (an inset "4" lost its outline when the widest span ran through its
+    // counter).
+    let all: Vec<_> = c.contours().collect();
+    let mut inside: Vec<Vec<usize>> = vec![vec![]; all.len()];
+    for (i, k) in all.iter().enumerate() {
+        if let Some(list) = k.parent.and_then(|ContourIdx(p)| inside.get_mut(p)) {
+            list.push(i);
+        }
+    }
+    let face = |i: usize, k: &linesweeper::topology::Contour| {
+        let mut bp = k.path.clone();
+        for &j in inside.get(i).into_iter().flatten() {
+            if let Some(h) = all.get(j) {
+                bp.extend(h.path.iter());
+            }
+        }
+        bp
+    };
+    // Every point of a true face is at least `d` from the path and every point of a spurious one
+    // closer, but a point picked near the face's edge is only just either: so a face is spurious
+    // only when none of several points spread through it is `d` away (the widest spans first;
+    // the first point that is settles it, so a good face usually costs one distance).
+    let near = |p: kurbo::Point| dist_to(&src, p) < d * (1.0 - 1e-4) - 1e-6;
+    let spurious: Vec<bool> = all
+        .iter()
+        .enumerate()
+        .map(|(i, k)| {
+            k.outer == drop_outer && {
+                let points = deep_points(&face(i, k));
+                !points.is_empty() && points.into_iter().all(near)
+            }
+        })
+        .collect();
     if !spurious.contains(&true) {
-        return all_contours_to_path(&c, &Tidy::free(DEFAULT_PRECISION));
+        return Ok(all_contours_to_path(&c, &Tidy::free(DEFAULT_PRECISION)));
     }
     let keep = (0..spurious.len()).filter(|&i| !has_marked_ancestor(&c, i, &spurious)).map(ContourIdx);
-    contours_to_path(&c, keep, &Tidy::free(DEFAULT_PRECISION))
+    Ok(contours_to_path(&c, keep, &Tidy::free(DEFAULT_PRECISION)))
 }
 
 fn has_marked_ancestor(c: &Contours, mut i: usize, marked: &[bool]) -> bool {
@@ -121,16 +163,16 @@ fn has_marked_ancestor(c: &Contours, mut i: usize, marked: &[bool]) -> bool {
     }
 }
 
-/// A point well inside a closed contour: the midpoint of the widest span on the horizontal line
-/// through its vertical centre.
-fn deep_point(bp: &BezPath) -> Option<kurbo::Point> {
+/// Points well inside a closed face (a contour with the contours inside it): the midpoints of
+/// the spans inside it along horizontal lines across its bounds, widest first (at most eight).
+fn deep_points(bp: &BezPath) -> Vec<kurbo::Point> {
     use kurbo::Shape;
     let r = bp.bounding_box();
     if !(r.width() > 0.0 && r.height() > 0.0) {
-        return None;
+        return vec![];
     }
-    let mut best: Option<(f64, kurbo::Point)> = None;
-    for f in [0.5, 0.3, 0.7] {
+    let mut spans: Vec<(f64, kurbo::Point)> = vec![];
+    for f in [0.5, 0.3, 0.7, 0.15, 0.85, 0.4, 0.6] {
         let y = r.y0 + r.height() * f;
         let mut xs = vec![];
         let mut prev: Option<kurbo::Point> = None;
@@ -161,13 +203,11 @@ fn deep_point(bp: &BezPath) -> Option<kurbo::Point> {
         });
         xs.sort_by(f64::total_cmp);
         for w in xs.as_chunks::<2>().0 {
-            let span = w[1] - w[0];
-            if best.is_none_or(|(b, _)| span > b) {
-                best = Some((span, kurbo::Point::new((w[0] + w[1]) / 2.0, y)));
-            }
+            spans.push((w[1] - w[0], kurbo::Point::new((w[0] + w[1]) / 2.0, y)));
         }
     }
-    best.map(|(_, p)| p)
+    spans.sort_by(|a, b| b.0.total_cmp(&a.0));
+    spans.into_iter().take(8).map(|(_, p)| p).collect()
 }
 
 fn dist_to(bp: &BezPath, p: kurbo::Point) -> f64 {
@@ -191,6 +231,21 @@ mod tests {
         let area = crate::area(&region, FillRule::NonZero);
         // Ring 16·20 − 8·12 = 224, plus the bar outside it (10·4) and inside its hole (6·4).
         assert!((area - (224.0 + 40.0 + 24.0)).abs() < 1e-6, "{area}");
+    }
+
+    #[test]
+    fn an_inset_keeps_an_outline_whose_widest_span_crosses_its_hole() {
+        // A block "4" (from a customer's number set) with a triangular counter on the line through
+        // the middle of its bounds, where the deep point used to be looked for.
+        const FOUR: &str = "M748.282 1106.431 L748.282 1019.101 L791.947 1019.101 L791.947 975.436 L660.952 975.436 \
+            L660.952 888 L791.947 669.568 L879.383 669.568 L879.383 888 L923.048 888 L923.048 975.436 L879.383 975.436 \
+            L879.383 1019.101 L923.048 1019.101 L923.048 1106.431 Z M754.565 888 L791.947 888 L791.947 825.591 Z";
+        let path = PathData::from_bezpath(&BezPath::from_svg(FOUR).unwrap());
+        let before = crate::area(&path, FillRule::NonZero);
+        let inset = offset_path(&path, -0.3, Join::Round, 4.0);
+        let after = crate::area(&inset, FillRule::NonZero);
+        assert!(after > before * 0.98 && after < before, "{before} → {after}");
+        assert_eq!(inset.subpaths.len(), 2, "the outline and its counter");
     }
 
     #[test]

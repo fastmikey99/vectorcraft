@@ -4615,3 +4615,6 @@ mark-style	Japanese	Japońskie
 	Pattern Images	Obrazy we wzorkach
 	Export Pattern Image	Eksportuj obraz wzorka
 	Replace Pattern Image	Zastąp obraz wzorka
+@msg	Line weight check failed: {e}	Sprawdzanie grubości linii nie powiodło się: {e}
+	Check Line Weight	Sprawdź grubość linii
+	Clear Line Weight Check	Wyczyść sprawdzanie grubości linii
