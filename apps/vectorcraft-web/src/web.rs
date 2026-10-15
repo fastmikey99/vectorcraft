@@ -63,6 +63,8 @@ pub fn start() {
         return;
     };
     detect_language();
+    // Time budgets (a line weight check's) need a clock, which the engine has none of on the web.
+    vectorcraft_engine::clock::set_web_clock(js_sys::Date::now);
     wasm_bindgen_futures::spawn_local(async move {
         // Before the first frame, which looks for copies a crash left behind.
         let locks = WebLocks::start(RECOVERY_PREFIX).await;

@@ -28,7 +28,9 @@
 //!   document's thin parts and narrow gaps against that minimum width, marked on a layer that never
 //!   prints (`lineweight.check`); `clear` removes the marks. Answered with
 //!   `vectorcraft:lineweight { id, minMm, thin, gaps, complete, skippedImages }` (counts; with
-//!   `clear`, `{ id, cleared }`), or `vectorcraft:failed { error, id }`.
+//!   `clear`, `{ id, cleared }`), or `vectorcraft:failed { error, id }`. The first change to the
+//!   art after a check (an edit, an undo, another file; not a selection) is told once as
+//!   `vectorcraft:lineweight { id, stale: true }`.
 //! - `vectorcraft:dirty` (to the parent): `{ dirty }` whenever unsaved changes appear or go away.
 //! - `vectorcraft:failed` (to the parent): `{ error }`. Before `ready`, the app couldn't start;
 //!   after it, the last `vectorcraft:open` was refused (the app keeps running). With an `id`, the
@@ -68,6 +70,9 @@ pub struct Bridge {
     places: Rc<RefCell<Vec<(JsValue, protocol::Place)>>>,
     /// Line weight checks the parent asked for, run on the next frame.
     line_weights: Rc<RefCell<Vec<(JsValue, protocol::LineWeight)>>>,
+    /// The last check answered and the document as it left it (by address): the first change to the
+    /// art after it is told to the page once (`stale`), so it stops showing the counts as current.
+    line_weight_watch: Rc<RefCell<Option<(JsValue, usize)>>>,
     /// Preferences the parent handed back, put on at the next frame (the last one wins).
     prefs: Rc<RefCell<Option<String>>>,
     /// The files the parent hands over (`Services::host_inbox`), which outlive graphics restarts.
@@ -91,6 +96,7 @@ impl Bridge {
             exports: Rc::default(),
             places: Rc::default(),
             line_weights: Rc::default(),
+            line_weight_watch: Rc::default(),
             prefs: Rc::default(),
             inbox: Inbox::default(),
         })
@@ -141,6 +147,11 @@ impl Bridge {
         for (id, lw) in asked {
             match check_line_weight(app, &lw) {
                 Ok(fields) => {
+                    // Watch the document as the check left it (marks included); a clear watches nothing.
+                    let watch = matches!(lw, protocol::LineWeight::Check { .. })
+                        .then(|| app.session.active().map(|st| std::sync::Arc::as_ptr(&st.doc) as usize))
+                        .flatten();
+                    *self.line_weight_watch.borrow_mut() = watch.map(|doc| (id.clone(), doc));
                     let mut all = vec![("type", JsValue::from_str("vectorcraft:lineweight")), ("id", id)];
                     all.extend(fields);
                     self.send(&all);
@@ -172,6 +183,12 @@ impl Bridge {
 
     /// After each frame: tell the parent when unsaved changes appear or go away.
     pub fn report_dirty(&self, app: &VectorcraftApp) {
+        // The art changed since the last check (an edit, an undo, another file): say so once.
+        let current = app.session.active().map(|st| std::sync::Arc::as_ptr(&st.doc) as usize);
+        let changed = self.line_weight_watch.borrow().as_ref().is_some_and(|(_, doc)| current != Some(*doc));
+        if changed && let Some((id, _)) = self.line_weight_watch.borrow_mut().take() {
+            self.send(&[("type", "vectorcraft:lineweight".into()), ("id", id), ("stale", true.into())]);
+        }
         let dirty = app.session.documents().iter().any(|d| d.is_dirty());
         if self.reported.get() != Some(dirty) && self.send(&[("type", "vectorcraft:dirty".into()), ("dirty", dirty.into())]) {
             self.reported.set(Some(dirty));

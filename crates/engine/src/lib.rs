@@ -6,6 +6,7 @@
 //! reduce to commands, so every gesture is journaled and replayable.
 #![forbid(unsafe_code)]
 
+pub mod clock;
 pub mod cmd;
 pub mod file_access;
 pub mod guard;

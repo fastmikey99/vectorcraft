@@ -273,27 +273,20 @@ fn gather(doc: &Document, ids: Option<&[NodeId]>) -> Silhouette {
     g.out
 }
 
-/// A clock for the time budget and the `ms` of the result (none on the web, which has no clock).
+/// A clock for the time budget and the `ms` of the result ([`crate::clock`]: on the web, the one its
+/// shell gives).
 struct Clock {
-    #[cfg(not(target_arch = "wasm32"))]
-    start: std::time::Instant,
+    start: Option<f64>,
     limit: f64,
 }
 
 impl Clock {
     fn new(limit: f64) -> Self {
-        Clock {
-            #[cfg(not(target_arch = "wasm32"))]
-            start: std::time::Instant::now(),
-            limit,
-        }
+        Clock { start: crate::clock::now_ms(), limit }
     }
     /// Seconds since the start.
     fn elapsed(&self) -> Option<f64> {
-        #[cfg(not(target_arch = "wasm32"))]
-        return Some(self.start.elapsed().as_secs_f64());
-        #[cfg(target_arch = "wasm32")]
-        None
+        crate::clock::now_ms().zip(self.start).map(|(now, start)| (now - start) / 1000.0)
     }
     fn within_budget(&self) -> bool {
         self.elapsed().is_none_or(|t| t < self.limit)
