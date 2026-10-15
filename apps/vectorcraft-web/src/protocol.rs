@@ -11,7 +11,20 @@ pub struct Open {
 }
 
 /// The messages the bridge reads.
-pub const HEARD: [&str; 4] = ["vectorcraft:open", "vectorcraft:export", "vectorcraft:place", "vectorcraft:prefs"];
+pub const HEARD: [&str; 5] = ["vectorcraft:open", "vectorcraft:export", "vectorcraft:place", "vectorcraft:prefs", "vectorcraft:lineweight"];
+
+/// What a `vectorcraft:lineweight` asks for: the open document's line weight checked against a
+/// minimum width, its thin parts and narrow gaps marked on a layer that never prints; or, with
+/// `clear`, those marks removed.
+#[derive(Debug, PartialEq)]
+pub enum LineWeight {
+    Check { min_mm: f64, gaps: bool },
+    Clear,
+}
+
+/// The widest minimum a `vectorcraft:lineweight` takes (mm): beyond it the check describes the art,
+/// not its line weight.
+pub const MAX_LINE_WEIGHT_MM: f64 = 20.0;
 
 /// The longest preferences text a page may hand over (bytes).
 pub const MAX_PREFS: usize = 1 << 20;
@@ -151,6 +164,19 @@ pub fn prefs(text: Option<String>) -> Result<String, String> {
         return Err("vectorcraft:prefs: `prefs` isn't the text a vectorcraft:prefs from the editor gave".to_string());
     }
     Ok(text)
+}
+
+/// Check a `vectorcraft:lineweight` the bridge accepted: `minMm` (a minimum width in millimetres,
+/// above 0 and at most [`MAX_LINE_WEIGHT_MM`]) unless it only clears. The error is the text of the
+/// `vectorcraft:failed` reply.
+pub fn line_weight(min_mm: Option<f64>, gaps: Option<bool>, clear: Option<bool>) -> Result<LineWeight, String> {
+    if clear == Some(true) {
+        return Ok(LineWeight::Clear);
+    }
+    match min_mm {
+        Some(m) if m.is_finite() && m > 0.0 && m <= MAX_LINE_WEIGHT_MM => Ok(LineWeight::Check { min_mm: m, gaps: gaps.unwrap_or(true) }),
+        _ => Err(format!("vectorcraft:lineweight needs `minMm`, a minimum width in millimetres above 0 and at most {MAX_LINE_WEIGHT_MM}")),
+    }
 }
 
 /// Check a `vectorcraft:place` the bridge accepted: a file name, its bytes, and `at` (when given) as
@@ -296,6 +322,17 @@ mod tests {
         assert_eq!(prefs(Some(r#"{"engine_prefs":{"units":"mm"}}"#.into())), Ok(r#"{"engine_prefs":{"units":"mm"}}"#.into()));
         for bad in [None, Some(String::new()), Some("[]".into()), Some("not json".into()), Some("x".repeat(MAX_PREFS + 1))] {
             assert!(prefs(bad.clone()).is_err(), "{:?}", bad.map(|b| b.chars().take(20).collect::<String>()));
+        }
+    }
+
+    #[test]
+    fn a_line_weight_check_needs_a_sensible_minimum_or_clears() {
+        assert!(accepts(SITE, SITE, true, Some("vectorcraft:lineweight")));
+        assert_eq!(line_weight(Some(0.2), None, None), Ok(LineWeight::Check { min_mm: 0.2, gaps: true }));
+        assert_eq!(line_weight(Some(0.3), Some(false), None), Ok(LineWeight::Check { min_mm: 0.3, gaps: false }));
+        assert_eq!(line_weight(None, None, Some(true)), Ok(LineWeight::Clear));
+        for bad in [None, Some(0.0), Some(-0.2), Some(f64::NAN), Some(f64::INFINITY), Some(25.0)] {
+            assert!(line_weight(bad, None, None).is_err_and(|e| e.contains("`minMm`")), "{bad:?}");
         }
     }
 

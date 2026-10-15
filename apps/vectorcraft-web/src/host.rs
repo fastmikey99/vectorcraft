@@ -24,6 +24,11 @@
 //!   editor sends them when they change (the page stores them for the person signed in); the page
 //!   sends them back before opening a file, and the editor takes them on. In host mode the editor
 //!   keeps none of its own in the browser, so they follow the person, not the computer.
+//! - `vectorcraft:lineweight` (both ways): from the parent `{ id, minMm, gaps?, clear? }`, the open
+//!   document's thin parts and narrow gaps against that minimum width, marked on a layer that never
+//!   prints (`lineweight.check`); `clear` removes the marks. Answered with
+//!   `vectorcraft:lineweight { id, minMm, thin, gaps, complete, skippedImages }` (counts; with
+//!   `clear`, `{ id, cleared }`), or `vectorcraft:failed { error, id }`.
 //! - `vectorcraft:dirty` (to the parent): `{ dirty }` whenever unsaved changes appear or go away.
 //! - `vectorcraft:failed` (to the parent): `{ error }`. Before `ready`, the app couldn't start;
 //!   after it, the last `vectorcraft:open` was refused (the app keeps running). With an `id`, the
@@ -61,6 +66,8 @@ pub struct Bridge {
     exports: Rc<RefCell<Vec<(JsValue, protocol::Export)>>>,
     /// Files the parent asked to place, run on the next frame.
     places: Rc<RefCell<Vec<(JsValue, protocol::Place)>>>,
+    /// Line weight checks the parent asked for, run on the next frame.
+    line_weights: Rc<RefCell<Vec<(JsValue, protocol::LineWeight)>>>,
     /// Preferences the parent handed back, put on at the next frame (the last one wins).
     prefs: Rc<RefCell<Option<String>>>,
     /// The files the parent hands over (`Services::host_inbox`), which outlive graphics restarts.
@@ -83,6 +90,7 @@ impl Bridge {
             reported: Rc::default(),
             exports: Rc::default(),
             places: Rc::default(),
+            line_weights: Rc::default(),
             prefs: Rc::default(),
             inbox: Inbox::default(),
         })
@@ -125,6 +133,17 @@ impl Bridge {
                     if let Err(e) = self.post_file(&name, &bytes, Some(&id), bounds, native) {
                         log::error!("couldn't hand {name} to the page: {e}");
                     }
+                }
+                Err(error) => self.post_export_failed(&id, &error),
+            }
+        }
+        let asked = std::mem::take(&mut *self.line_weights.borrow_mut());
+        for (id, lw) in asked {
+            match check_line_weight(app, &lw) {
+                Ok(fields) => {
+                    let mut all = vec![("type", JsValue::from_str("vectorcraft:lineweight")), ("id", id)];
+                    all.extend(fields);
+                    self.send(&all);
                 }
                 Err(error) => self.post_export_failed(&id, &error),
             }
@@ -200,6 +219,19 @@ impl Bridge {
                 match protocol::export(string(&data, "format"), flag("markSaved"), flag("selectedOnly"), flag("preserveEditing"), flag("imageOnly")) {
                     Ok(export) => {
                         bridge.exports.borrow_mut().push((id, export));
+                        wake();
+                    }
+                    Err(error) => bridge.post_export_failed(&id, &error),
+                }
+                return;
+            }
+            if string(&data, "type").as_deref() == Some("vectorcraft:lineweight") {
+                let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
+                let get = |k: &str| js_sys::Reflect::get(&data, &JsValue::from_str(k)).ok();
+                let flag = |k: &str| get(k).and_then(|v| v.as_bool());
+                match protocol::line_weight(get("minMm").and_then(|v| v.as_f64()), flag("gaps"), flag("clear")) {
+                    Ok(lw) => {
+                        bridge.line_weights.borrow_mut().push((id, lw));
                         wake();
                     }
                     Err(error) => bridge.post_export_failed(&id, &error),
@@ -372,4 +404,36 @@ fn rect(data: &JsValue, key: &str) -> Option<Vec<f64>> {
     let v = js_sys::Reflect::get(data, &JsValue::from_str(key)).ok().filter(|v| !v.is_undefined() && !v.is_null())?;
     let n = |k: &str| js_sys::Reflect::get(&v, &JsValue::from_str(k)).ok().and_then(|x| x.as_f64()).unwrap_or(f64::NAN);
     Some(vec![n("x"), n("y"), n("width"), n("height")])
+}
+
+/// How long a line weight check in the editor may take (s): it runs on the page's one thread.
+const LINE_WEIGHT_SECONDS: u32 = 30;
+
+/// Run `lw` on the open document (`lineweight.check` with its marks, or `lineweight.clear`) → the
+/// answer's fields.
+fn check_line_weight(app: &mut VectorcraftApp, lw: &protocol::LineWeight) -> Result<Vec<(&'static str, JsValue)>, String> {
+    if app.session.active().is_none() {
+        return Err("vectorcraft:lineweight: no document is open".to_string());
+    }
+    match lw {
+        protocol::LineWeight::Clear => {
+            let r = app.run("lineweight.clear", serde_json::json!({}))?;
+            // `removed` counts the check layers taken away (none when there was no check).
+            Ok(vec![("cleared", (r.get("removed").and_then(serde_json::Value::as_u64).unwrap_or(0) > 0).into())])
+        }
+        protocol::LineWeight::Check { min_mm, gaps } => {
+            let r = app.run(
+                "lineweight.check",
+                serde_json::json!({ "min": format!("{min_mm} mm"), "gaps": gaps, "mark": true, "maxRegions": 1, "timeLimit": LINE_WEIGHT_SECONDS }),
+            )?;
+            let count = |k: &str| r.get(k).and_then(|v| v.get("count")).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+            Ok(vec![
+                ("minMm", (*min_mm).into()),
+                ("thin", count("thin").into()),
+                ("gaps", count("gaps").into()),
+                ("complete", r.get("complete").and_then(serde_json::Value::as_bool).unwrap_or(false).into()),
+                ("skippedImages", r.get("skippedImages").and_then(serde_json::Value::as_f64).unwrap_or(0.0).into()),
+            ])
+        }
+    }
 }

@@ -42,6 +42,7 @@ Every message is a plain object with a string `type`. VectorCraft posts only to 
 | `vectorcraft:placed` | to the parent | `id`, `ids` (numbers) | The place with this `id` is done. |
 | `vectorcraft:save` | to the parent | `name` (string), `bytes` (`ArrayBuffer`, transferred), `id` (when it answers an export), `bounds` (with `selectedOnly`), `native` (`true` when the bytes are an image's own pixels) | Store this file. |
 | `vectorcraft:prefs` | both ways | `prefs` (string: JSON text) | From the editor: its preferences and workspace changed; store them. From the parent: put these on. |
+| `vectorcraft:lineweight` | both ways | from the parent: `id`, `minMm` (number), `gaps` (boolean, optional), `clear` (boolean, optional); to it: `id`, `minMm`, `thin`, `gaps`, `complete`, `skippedImages` (or `cleared`) | Check the open document's line weight and mark what is too thin; or remove the marks. |
 | `vectorcraft:dirty` | to the parent | `dirty` (boolean) | Unsaved changes appeared (`true`) or went away (`false`). |
 | `vectorcraft:failed` | to the parent | `error` (string), `id` (when it answers an export) | Before `ready`: the app couldn't start. After `ready`: the last `vectorcraft:open` was refused, or with an `id` that export was; the app keeps running. |
 
@@ -79,6 +80,8 @@ Together they make a "trace this image" button: export the selected image with `
 - In host mode the editor keeps none in the browser's storage. When they change (checked every two seconds) it sends them as `prefs`, JSON text the page stores as it is, for whoever is signed in.
 - Send them back, as they came, after `ready` and before `vectorcraft:open`; the editor puts them on. Text that isn't what the editor gave (not a JSON object, or over 1 MB) is refused with `vectorcraft:failed`.
 - Someone with nothing stored starts from the defaults; their first change is sent to the page.
+
+**`vectorcraft:lineweight`** checks the open document against a minimum line weight (`minMm`, millimetres): the parts of the printing art narrower than it, and (unless `gaps: false`) the gaps narrower than it, judged on everything that prints (`lineweight.check`). They are marked on a locked layer, "Lineweight Check", that never prints or exports (thin parts magenta, gaps cyan), replacing an earlier check. The answer carries the counts, whether the check finished (`complete`; it stops after 30 seconds on very large files) and how many images it couldn't measure. `clear: true` removes the marks. Marking is an edit (one undo step), so `dirty` follows; the marks don't reach a saved PDF's art.
 
 **`vectorcraft:dirty`** is sent after the first frame and then whenever the answer changes, so the first one is usually `dirty: false`. `true` means at least one open document has unsaved changes.
 
