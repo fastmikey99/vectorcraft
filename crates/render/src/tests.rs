@@ -503,3 +503,48 @@ fn zero_length_subpaths_draw_dots_with_their_cap() {
     let butt = dots(vectorcraft_doc::LineCap::Butt);
     assert_eq!(butt.pixels.iter().filter(|&&p| p != 255).count(), 0, "a butt cap draws no dot");
 }
+
+/// Cropping is a performance optimization only: retain the full-viewport reference for
+/// coverage comparisons, including the nonzero backgrounds of unclipped/inverted masks.
+#[test]
+fn cropped_opacity_mask_matches_full_viewport() {
+    for clip in [false, true] {
+        for invert in [false, true] {
+            for effect in [None, Some("blur.gaussian"), Some("stylize.feather")] {
+                let mut d = masked_doc(clip, invert);
+                if let Some(effect) = effect {
+                    let id = d.layers[0].children().unwrap()[0].id;
+                    let node = d.node_mut(id).unwrap();
+                    let mut extras = node.extras_mut();
+                    let mask = extras.mask.as_mut().unwrap();
+                    Arc::make_mut(&mut mask.art).appearance.effects.push(vectorcraft_doc::Effect {
+                        id: effect.into(),
+                        params: serde_json::json!({"radius": 3.0}),
+                        visible: true,
+                    });
+                }
+                let n = &d.layers[0].children().unwrap()[0];
+                let mask = n.extras().mask.as_ref().unwrap();
+                for aa in [AntiAlias::Art, AntiAlias::None] {
+                    let opts = RenderOptions { anti_alias: aa, ..Default::default() };
+                    for view in [
+                        Affine::IDENTITY,
+                        Affine::translate((13.25, -7.75)) * Affine::scale(0.37),
+                        Affine::translate((80.0, 20.0)) * Affine::rotate(0.3) * Affine::scale(0.8),
+                        Affine::translate((-300.0, 200.0)),
+                        Affine::scale(5.0),
+                    ] {
+                        let visible = view.inverse().transform_rect_bbox(Rect::new(0.0, 0.0, 180.0, 140.0));
+                        let f =
+                            Frame { mt: false, doc: &d, view, visible, px: 1.0 / view.determinant().abs().sqrt(), opts: &opts, ink: Ink::Display };
+                        let mut r = Renderer::new();
+                        r.begin_frame();
+                        let expected = r.mask_values_full(&f, mask, 180, 140);
+                        let cropped = r.mask_values(&f, mask, 180, 140);
+                        assert_eq!(cropped, expected, "clip={clip}, invert={invert}, view={view:?}, aa={aa:?}");
+                    }
+                }
+            }
+        }
+    }
+}

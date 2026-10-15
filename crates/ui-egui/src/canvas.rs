@@ -4194,3 +4194,48 @@ mod tests {
         near(select(&mut app, &b), under_b);
     }
 }
+
+/// Opt-in local profiling: no fixture is embedded, read during ordinary tests, or exported.
+#[cfg(test)]
+mod local_profile {
+    use super::*;
+
+    #[test]
+    #[ignore = "set VECTORCRAFT_PROFILE_FILE to a local document; run alone in release mode"]
+    fn profile_local_canvas_idle() {
+        let path = std::env::var("VECTORCRAFT_PROFILE_FILE").expect("set VECTORCRAFT_PROFILE_FILE");
+        let bytes = std::fs::read(&path).unwrap();
+        let mut app = VectorcraftApp::new(vectorcraft_engine::Session::new(), Default::default());
+        crate::io::open_document(&mut app, &path, &bytes, None, &serde_json::Value::Null).unwrap();
+        assert!(app.session.doc().unwrap().doc.node_count() > 1);
+        app.canvas.worker_started = true; // Match wasm's synchronous canvas path.
+        app.canvas.renderer.threads = 0;
+        let b = app.session.doc().unwrap().doc.artboards[0].rect;
+        let v = app.view_mut().unwrap();
+        v.center = b.center();
+        v.zoom = (1400.0 / b.width()).min(860.0 / b.height()) * 0.95;
+        let ctx = egui::Context::default();
+        let mut run = || {
+            let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0))), ..Default::default() };
+            let t = std::time::Instant::now();
+            let output = ctx.run_ui(raw, |ui| show(&mut app, ui));
+            (t.elapsed().as_secs_f64() * 1000.0, output.textures_delta.set.len())
+        };
+        for _ in 0..5 {
+            run();
+        }
+        let mut times = Vec::new();
+        for _ in 0..50 {
+            let (ms, uploads) = run();
+            assert_eq!(uploads, 0, "idle must reuse the rendered texture");
+            times.push(ms);
+        }
+        assert!(app.canvas.texture.is_some(), "warmup must actually render the document");
+        assert!(app.canvas.renderer.stats.drawn > 0, "warmup must draw document art");
+        let key = app.canvas.key.as_ref().unwrap();
+        assert!(key.w > 100 && key.h > 100);
+        println!("rendered canvas {}x{}, {} drawn nodes", key.w, key.h, app.canvas.renderer.stats.drawn);
+        times.sort_by(f64::total_cmp);
+        println!("idle canvas CPU ms: median {:.3}, min {:.3}, max {:.3}; 0 texture uploads / 50 frames", times[25], times[0], times[49]);
+    }
+}
