@@ -4589,3 +4589,30 @@ mark-style	Japanese	Japońskie
 	Load EPS into Clipboard	Wczytaj EPS do schowka
 @msg	an image of {w} × {h} pixels is too large to draw	obraz o wymiarach {w} × {h} pikseli jest zbyt duży, aby go narysować
 @msg	{what}: this editor works on one file only	{what}: ten edytor pracuje tylko na jednym pliku
+	Basic	Podstawowy
+	Fill and Stroke Controls	Elementy sterujące wypełnieniem i obrysem
+	Coloring Controls	Elementy sterujące kolorem
+	Draw Mode Controls	Elementy sterujące trybem rysowania
+	Screen Mode Controls	Elementy sterujące trybem ekranu
+	Drawer menu	Menu szuflady
+	Toolbar: Show Controls	Pasek narzędzi: Pokaż elementy sterujące
+@msg	control must be fillStroke, coloring, drawMode or screenMode	control musi mieć wartość fillStroke, coloring, drawMode lub screenMode
+@msg	unknown control `{name}`: fillStroke, coloring, drawMode or screenMode	nieznany element sterujący `{name}`: fillStroke, coloring, drawMode lub screenMode
+@msg	give a fraction `t` from 0 to 1	podaj wartość `t` od 0 do 1
+@msg	give the path `id`	podaj `id` ścieżki
+@msg	invalid stroke widths	nieprawidłowe szerokości obrysu
+@msg	object has no weighted stroke	obiekt nie ma obrysu o prawidłowej dodatniej grubości
+# Corner Radius: a field per corner of a live rectangle.
+	Single Corner Radius	Jeden promień narożników
+	Top Left:	Lewy górny:
+	Top Right:	Prawy górny:
+	Bottom Left:	Lewy dolny:
+	Bottom Right:	Prawy dolny:
+	Softness	Miękkość
+	Ambient Light	Światło otoczenia
+	Light behind the object	Światło za obiektem
+
+# Pattern image resource commands
+	Pattern Images	Obrazy we wzorkach
+	Export Pattern Image	Eksportuj obraz wzorka
+	Replace Pattern Image	Zastąp obraz wzorka

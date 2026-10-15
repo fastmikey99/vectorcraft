@@ -3904,3 +3904,25 @@ lighting	Light	光源
 	Load EPS into Clipboard	将 EPS 载入剪贴板
 @msg	an image of {w} × {h} pixels is too large to draw	{w} × {h} 像素的图像过大，无法绘制
 @msg	{what}: this editor works on one file only	{what}：此编辑器只处理一个文件
+	Fill and Stroke Controls	填色和描边控件
+	Coloring Controls	颜色控件
+	Draw Mode Controls	绘图模式控件
+	Screen Mode Controls	屏幕模式控件
+	Drawer menu	抽屉菜单
+	Toolbar: Show Controls	工具栏：显示控件
+@msg	control must be fillStroke, coloring, drawMode or screenMode	control 必须是 fillStroke、coloring、drawMode 或 screenMode
+@msg	unknown control `{name}`: fillStroke, coloring, drawMode or screenMode	未知控件 `{name}`：fillStroke、coloring、drawMode 或 screenMode
+# Corner Radius: a field per corner of a live rectangle.
+	Single Corner Radius	统一圆角半径
+	Top Left:	左上：
+	Top Right:	右上：
+	Bottom Left:	左下：
+	Bottom Right:	右下：
+	Softness	柔和度
+	Ambient Light	环境光
+	Light behind the object	光源位于对象后方
+
+# Pattern image resource commands
+	Pattern Images	图案中的图像
+	Export Pattern Image	导出图案图像
+	Replace Pattern Image	替换图案图像

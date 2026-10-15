@@ -4310,3 +4310,30 @@ lighting	Light	ライト
 	Load EPS into Clipboard	EPS をクリップボードに読み込む
 @msg	an image of {w} × {h} pixels is too large to draw	{w} × {h} ピクセルの画像は大きすぎて描画できません
 @msg	{what}: this editor works on one file only	{what}: このエディターで扱えるファイルは 1 つだけです
+	Basic	基本
+	Fill and Stroke Controls	塗りと線のコントロール
+	Coloring Controls	カラーのコントロール
+	Draw Mode Controls	描画モードのコントロール
+	Screen Mode Controls	スクリーンモードのコントロール
+	Drawer menu	ドロワーメニュー
+	Toolbar: Show Controls	ツールバー: コントロールを表示
+@msg	control must be fillStroke, coloring, drawMode or screenMode	control は fillStroke、coloring、drawMode、screenMode のいずれかです
+@msg	unknown control `{name}`: fillStroke, coloring, drawMode or screenMode	不明なコントロール `{name}`：fillStroke、coloring、drawMode、screenMode のいずれかです
+@msg	give a fraction `t` from 0 to 1	0 から 1 までの値 `t` を指定してください
+@msg	give the path `id`	パスの `id` を指定してください
+@msg	invalid stroke widths	線幅が無効です
+@msg	object has no weighted stroke	オブジェクトに有効な正の線幅を持つ線がありません
+# Corner Radius: a field per corner of a live rectangle.
+	Single Corner Radius	角丸の半径を統一
+	Top Left:	左上:
+	Top Right:	右上:
+	Bottom Left:	左下:
+	Bottom Right:	右下:
+	Softness	柔らかさ
+	Ambient Light	環境光
+	Light behind the object	オブジェクトの背後のライト
+
+# Pattern image resource commands
+	Pattern Images	パターン内の画像
+	Export Pattern Image	パターン内の画像を書き出し
+	Replace Pattern Image	パターン内の画像を置換
