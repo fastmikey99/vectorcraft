@@ -548,3 +548,50 @@ fn cropped_opacity_mask_matches_full_viewport() {
         }
     }
 }
+
+/// Masks the crop can't bound fall back to the full viewport and match it: a symbol inside the
+/// mask (its placeholder bounds are 20 × 20, the art is not) and a blur on the mask art's fill.
+#[test]
+fn opacity_masks_with_symbols_or_layer_effects_match_full_viewport() {
+    for case in ["symbol", "fill blur", "stroke blur"] {
+        for clip in [false, true] {
+            let mut d = Document::new(200.0, 200.0);
+            let white = rect_node(&mut d, Rect::new(-50.0, -40.0, 50.0, 40.0), Paint::solid(Color::WHITE), Paint::None, 0.0);
+            d.symbols.push(vectorcraft_doc::Symbol { name: "White".into(), art: Arc::new(white) });
+            let mut n = rect_node(&mut d, Rect::new(0.0, 0.0, 200.0, 200.0), Paint::solid(Color::rgb(1.0, 0.0, 0.0)), Paint::None, 0.0);
+            let art = match case {
+                "symbol" => Node::new(d.alloc_id(), NodeKind::SymbolInstance { symbol: "White".into(), xf: Affine::translate((100.0, 100.0)) }),
+                _ => {
+                    let mut r = rect_node(&mut d, Rect::new(80.0, 80.0, 120.0, 120.0), Paint::solid(Color::WHITE), Paint::solid(Color::WHITE), 2.0);
+                    let blur = vectorcraft_doc::Effect { id: "blur.gaussian".into(), params: serde_json::json!({"radius": 20.0}), visible: true };
+                    for item in &mut r.appearance.items {
+                        match item {
+                            vectorcraft_doc::AppearanceItem::Fill(l) if case == "fill blur" => l.effects.push(blur.clone()),
+                            vectorcraft_doc::AppearanceItem::Stroke(l) if case == "stroke blur" => l.effects.push(blur.clone()),
+                            _ => {}
+                        }
+                    }
+                    r
+                }
+            };
+            n.extras_mut().mask = Some(Box::new(vectorcraft_doc::OpacityMask::new(art, clip)));
+            let l = d.layers[0].id;
+            d.insert(Some(l), 0, n).unwrap();
+            let n = &d.layers[0].children().unwrap()[0];
+            let mask = n.extras().mask.as_ref().unwrap();
+            assert!(mask_needs_full_viewport(&mask.art), "{case}");
+            let opts = RenderOptions::default();
+            for view in [Affine::IDENTITY, Affine::translate((40.0, -10.0)) * Affine::rotate(0.4) * Affine::scale(0.9)] {
+                let visible = view.inverse().transform_rect_bbox(Rect::new(0.0, 0.0, 220.0, 220.0));
+                let f = Frame { mt: false, doc: &d, view, visible, px: 1.0 / view.determinant().abs().sqrt(), opts: &opts, ink: Ink::Display };
+                let mut r = Renderer::new();
+                r.begin_frame();
+                let expected = r.mask_values_full(&f, mask, 220, 220);
+                assert_eq!(r.mask_values(&f, mask, 220, 220), expected, "{case}, clip={clip}, view={view:?}");
+            }
+        }
+    }
+    // Plain mask art still takes the crop.
+    let d = masked_doc(true, false);
+    assert!(!mask_needs_full_viewport(&d.layers[0].children().unwrap()[0].extras().mask.as_ref().unwrap().art));
+}

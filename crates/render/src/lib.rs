@@ -518,6 +518,22 @@ impl Frame<'_> {
     }
 }
 
+/// Mask art whose painted extent its bounds don't promise: a symbol instance (bounded by a
+/// placeholder, not its art) or any effect (a blur or feather on a fill or stroke reaches past
+/// the shape). Such masks are built over the whole viewport, as before the crop.
+fn mask_needs_full_viewport(art: &Node) -> bool {
+    let mut full = false;
+    art.walk(&mut |n| {
+        full |= matches!(n.kind, NodeKind::SymbolInstance { .. })
+            || !n.appearance.effects.is_empty()
+            || n.appearance.items.iter().any(|i| match i {
+                AppearanceItem::Fill(l) => !l.effects.is_empty(),
+                AppearanceItem::Stroke(l) => !l.effects.is_empty(),
+            });
+    });
+    full
+}
+
 impl Renderer {
     pub fn new() -> Self {
         Self {
@@ -945,6 +961,9 @@ impl Renderer {
         // conservative paint bounds. Outside it, coverage is the transparent-pixel value
         // (not always zero: unclipped and inverted masks have different backgrounds).
         let full = Rect::new(0.0, 0.0, w as f64, h as f64);
+        if mask_needs_full_viewport(&m.art) {
+            return self.mask_values_full(f, m, w, h);
+        }
         let Some(bounds) = self.bounds_of(&m.art) else {
             return self.mask_values_full(f, m, w, h);
         };
