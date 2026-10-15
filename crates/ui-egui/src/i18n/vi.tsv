@@ -4651,6 +4651,7 @@ theme	Appearance	Giao diện
 @msg	{tool} isn't in a toolbar group of several tools	{tool} không nằm trong nhóm thanh công cụ có nhiều công cụ
 	Load EPS into Clipboard	Tải EPS vào bảng tạm
 @msg	an image of {w} × {h} pixels is too large to draw	ảnh {w} × {h} điểm ảnh quá lớn nên không thể vẽ
+
 @msg	Line weight check failed: {e}	Kiểm tra độ dày nét thất bại: {e}
 	Check Line Weight	Kiểm tra độ dày nét
 	Clear Line Weight Check	Xóa kiểm tra độ dày nét
@@ -4676,6 +4677,11 @@ theme	Appearance	Giao diện
 	Softness	Độ mềm
 	Ambient Light	Ánh sáng môi trường
 	Light behind the object	Ánh sáng phía sau đối tượng
+
+# Pattern image resource commands
+	Pattern Images	Hình ảnh trong họa tiết
+	Export Pattern Image	Xuất hình ảnh trong họa tiết
+	Replace Pattern Image	Thay thế hình ảnh trong họa tiết
 # 3D light management.
 	Lights	Danh sách đèn
 	Add Light	Thêm đèn

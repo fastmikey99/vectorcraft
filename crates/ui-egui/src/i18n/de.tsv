@@ -4627,6 +4627,7 @@ lighting	Light	Licht
 @msg	unknown parameter `{key}`; the command takes: {keys}	unbekannter Parameter `{key}`; der Befehl akzeptiert: {keys}
 	Load EPS into Clipboard	EPS in die Zwischenablage laden
 @msg	an image of {w} × {h} pixels is too large to draw	ein Bild mit {w} × {h} Pixeln ist zu groß, um gezeichnet zu werden
+
 @msg	Line weight check failed: {e}	Prüfung der Linienstärke fehlgeschlagen: {e}
 	Check Line Weight	Linienstärke prüfen
 	Clear Line Weight Check	Linienstärkeprüfung löschen
@@ -4644,6 +4645,7 @@ lighting	Light	Licht
 @msg	give the path `id`	geben Sie die `id` des Pfads an
 @msg	invalid stroke widths	ungültige Konturbreiten
 @msg	object has no weighted stroke	das Objekt hat keine Kontur mit einer gültigen positiven Stärke
+
 # Free Distort: the names of the handles on the four corners of its box.
 	Top Left	Oben links
 	Top Right	Oben rechts
@@ -4660,6 +4662,11 @@ effect	Soft	Weich
 	Softness	Weichheit
 	Ambient Light	Umgebungslicht
 	Light behind the object	Licht hinter dem Objekt
+
+# Pattern image resource commands
+	Pattern Images	Bilder in Mustern
+	Export Pattern Image	Bild aus Muster exportieren
+	Replace Pattern Image	Bild im Muster ersetzen
 # 3D light management.
 	Lights	Lichter
 	Add Light	Licht hinzufügen

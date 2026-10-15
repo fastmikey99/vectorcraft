@@ -2267,6 +2267,8 @@ mod tests_pathtype;
 #[cfg(test)]
 mod tests_pattern;
 #[cfg(test)]
+mod tests_patternimages;
+#[cfg(test)]
 mod tests_pdffidelity;
 #[cfg(test)]
 mod tests_pdfmarks;

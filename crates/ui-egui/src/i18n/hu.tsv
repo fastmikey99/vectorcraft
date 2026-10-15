@@ -5046,6 +5046,7 @@ imageTrace	Outline	Körvonal
 @msg	unknown parameter `{key}`; the command takes: {keys}	ismeretlen paraméter: `{key}`; a parancs ezeket fogadja el: {keys}
 	Load EPS into Clipboard	EPS betöltése a vágólapra
 @msg	an image of {w} × {h} pixels is too large to draw	egy {w} × {h} pixeles kép túl nagy a kirajzoláshoz
+
 @msg	Line weight check failed: {e}	A vonalvastagság ellenőrzése nem sikerült: {e}
 	Check Line Weight	Vonalvastagság ellenőrzése
 	Clear Line Weight Check	Vonalvastagság-ellenőrzés törlése
@@ -5071,6 +5072,11 @@ imageTrace	Outline	Körvonal
 	Softness	Lágyság
 	Ambient Light	Környezeti fény
 	Light behind the object	Fény az objektum mögött
+
+# Pattern image resource commands
+	Pattern Images	Képek a mintázatokban
+	Export Pattern Image	Mintázat képének exportálása
+	Replace Pattern Image	Mintázat képének cseréje
 # 3D light management.
 	Lights	Fények
 	Add Light	Fény hozzáadása

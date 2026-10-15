@@ -4648,6 +4648,7 @@ lighting	Light	Світло
 @msg	unknown parameter `{key}`; the command takes: {keys}	невідомий параметр `{key}`; команда приймає: {keys}
 	Load EPS into Clipboard	Завантажити EPS у буфер обміну
 @msg	an image of {w} × {h} pixels is too large to draw	зображення розміром {w} × {h} пікселів завелике для відображення
+
 @msg	Line weight check failed: {e}	Не вдалося перевірити товщину ліній: {e}
 	Check Line Weight	Перевірити товщину ліній
 	Clear Line Weight Check	Очистити перевірку товщини ліній
@@ -4674,6 +4675,11 @@ lighting	Light	Світло
 	Softness	М'якість
 	Ambient Light	Навколишнє світло
 	Light behind the object	Світло позаду об'єкта
+
+# Pattern image resource commands
+	Pattern Images	Зображення у візерунках
+	Export Pattern Image	Експорт зображення візерунка
+	Replace Pattern Image	Замінити зображення візерунка
 # 3D light management.
 	Lights	Джерела світла
 	Add Light	Додати світло

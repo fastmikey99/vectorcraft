@@ -57,6 +57,7 @@ pub mod params;
 mod path;
 mod pathops;
 mod patterncmds;
+mod patternimages;
 pub mod pdfcmds;
 pub mod perspgrid;
 pub(crate) mod place;
@@ -279,6 +280,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(newdoc::specs());
         v.extend(place::specs());
         v.extend(links::specs());
+        v.extend(patternimages::specs());
         v.extend(linkfiles::specs());
         v.extend(pdfcmds::specs());
         v.extend(fileio::dxf::specs());

@@ -5060,6 +5060,7 @@ mark-style	Japanese	Japonais
 theme	Appearance	Apparence
 	Load EPS into Clipboard	Charger un EPS dans le presse-papiers
 @msg	an image of {w} × {h} pixels is too large to draw	une image de {w} × {h} pixels est trop grande pour être dessinée
+
 @msg	Line weight check failed: {e}	Échec de la vérification de l’épaisseur des traits : {e}
 	Check Line Weight	Vérifier l’épaisseur des traits
 	Clear Line Weight Check	Effacer la vérification de l’épaisseur des traits
@@ -5085,6 +5086,11 @@ theme	Appearance	Apparence
 	Softness	Douceur
 	Ambient Light	Lumière ambiante
 	Light behind the object	Lumière derrière l'objet
+
+# Pattern image resource commands
+	Pattern Images	Images des motifs
+	Export Pattern Image	Exporter une image de motif
+	Replace Pattern Image	Remplacer une image de motif
 # 3D light management.
 	Lights	Lumières
 	Add Light	Ajouter une lumière

@@ -4664,6 +4664,7 @@ lighting	Light	Свет
 @msg	unknown parameter `{key}`; the command takes: {keys}	неизвестный параметр `{key}`; команда принимает: {keys}
 	Load EPS into Clipboard	Загрузить EPS в буфер обмена
 @msg	an image of {w} × {h} pixels is too large to draw	изображение размером {w} × {h} пикселей слишком велико для отрисовки
+
 @msg	Line weight check failed: {e}	Не удалось проверить толщину линий: {e}
 	Check Line Weight	Проверить толщину линий
 	Clear Line Weight Check	Очистить проверку толщины линий
@@ -4690,6 +4691,11 @@ lighting	Light	Свет
 	Softness	Мягкость
 	Ambient Light	Окружающий свет
 	Light behind the object	Свет позади объекта
+
+# Pattern image resource commands
+	Pattern Images	Изображения в узорах
+	Export Pattern Image	Экспорт изображения узора
+	Replace Pattern Image	Заменить изображение узора
 # 3D light management.
 	Lights	Источники света
 	Add Light	Добавить свет
