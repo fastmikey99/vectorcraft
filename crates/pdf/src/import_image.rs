@@ -71,7 +71,7 @@ fn decode_ranges(d: &Dict<'_>, count: usize) -> Vec<(f32, f32)> {
     if v.len() != count * 2 || v.iter().any(|x| !x.is_finite()) {
         return fallback;
     }
-    v.chunks_exact(2).filter_map(|v| Some((*v.first()?, *v.get(1)?))).collect()
+    v.as_chunks::<2>().0.iter().map(|&[start, end]| (start, end)).collect()
 }
 
 /// The image `st` (`width` × `height` pixels) in CMYK: `Ok(None)` when it isn't a CMYK image,

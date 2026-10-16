@@ -189,7 +189,7 @@ are retained with this setting when their existing preservation checks pass.
 Evidence: `tests_output::preserve_source_*`, the craft-pdf writer's fractional
 RGB/grey serialization test, and Reporter's recipe-driven WE qualification
 harness. The shared writer is published and pinned to immutable revision
-`2bbf5d2a591f81ae3b7b088db97c646d912120ee`; no local dependency override is used.
+`6f322f53d6f73c937b4347a146e911f037d16752`; no local dependency override is used.
 No headline parity score changes and no production compatibility claim.
 
 Validation: all nine `cargo xtask ci` stages passed against the published pin,
