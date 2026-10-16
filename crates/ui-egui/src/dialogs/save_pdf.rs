@@ -595,10 +595,16 @@ fn output(ui: &mut egui::Ui, d: &mut Dialog) {
     let standard = choice::<Standard>(d, "standard").unwrap_or_default();
     heading(ui, tl!("Color"));
     row(ui, tl!("Color conversion:"), |ui| {
-        pick::<ColorConversion>(ui, d, "output.conversion", 300.0, |_| true);
+        if pick::<ColorConversion>(ui, d, "output.conversion", 300.0, |_| true)
+            && choice::<ColorConversion>(d, "output.conversion") == Some(ColorConversion::PreserveSource)
+        {
+            set(d, "output.destination", json!(""));
+        }
     });
     // PDF/X-1a converts to CMYK even without a conversion.
-    let converting = get(d, "output.conversion") != ColorConversion::None.id() || standard.cmyk_only();
+    let converting =
+        !matches!(choice::<ColorConversion>(d, "output.conversion").unwrap_or_default(), ColorConversion::None | ColorConversion::PreserveSource)
+            || standard.cmyk_only();
     row(ui, tl!("Destination:"), |ui| profile_pick(ui, d, "output.destination", &names(DOCUMENT_PROFILE), 1, converting));
     row(ui, tl!("Profile inclusion:"), |ui| {
         // A standard decides whether colours are tagged.

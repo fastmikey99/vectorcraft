@@ -145,3 +145,26 @@ All nine application CI gates pass (7,193 tests passed, 12 ignored; 23 wasm
 checks). All ten performance budgets pass; before/after builds used different
 optimization profiles, so the timings are not a controlled regression measure.
 No customer PDF fixtures or rendered artwork are committed.
+
+
+### 17 October 2026: explicit source-colour preservation (local qualification)
+
+RGB and grey PDF output now retain fractional components through the shared
+writer's normalized constructors. DeviceRGB import reads the original components
+instead of an 8-bit display conversion. The `output.conversion: "preserveSource"`
+setting retains RGB/CMYK/grey values in either document colour mode. It refuses
+conflicting destination conversions, PDF/X-1a, PDF 1.3 flattening, ordinary Lab
+fallback and profile conversions that would change the source RGB values. Named
+spots continue using their exact names and tints. Imported print/page settings
+are retained with this setting when their existing preservation checks pass.
+
+Evidence: `tests_output::preserve_source_*`, the craft-pdf writer's fractional
+RGB/grey serialization test, and Reporter's recipe-driven WE qualification
+harness. The shared writer is published and pinned to immutable revision
+`2bbf5d2a591f81ae3b7b088db97c646d912120ee`; no local dependency override is used.
+No headline parity score changes and no production compatibility claim.
+
+Validation: all nine `cargo xtask ci` stages passed against the published pin,
+including the immutable PDF dependency gate and all 23 wasm crates. Homebrew Rust
+used `RUSTC_BOOTSTRAP=1 CARGO_UNSTABLE_BUILD_STD=std,panic_abort`. The strict WE
+Dark/Light probe also passed with the CLI built against this published revision.

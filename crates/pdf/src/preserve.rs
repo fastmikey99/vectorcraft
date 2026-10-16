@@ -194,7 +194,10 @@ pub(crate) fn finish(pdf: Vec<u8>, doc: &Document, opts: &PdfOptions, warnings: 
         return Ok(pdf);
     }
     let state: State = serde_json::from_value(value.clone()).map_err(|_| error("invalid saved print settings"))?;
-    if opts.settings.standard != Standard::None || opts.settings.pdf13() || opts.settings.output.conversion != ColorConversion::None {
+    if opts.settings.standard != Standard::None
+        || opts.settings.pdf13()
+        || !matches!(opts.settings.output.conversion, ColorConversion::None | ColorConversion::PreserveSource)
+    {
         warnings.push("imported PDF print settings were not restored because the export requests a standard, flattening or colour conversion".into());
         return Ok(pdf);
     }

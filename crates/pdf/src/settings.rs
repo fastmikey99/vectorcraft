@@ -167,6 +167,8 @@ choice! {
     /// Colour conversion on output.
     ColorConversion {
         None = "none", "No conversion";
+        /// Retain source RGB/CMYK/gray values in either document mode; refuse conflicting conversions.
+        PreserveSource = "preserveSource", "Preserve source colour values";
         Destination = "destination", "Convert to destination";
         /// Convert only colours whose profile differs from the destination's.
         PreserveNumbers = "preserveNumbers", "Convert to destination (preserve numbers)";

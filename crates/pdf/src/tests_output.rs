@@ -54,11 +54,6 @@ fn colours(pdf: &[u8]) -> Vec<(String, Vec<f32>)> {
     out
 }
 
-/// RGB/gray values still use eight-bit writer components.
-fn q8(v: &[f32]) -> Vec<f32> {
-    v.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() / 255.0).collect()
-}
-
 fn close(a: &[f32], b: &[f32]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-3)
 }
@@ -109,7 +104,7 @@ fn preserve_numbers_keeps_cmyk_values_that_destination_converts() {
     let kept = fills("preserveNumbers", DEVICE_CMYK);
     assert!(kept[0].0 == "k" && close(&kept[0].1, &numbers), "{kept:?}");
     // Grey stays grey.
-    assert!(kept[1].0 == "g" && close(&kept[1].1, &q8(&[0.75])), "{kept:?}");
+    assert!(kept[1].0 == "g" && close(&kept[1].1, &[0.75]), "{kept:?}");
     // Convert to destination: CMYK of another profile goes through Lab into the destination.
     let converted = fills("destination", DEVICE_CMYK);
     let expected = to_cmyk(DEVICE_CMYK).lab_to_cmyk(cms::active().lab(&ink), cms::active_settings().intent);
@@ -126,7 +121,7 @@ fn converting_to_rgb_turns_cmyk_into_rg() {
     let d = doc(ColorMode::Cmyk, &[ink]);
     assert_eq!(colours(&pdf(&d, json!({})).bytes)[0].0, "k");
     let c = colours(&pdf(&d, json!({"output": {"conversion": "preserveNumbers", "destination": SRGB}})).bytes);
-    assert!(c[0].0 == "rg" && close(&c[0].1, &q8(&cms::active().display_rgb(&ink))), "{c:?}");
+    assert!(c[0].0 == "rg" && close(&c[0].1, &cms::active().display_rgb(&ink)), "{c:?}");
 }
 
 #[test]
@@ -358,4 +353,79 @@ fn a_profile_that_tags_colours_and_is_the_output_intent_is_embedded_once() {
     output_intent(&r.bytes, None, |oi| {
         assert_eq!(oi.get::<Stream<'_>>(b"DestOutputProfile").unwrap().decoded().unwrap().as_ref(), &*cms::icc_bytes(DEVICE_CMYK).unwrap())
     });
+}
+
+#[test]
+fn preserve_source_keeps_fractional_rgb_gray_cmyk_in_both_document_modes() {
+    let fills = [Color::rgb(0.12345, 0.5, 0.98765), Color::gray(0.87655), Color::cmyk(0.12345, 0.5, 0.98765, 0.0001)];
+    for mode in [ColorMode::Rgb, ColorMode::Cmyk] {
+        let r = pdf(&doc(mode, &fills), json!({"output":{"conversion":"preserveSource"}}));
+        let c = colours(&r.bytes);
+        assert_eq!(c.iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["rg", "g", "k"]);
+        for (actual, expected) in c.iter().map(|x| &x.1).zip([vec![0.12345, 0.5, 0.98765], vec![0.12345], vec![0.12345, 0.5, 0.98765, 0.0001]]) {
+            assert!(actual.iter().zip(&expected).all(|(a, b)| (a - b).abs() < 1e-6), "{actual:?} != {expected:?}");
+        }
+        assert!(r.warnings.is_empty());
+    }
+}
+
+#[test]
+fn preserve_source_refuses_conflicting_conversion_and_unsupported_lab() {
+    let d = doc(ColorMode::Cmyk, &[Color::rgb(0.12345, 0.5, 0.98765)]);
+    for value in [
+        json!({"standard":"pdfX1a","output":{"conversion":"preserveSource"}}),
+        json!({"compatibility":"1.3","output":{"conversion":"preserveSource"}}),
+        json!({"output":{"conversion":"preserveSource","destination":GENERIC_CMYK}}),
+    ] {
+        let settings = serde_json::from_value(value).unwrap();
+        assert!(export(&d, &PdfOptions { settings, ..Default::default() }).is_err());
+    }
+    let lab = doc(ColorMode::Rgb, &[Color::Lab { l: 50.0, a: 20.0, b: -20.0 }]);
+    let settings = serde_json::from_value(json!({"output":{"conversion":"preserveSource"}})).unwrap();
+    assert!(export(&lab, &PdfOptions { settings, ..Default::default() }).unwrap_err().to_string().contains("Lab"));
+}
+
+#[test]
+fn preserve_source_pdf_import_reexport_keeps_fractional_process_values() {
+    let d = doc(ColorMode::Cmyk, &[Color::rgb(0.12345, 0.5, 0.98765), Color::gray(0.87655), Color::cmyk(0.12345, 0.5, 0.98765, 0.0001)]);
+    let settings = json!({"output":{"conversion":"preserveSource"}});
+    let first = pdf(&d, settings.clone());
+    let imported = import(&first.bytes).unwrap();
+    let second = pdf(&imported, settings);
+    let before = colours(&first.bytes);
+    let after = colours(&second.bytes);
+    assert_eq!(before.len(), after.len());
+    for ((a, av), (b, bv)) in before.iter().zip(&after) {
+        assert_eq!(a, b);
+        assert_eq!(av.len(), bv.len());
+        assert!(av.iter().zip(bv).all(|(x, y)| (x - y).abs() < 1e-6), "{before:?} != {after:?}");
+    }
+}
+
+#[test]
+fn preserve_source_rgb_gradient_stops_survive_pdf_roundtrip() {
+    use vectorcraft_color::{Gradient, GradientKind, GradientPaint, GradientStop};
+    let colors = [Color::rgb(0.12345, 0.5, 0.98765), Color::rgb(0.23456, 0.87654, 0.34567)];
+    let mut d = doc(ColorMode::Cmyk, &[]);
+    let gradient = Gradient { kind: GradientKind::Linear, stops: vec![GradientStop::new(0.0, colors[0]), GradientStop::new(1.0, colors[1])] };
+    let n = Node::path(
+        d.alloc_id(),
+        shapes::rectangle(Rect::new(10.0, 10.0, 80.0, 40.0)),
+        Appearance::basic(Paint::Gradient(Box::new(GradientPaint::new(gradient))), Paint::None, 0.0),
+    );
+    d.insert(d.default_layer(), 0, n).unwrap();
+    let first = pdf(&d, json!({"output":{"conversion":"preserveSource"}}));
+    let imported = import(&first.bytes).unwrap();
+    let mut stops = vec![];
+    imported.visit_paints(&mut |p| {
+        if let Paint::Gradient(g) = p {
+            stops.extend(g.gradient.stops.iter().map(|s| s.color));
+        }
+    });
+    assert_eq!(stops.len(), 2);
+    for (actual, expected) in stops.iter().zip(&colors) {
+        let Color::Rgb { r, g, b } = actual else { panic!("RGB gradient converted: {actual:?}") };
+        let Color::Rgb { r: er, g: eg, b: eb } = expected else { panic!("invalid fixture") };
+        assert!((r - er).abs() < 1e-6 && (g - eg).abs() < 1e-6 && (b - eb).abs() < 1e-6, "{actual:?} != {expected:?}");
+    }
 }

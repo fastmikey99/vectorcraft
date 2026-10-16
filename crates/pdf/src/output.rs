@@ -8,7 +8,9 @@
 //!   Grey stays grey. Images (and freeform gradients' images) are converted the same way, pixel
 //!   by pixel (CMYK images too: they keep their numbers unless converted, see [`CmykPixels`]);
 //!   printer's marks are not. The destination is a profile name; empty, the document's
-//!   profile for its colour mode.
+//!   profile for its colour mode. `preserveSource` explicitly retains source RGB/CMYK/gray
+//!   numbers regardless of document mode. Conflicting destination/standard settings, ordinary
+//!   Lab fallback, and profile-driven RGB conversion are refused.
 //! - Profiles ([`ProfileInclusion`]): with `all`, with `destination`, and with `taggedSource` on a
 //!   document that was assigned profiles, colours are written in ICC-based colour spaces: CMYK
 //!   with the CMYK profile in effect (the destination when converting to CMYK, else the
@@ -26,8 +28,8 @@ use std::sync::{Arc, OnceLock};
 
 use craft_pdf::write::backend as krilla;
 use krilla::image::ImageColorspace;
-use vectorcraft_color::Color;
 use vectorcraft_color::cms::{self, Cms, CmykLut, Intent, Model, ProfileKind, ProofLut};
+use vectorcraft_color::{Color, Paint};
 use vectorcraft_doc::{ColorMode, Document};
 
 use crate::patch::{Patch, Xref};
@@ -52,6 +54,7 @@ pub(crate) struct ColorOut {
     /// The colour settings colours come from.
     source: Arc<Cms>,
     dest: Option<Dest>,
+    preserve_source: bool,
     /// Colours are written in ICC-based colour spaces.
     pub tagged: bool,
     /// The CMYK profile that tags CMYK colours.
@@ -98,6 +101,7 @@ impl Default for ColorOut {
         Self {
             source,
             dest: None,
+            preserve_source: false,
             tagged: false,
             cmyk_profile,
             srgb_note: None,
@@ -116,6 +120,12 @@ impl Default for ColorOut {
 fn destination(set: &PdfSettings, mode: ColorMode, source: &Cms) -> Result<Option<(String, Model)>, PdfError> {
     let o = &set.output;
     let cmyk_only = set.standard.cmyk_only();
+    if o.conversion == ColorConversion::PreserveSource {
+        if cmyk_only || !o.destination.trim().is_empty() {
+            return Err(PdfError::BadSetting("preserveSource conflicts with a conversion destination or CMYK-only standard".into()));
+        }
+        return Ok(None);
+    }
     if o.conversion == ColorConversion::None && !cmyk_only {
         return Ok(None);
     }
@@ -142,6 +152,12 @@ fn destination(set: &PdfSettings, mode: ColorMode, source: &Cms) -> Result<Optio
 
 /// Refuse a destination profile that isn't there (when converting).
 pub(crate) fn check(set: &PdfSettings) -> Result<(), PdfError> {
+    if set.output.conversion == ColorConversion::PreserveSource {
+        destination(set, ColorMode::Rgb, &cms::active())?;
+        if set.pdf13() {
+            return Err(PdfError::BadSetting("preserveSource requires PDF 1.4 or later to avoid transparency flattening".into()));
+        }
+    }
     // A blank destination is the document's own profile, which is always there.
     if !set.output.destination.trim().is_empty() {
         destination(set, ColorMode::Rgb, &cms::active())?;
@@ -174,7 +190,22 @@ pub(crate) fn warnings(set: &PdfSettings) -> Vec<String> {
 impl ColorOut {
     /// How `set` writes the colours of `doc` (the colour settings are the source).
     pub(crate) fn new(doc: &Document, set: &PdfSettings) -> Result<Self, PdfError> {
-        let mut out = Self::default();
+        let mut out = Self { preserve_source: set.output.conversion == ColorConversion::PreserveSource, ..Self::default() };
+        if out.preserve_source {
+            // Ordinary Lab paint currently takes an RGB fallback in the writer. Named Lab
+            // spots have their own preserved Separation alternate and are supported.
+            let unsupported =
+                |color: &Color, name: Option<&str>| matches!(color, Color::Lab { .. }) && !name.and_then(|n| doc.swatch(n)).is_some_and(|s| s.spot);
+            let mut lab = false;
+            doc.visit_paints(&mut |paint| match paint {
+                Paint::Solid { color, swatch, .. } => lab |= unsupported(color, swatch.as_deref()),
+                Paint::Gradient(g) => lab |= g.gradient.stops.iter().any(|s| unsupported(&s.color, s.swatch.as_deref())),
+                _ => {}
+            });
+            if lab {
+                return Err(PdfError::BadSetting("preserveSource cannot yet write ordinary Lab paint without conversion".into()));
+            }
+        }
         let source = out.source.clone();
         let st = source.settings();
         if let Some((name, model)) = destination(set, doc.color_mode, &source)? {
@@ -205,6 +236,9 @@ impl ColorOut {
         if out.tagged && !rgb.0 {
             out.srgb_note = Some(format!("RGB colours are tagged with the sRGB profile: those of {} are written as their sRGB equivalents", rgb.1));
         }
+        if out.preserve_source && out.srgb_note.is_some() {
+            return Err(PdfError::BadSetting("preserveSource cannot convert a tagged RGB source profile to sRGB".into()));
+        }
         out.catalog = catalog(set, &out.cmyk_profile);
         out.standard = set.standard;
         Ok(out)
@@ -233,7 +267,7 @@ impl ColorOut {
         let s = &self.source;
         let c = match &self.dest {
             Some(d) if convert => d.convert(s, c, intent),
-            _ if cmyk_doc && matches!(c, Color::Rgb { .. } | Color::Lab { .. }) => {
+            _ if !self.preserve_source && cmyk_doc && matches!(c, Color::Rgb { .. } | Color::Lab { .. }) => {
                 let [c, m, y, k] = s.to_cmyk(c, intent);
                 Color::Cmyk { c, m, y, k }
             }
