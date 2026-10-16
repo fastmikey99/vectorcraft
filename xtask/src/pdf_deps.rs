@@ -6,6 +6,7 @@ use std::process::Command;
 use serde_json::Value;
 
 const REV: &str = "ca50d63b773c99f96e75c77ce5a1d21e7c9cda0d";
+const WRITER_REV: &str = "851aaee7346f93115b65fbf8349258c3353e1630";
 const PACKAGES: &[(&str, &str)] =
     &[("craft-pdf", "0.1.0"), ("krilla", "0.8.2"), ("hayro-syntax", "0.7.2"), ("hayro-interpret", "0.7.0"), ("hayro-jbig2", "0.3.0")];
 
@@ -20,14 +21,22 @@ pub fn run(root: &Path) -> Result<(), String> {
     }
     let metadata: Value = serde_json::from_slice(&output.stdout).map_err(|e| format!("cargo metadata: {e}"))?;
     validate(&metadata)?;
-    println!("PDF: shared crate and patched backends resolve once to {REV}");
+    println!("PDF: shared reader {REV}, print-preserving writer {WRITER_REV}; one resolved backend each");
     Ok(())
+}
+
+fn source(name: &str) -> String {
+    if name == "krilla" {
+        format!("git+https://github.com/fastmikey99/craft-libs?rev={WRITER_REV}#{WRITER_REV}")
+    } else {
+        format!("git+https://github.com/storytold/craft-libs?rev={REV}#{REV}")
+    }
 }
 
 fn validate(metadata: &Value) -> Result<(), String> {
     let packages = metadata.get("packages").and_then(Value::as_array).ok_or("cargo metadata has no packages")?;
-    let source = format!("git+https://github.com/storytold/craft-libs?rev={REV}#{REV}");
     for &(name, version) in PACKAGES {
+        let source = source(name);
         let mut found = packages.iter().filter(|p| p.get("name").and_then(Value::as_str) == Some(name));
         let package = found.next().ok_or_else(|| format!("{name}: missing resolved package"))?;
         if found.next().is_some() {
@@ -51,7 +60,7 @@ mod tests {
             .map(|(name, version)| {
                 json!({
                     "name":name, "version":version,
-                    "source":format!("git+https://github.com/storytold/craft-libs?rev={REV}#{REV}")
+                    "source":source(name)
                 })
             })
             .collect();

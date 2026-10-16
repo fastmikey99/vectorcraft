@@ -244,7 +244,14 @@ impl Headless {
         let r = doc.artboards.get(idx).map(|a| a.rect).ok_or("no such artboard")?;
         let scale = p.get("scale").and_then(Value::as_f64).unwrap_or(1.0).clamp(0.01, 16.0);
         vectorcraft_render::raster_size(r, scale)?;
-        let img = self.renderer.render_region(&doc, r, scale, true);
+        let opts = vectorcraft_render::RenderOptions {
+            background: Some([255, 255, 255, 255]),
+            skip_templates: true,
+            proof: vectorcraft_render::proof::active_proof(),
+            overprint_preview: vectorcraft_render::proof::overprint_preview_on(),
+            ..Default::default()
+        };
+        let img = self.renderer.render_region_with(&doc, r, scale, &opts);
         let png = img.to_png()?;
         let mut out = json!({"width": img.width, "height": img.height});
         match s(p, "path") {

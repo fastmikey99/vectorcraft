@@ -424,3 +424,45 @@ fn sixteen_bit_named_process_samples_keep_their_ink_values() {
     let imported = import(&source).unwrap();
     assert_eq!(blobs(&imported)[0].cmyk().unwrap().data, [0, 0, 0, 64, 0, 0, 0, 192]);
 }
+
+#[test]
+fn pdf_jpeg_decode_polarity_and_original_encoding_survive_export() {
+    let jpg = cmyk_jpeg(&flat([30, 70, 120, 10], 16 * 16), 16, 16);
+    let source = pdf_with_images(&[(cmyk_dict(16, 16, "/Filter /DCTDecode"), jpg.clone())], &[]);
+    let mut doc = import(&source).unwrap();
+    let blob = blobs(&doc)[0];
+    assert_eq!(blob.source_jpeg.as_ref().unwrap().bytes.as_slice(), jpg);
+    let working = blob.cmyk().unwrap();
+    let out = export(&doc, &opts(json!({"compression":{"color":{"compression":"auto"}}}))).unwrap();
+    let images = written(&out);
+    assert_eq!(images[0].data, jpg, "compressed source bytes unchanged");
+    assert!(images[0].decode.is_empty(), "PDF samples must not be inverted");
+    assert_eq!(blobs(&import(&out).unwrap())[0].cmyk().unwrap(), working);
+    // An edited working bitmap invalidates the preserved encoding, even if metadata was cloned.
+    let key = doc.images.keys().next().unwrap().clone();
+    let old = doc.images.get_mut(&key).unwrap();
+    old.bytes = ImageBlob::cmyk_tiff(&Inks::new(16, 16, flat([0, 0, 0, 255], 256)).unwrap()).unwrap().bytes;
+    let changed = export(&doc, &opts(json!({}))).unwrap();
+    assert_ne!(written(&changed)[0].data, jpg);
+    assert!(blobs(&import(&changed).unwrap())[0].cmyk().unwrap().data.chunks_exact(4).all(|p| p == [0, 0, 0, 255]));
+}
+
+#[test]
+fn vector_cmyk_keeps_fractional_press_values() {
+    let source = pdf_with_images(&[], &[]);
+    let doc = import(&source).unwrap();
+    let out = export(&doc, &PdfOptions::default()).unwrap();
+    let back = import(&out).unwrap();
+    fn colours(doc: &Document) -> Vec<vectorcraft_color::Color> {
+        let mut result = vec![];
+        doc.walk(|n| {
+            if matches!(n.kind, NodeKind::Path { .. })
+                && let Some(c) = n.appearance.fill_paint().color()
+            {
+                result.push(c);
+            }
+        });
+        result
+    }
+    assert_eq!(colours(&back), colours(&doc));
+}

@@ -1942,7 +1942,7 @@ impl<'a> Reader<'a> {
         }
         // The preview is all the document has of the file: what a missing link shows.
         let bytes = Arc::new(png);
-        let blob = ImageBlob { mime: "image/png".into(), bytes: bytes.clone(), proxy: Some(bytes) };
+        let blob = ImageBlob { source_jpeg: None, mime: "image/png".into(), bytes: bytes.clone(), proxy: Some(bytes) };
         let key = blob.content_key();
         self.doc.images.entry(key.clone()).or_insert(blob);
         self.warn(LINKED_PREVIEWS);

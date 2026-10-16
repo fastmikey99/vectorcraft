@@ -53,7 +53,7 @@ fn include_linked_files_keeps_the_files_bytes() {
     // Only the preview loaded (the file was never found): the preview is all there is to write.
     let mut missing = linked_doc();
     let preview = Arc::new(vec![9, 9]);
-    missing.images.insert("k".into(), ImageBlob { mime: "image/png".into(), bytes: preview.clone(), proxy: Some(preview) });
+    missing.images.insert("k".into(), ImageBlob { source_jpeg: None, mime: "image/png".into(), bytes: preview.clone(), proxy: Some(preview) });
     let out = save_with(&missing, &SaveOptions { include_linked: true, ..SaveOptions::default() }).unwrap();
     assert_eq!(json_of(&out)["images"]["k"]["proxy"], true);
 }
@@ -146,4 +146,19 @@ fn art_outside_the_layers_counts_too() {
     let bytes = save_file(&d);
     assert!(!is_pretty(&bytes));
     assert_eq!(load(&bytes).unwrap().symbols.len(), 1);
+}
+
+#[test]
+fn preserved_pdf_jpeg_survives_native_save_and_is_dropped_when_pixels_change() {
+    let mut doc = linked_doc();
+    let b = doc.images.get_mut("k").unwrap();
+    b.source_jpeg = Some(vectorcraft_doc::PreservedJpeg { bytes: Arc::new(vec![255, 216, 255, 217]), decoded_key: b.content_key(), invert: false });
+    for version in [3, 4] {
+        let options = SaveOptions { version, include_linked: true, ..Default::default() };
+        let back = load(&save_with(&doc, &options).unwrap()).unwrap();
+        assert_eq!(back.images["k"].source_jpeg, doc.images["k"].source_jpeg);
+    }
+    doc.images.get_mut("k").unwrap().bytes = Arc::new(vec![4, 3, 2, 1]);
+    let back = load(&save_with(&doc, &SaveOptions { include_linked: true, ..Default::default() }).unwrap()).unwrap();
+    assert!(back.images["k"].source_jpeg.is_none());
 }

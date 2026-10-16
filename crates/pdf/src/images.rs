@@ -281,6 +281,16 @@ pub(crate) fn recode(bytes: &[u8], size: (f64, f64), c: &CompressionSettings, in
 /// converted by `convert` and compressed again.
 pub(crate) fn recode_cmyk(blob: &ImageBlob, size: (f64, f64), c: &CompressionSettings, interpolate: bool, convert: Option<&CmykPixels>) -> Recoded {
     let rule = rule(c, Kind::Color);
+    if convert.is_none()
+        && let Some(j) = blob.source_jpeg.as_ref().filter(|j| j.decoded_key == blob.content_key())
+    {
+        let dims = ImageReader::new(Cursor::new(blob.bytes.as_slice())).with_guessed_format().ok().and_then(|r| r.into_dimensions().ok());
+        if dims.is_some_and(|d| kept(&rule, d, size, true))
+            && let Ok(image) = Image::from_pdf_cmyk_jpeg(j.bytes.as_ref().clone().into(), interpolate, j.invert)
+        {
+            return Recoded { image: Some(image), warning: rule.instead };
+        }
+    }
     let jpeg = jpeg_components(&blob.bytes).is_some();
     if jpeg && convert.is_none() {
         let dims = ImageReader::new(Cursor::new(blob.bytes.as_slice())).with_guessed_format().ok().and_then(|r| r.into_dimensions().ok());

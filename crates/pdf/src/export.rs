@@ -618,10 +618,14 @@ fn q(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
+fn normalized(v: f32) -> NormalizedF32 {
+    NormalizedF32::new(v.clamp(0.0, 1.0)).unwrap_or(NormalizedF32::ZERO)
+}
+
 fn color(c: &Color) -> krilla::color::Color {
     match *c {
         Color::Rgb { r, g, b } => rgb::Color::new(q(r), q(g), q(b)).into(),
-        Color::Cmyk { c, m, y, k } => cmyk::Color::new(q(c), q(m), q(y), q(k)).into(),
+        Color::Cmyk { c, m, y, k } => cmyk::Color::from_normalized([c, m, y, k].map(normalized)).into(),
         // VectorCraft grey is ink coverage (0 = white); PDF DeviceGray is lightness.
         Color::Gray { k } => luma::Color::new(q(1.0 - k)).into(),
         Color::Lab { .. } => {
@@ -687,7 +691,7 @@ impl Exporter<'_> {
             self.lab_spots.push((name.to_string(), vectorcraft_color::cms::Lab::new(l, a, b)));
         }
         let full = self.out.cmyk(&color, self.intent);
-        let alt = krilla::color::RegularColor::Cmyk(cmyk::Color::new(q(full[0]), q(full[1]), q(full[2]), q(full[3])));
+        let alt = krilla::color::RegularColor::Cmyk(cmyk::Color::from_normalized(full.map(normalized)));
         Some(SeparationSpace::new(SeparationColorant::Custom(sw.name.clone()), alt))
     }
 
@@ -696,10 +700,10 @@ impl Exporter<'_> {
     fn solid(&mut self, c: &Color, link: Option<&str>, tint: f32) -> krilla::color::Color {
         if link == Some(vectorcraft_color::swatch::REGISTRATION) {
             let alt = krilla::color::RegularColor::Cmyk(cmyk::Color::new(255, 255, 255, 255));
-            return SepColor::new(q(tint), SeparationSpace::new(SeparationColorant::AllColorants, alt)).into();
+            return SepColor::from_normalized(normalized(tint), SeparationSpace::new(SeparationColorant::AllColorants, alt)).into();
         }
         match link.and_then(|n| self.separation(n)) {
-            Some(space) => SepColor::new(q(tint), space).into(),
+            Some(space) => SepColor::from_normalized(normalized(tint), space).into(),
             None => self.col(c),
         }
     }
@@ -725,7 +729,7 @@ impl Exporter<'_> {
             return None;
         };
         let space = self.separation(ink)?;
-        let tint = |t: f32| -> krilla::color::Color { SepColor::new(q(t), space.clone()).into() };
+        let tint = |t: f32| -> krilla::color::Color { SepColor::from_normalized(normalized(t), space.clone()).into() };
         let mut out = vec![];
         for (i, s) in g.stops.iter().enumerate() {
             out.push((s.offset, tint(tints[i]), s.opacity));

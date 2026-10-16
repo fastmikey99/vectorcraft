@@ -54,7 +54,7 @@ fn colours(pdf: &[u8]) -> Vec<(String, Vec<f32>)> {
     out
 }
 
-/// `v` as the writer stores it (8 bits a component).
+/// RGB/gray values still use eight-bit writer components.
 fn q8(v: &[f32]) -> Vec<f32> {
     v.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() / 255.0).collect()
 }
@@ -89,7 +89,7 @@ fn converting_to_a_cmyk_destination_writes_k_instead_of_rg() {
     let red = Color::rgb(1.0, 0.0, 0.0);
     let d = doc(ColorMode::Rgb, &[red]);
     assert_eq!(colours(&pdf(&d, json!({})).bytes), [("rg".to_string(), vec![1.0, 0.0, 0.0])], "without conversion");
-    let ink = q8(&to_cmyk(GENERIC_CMYK).srgb_to_cmyk([1.0, 0.0, 0.0], cms::active_settings().intent));
+    let ink = to_cmyk(GENERIC_CMYK).srgb_to_cmyk([1.0, 0.0, 0.0], cms::active_settings().intent);
     for conversion in ["destination", "preserveNumbers"] {
         let r = pdf(&d, json!({"output": {"conversion": conversion, "destination": GENERIC_CMYK}}));
         let c = colours(&r.bytes);
@@ -104,7 +104,7 @@ fn converting_to_a_cmyk_destination_writes_k_instead_of_rg() {
 fn preserve_numbers_keeps_cmyk_values_that_destination_converts() {
     let ink = Color::cmyk(0.1, 0.2, 0.3, 0.4);
     let d = doc(ColorMode::Rgb, &[ink, Color::Gray { k: 0.25 }]);
-    let numbers = q8(&[0.1, 0.2, 0.3, 0.4]);
+    let numbers = [0.1, 0.2, 0.3, 0.4];
     let fills = |conversion: &str, dest: &str| colours(&pdf(&d, json!({"output": {"conversion": conversion, "destination": dest}})).bytes);
     let kept = fills("preserveNumbers", DEVICE_CMYK);
     assert!(kept[0].0 == "k" && close(&kept[0].1, &numbers), "{kept:?}");
@@ -112,7 +112,7 @@ fn preserve_numbers_keeps_cmyk_values_that_destination_converts() {
     assert!(kept[1].0 == "g" && close(&kept[1].1, &q8(&[0.75])), "{kept:?}");
     // Convert to destination: CMYK of another profile goes through Lab into the destination.
     let converted = fills("destination", DEVICE_CMYK);
-    let expected = q8(&to_cmyk(DEVICE_CMYK).lab_to_cmyk(cms::active().lab(&ink), cms::active_settings().intent));
+    let expected = to_cmyk(DEVICE_CMYK).lab_to_cmyk(cms::active().lab(&ink), cms::active_settings().intent);
     assert!(converted[0].0 == "k" && close(&converted[0].1, &expected), "{converted:?} vs {expected:?}");
     assert!(converted[0].1.iter().zip(&numbers).any(|(a, b)| (a - b).abs() > 0.02), "the numbers change: {converted:?}");
     // …unless the destination is their own profile.

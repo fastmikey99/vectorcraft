@@ -190,3 +190,16 @@ The full pre-standard record of what landed is kept in [docs/roadmap.md](docs/ro
 | 2026-10-10 | major | Re-measured against Illustrator 2026 (30.x) from code counts, 71 open issues and public docs; stage set to alpha; moved the parity estimate, honest assessment and "Shipped so far" to `docs/target-app-parity.md`, the gap list to `docs/gaps.md`, milestones to `docs/roadmap.md`, the `.ai` scope to `docs/file-format-parity.md` |
 | 2026-10-05 | major | Honest assessment by dimension and the prioritized gap list |
 | 2026-10-02 | major | First 22-area weighted parity estimate |
+
+
+### Local separation roundtrip validation — 16 October 2026
+
+The validation branch adds an explicit public-PDF print import mode, a
+Separation Roundtrip export preset, fractional CMYK/spot ink preservation,
+unchanged DeviceCMYK JPEG pass-through across native saves, and proof-aware
+headless screenshots. See [print preservation](docs/pdf-print-preservation.md) for the supported cases
+and remaining limitations. This does not increase the general parity score or
+claim production Switch/RIP approval; separation generation remains separate.
+
+Revision history: 2026-10-16 — narrowed the imported-print preservation gaps;
+production acceptance remains pending.

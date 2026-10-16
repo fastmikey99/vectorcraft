@@ -150,3 +150,16 @@ Local print-PDF preservation work (16 October): process-only DeviceN bitmap inks
 | 2026-10-11 | minor | `.ai` in PostScript form opens through its layers, also without its prolog (#1027) |
 | 2026-10-11 | minor | `.ai` editing data: global process colours and pattern fills read, so they no longer drop sublayers (#1025) |
 | 2026-10-10 | major | First checklist; moved the `.ai` editing-data scope from the ROADMAP's "Out of scope" here; added the user-reported `.ai` failures |
+
+
+### Local separation roundtrip validation — 16 October 2026
+
+The validation branch adds an explicit public-PDF print import mode, a
+Separation Roundtrip export preset, fractional CMYK/spot ink preservation,
+unchanged DeviceCMYK JPEG pass-through across native saves, and proof-aware
+headless screenshots. See [print preservation](pdf-print-preservation.md) for the supported cases
+and remaining limitations. This does not increase the general parity score or
+claim production Switch/RIP approval; separation generation remains separate.
+
+Revision history: 2026-10-16 — narrowed the imported-print preservation gaps;
+production acceptance remains pending.

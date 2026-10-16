@@ -28,7 +28,7 @@ fixture in this repository. Synthetic tests are original PDF constructions.
 
 For a hard-edged layered separation, use PDF 1.6, `createLayers: true`,
 `disableImageInterpolation: true`, no colour conversion, no downsampling,
-lossless image compression, and `advanced.overprint: "preserve"`. This is a
+automatic image compression (unchanged JPEGs pass through), and `advanced.overprint: "preserve"`. This is a
 validation configuration, not a production recipe or automatic release.
 
 ## Bounds and limitations
@@ -41,8 +41,9 @@ omitted. Explicit output-intent settings take precedence over the source intent.
 Only DeviceRGB, DeviceCMYK and DeviceGray page blending spaces are retained.
 
 Named spot bitmap channels, mixed spot/process bitmap channels, non-eight-bit
-sample precision (16-bit samples are quantized to eight bits), exact floating
-point vector ink values and exact path coordinates are not solved here.
+sample precision (16-bit samples are quantized to eight bits) and exact path
+coordinates are not solved here. CMYK vector values and spot tints now retain
+f32 precision rather than being quantized to eight-bit steps.
 Separations Preview still uses the existing approximate Multiply overprint
 model; preserving a PDF's page group does not make the native canvas a certified
 RIP. Importing a file's output intent does not assign it as the working preview
@@ -60,3 +61,44 @@ using Ghostscript at 300 dpi. All bitmap process samples, five page boxes and
 embedded profile bytes survive. Plate names and active layer order survive.
 Residual process-tone and edge differences prevent claiming exact equivalence.
 A controlled production extraction/ganging test remains required.
+
+## Opening and saving existing separations
+
+Use `document.open {path, printProduction: true}` for existing print separations.
+It reads all public PDF pages on their media frames, preserves optional-content
+layers and print settings, defaults text to outlines, and bypasses private
+editing copies, including embedded native documents. Conflicting page, crop,
+layer and colour-conversion options are rejected. Normal illustration opening
+keeps its existing editing-data behaviour.
+
+Export with `document.exportPdf {path, preset: "Separation Roundtrip"}` after
+saving and reopening the native document. The preset keeps PDF 1.6 layers,
+overprint, hard image/mask edges, original print settings and image resolution.
+CMYK remains composite artwork; spot/screen layers retain their names.
+
+Unambiguous DeviceCMYK JPEGs with the normal PDF Decode polarity retain their
+original compressed bytes alongside a lossless working image. Native save/load
+preserves that attachment; a changed working image invalidates it. Automatic
+compression reuses it only without conversion or resizing. Explicit ZIP,
+resampling or colour conversion deliberately uses working pixels. Custom
+DecodeParms, nonstandard Decode ranges and other image colour spaces do not
+use this pass-through. This increases native-file size, avoiding another lossy
+encoding or decoder-rounding change on export.
+
+Headless screenshots now honour active proof/separation settings, matching the
+canvas rendering path. Ordinary PNG export still exports the artwork.
+
+Revision: 16 October 2026 — print import mode, roundtrip preset, fractional CMYK
+and spot values, preserved JPEG payloads and proof-aware screenshots. Production
+Switch/Indigo/screen RIP validation remains an independent acceptance gate.
+
+Validation: 7,190 native tests passed; formatting, workspace clippy, dependency,
+asset, brand, layering and no-bundled-font checks passed. All 23 wasm checks
+passed using the installed Rust source with `RUSTC_BOOTSTRAP=1` and
+`CARGO_UNSTABLE_BUILD_STD=std,panic_abort` (this Homebrew toolchain has no
+prebuilt wasm standard library). Shared PDF tests and workspace clippy passed;
+all non-UI shared-library tests passed. The shared UI graphics test could not
+create a GPU adapter in the sandbox and is not claimed passed.
+
+The release CLI passed all ten 50,000-path performance budgets after the build
+finished (fit-page render 41.53 ms, native save 38.80 ms, native open 112.93 ms).

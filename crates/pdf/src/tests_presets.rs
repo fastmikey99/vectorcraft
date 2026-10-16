@@ -7,7 +7,7 @@ fn built_in_presets() {
     let all = builtin_presets();
     assert_eq!(all[0].name, DEFAULT_PRESET);
     assert!(all[0].settings.preserve_editing, "the app default keeps the document editable");
-    assert_eq!(all.len(), 7);
+    assert_eq!(all.len(), 8);
     for p in &all {
         assert_eq!(p.settings.check_values(), Ok(()), "{}", p.name);
         assert!(!p.description.is_empty());

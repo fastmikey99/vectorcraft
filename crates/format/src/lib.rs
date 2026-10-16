@@ -118,6 +118,15 @@ struct Image {
     /// `data` is a linked image's preview ([`ImageBlob::proxy`]), not the file's bytes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     proxy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_jpeg: Option<SourceJpeg>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SourceJpeg {
+    data: String,
+    decoded_key: String,
+    invert: bool,
 }
 
 impl Image {
@@ -147,9 +156,9 @@ impl<'a> Blobs<'a> {
             let at = self.at;
             self.at += len;
             self.tail.push((bytes, is_packed(mime)));
-            return Image { mime: mime.into(), data: String::new(), blob: Some([at, len]), proxy };
+            return Image { mime: mime.into(), data: String::new(), blob: Some([at, len]), proxy, source_jpeg: None };
         }
-        Image { mime: mime.into(), data: base64_encode(bytes), blob: None, proxy }
+        Image { mime: mime.into(), data: base64_encode(bytes), blob: None, proxy, source_jpeg: None }
     }
 }
 
@@ -343,7 +352,7 @@ pub fn save_to(doc: &Document, o: &SaveOptions, w: impl Write) -> Result<(), For
     }
     let profiles: BTreeMap<&str, Image> = o.profiles.iter().map(|(name, icc)| (name.as_str(), out_blobs.image(ICC_MIME, icc, false))).collect();
     let pdf = o.pdf.as_deref().map(|p| out_blobs.image("application/pdf", p, false));
-    let blob = |mime: &str, bytes: &[u8]| Image { mime: mime.into(), data: base64_encode(bytes), blob: None, proxy: false };
+    let blob = |mime: &str, bytes: &[u8]| Image { mime: mime.into(), data: base64_encode(bytes), blob: None, proxy: false, source_jpeg: None };
     let mut out = if o.compress { Out::Gz(Box::new(Gz::new(w).map_err(encode_err)?)) } else { Out::Plain(w) };
     let mut env = Envelope { pretty, first: true };
     // Older apps only know the name from before the rename.
@@ -411,10 +420,17 @@ impl<'a> Entries<'a> {
             .map(|(k, b)| {
                 // Include Linked Files keeps the file's bytes whenever they are loaded.
                 let preview_only = self.linked.contains(k) && (!self.include_linked || b.is_proxy());
-                let image = match b.proxy.as_ref().filter(|_| preview_only) {
+                let mut image = match b.proxy.as_ref().filter(|_| preview_only) {
                     Some(p) => out.image(preview_mime(p), p, true),
                     None => out.image(&b.mime, &b.bytes, false),
                 };
+                if !preview_only {
+                    image.source_jpeg = b.source_jpeg.as_ref().filter(|j| j.decoded_key == b.content_key()).map(|j| SourceJpeg {
+                        data: base64_encode(&j.bytes),
+                        decoded_key: j.decoded_key.clone(),
+                        invert: j.invert,
+                    });
+                }
                 (k.as_str(), image)
             })
             .collect()
@@ -536,6 +552,11 @@ pub fn load_file(bytes: &[u8]) -> Result<NativeFile, FormatError> {
     for (k, img) in f.images {
         let bytes = bytes_of(&img).ok_or_else(|| FormatError::BadImage(k.clone()))?;
         let mut blob = ImageBlob::new(img.mime, bytes);
+        if let Some(j) = img.source_jpeg.filter(|j| j.decoded_key == blob.content_key()) {
+            let original = base64_decode(&j.data).ok_or_else(|| FormatError::BadImage(k.clone()))?;
+            blob.source_jpeg =
+                Some(vectorcraft_doc::PreservedJpeg { bytes: std::sync::Arc::new(original), decoded_key: j.decoded_key, invert: j.invert });
+        }
         // Until the linked file is read, the preview stands in for it.
         if img.proxy {
             blob.proxy = Some(blob.bytes.clone());

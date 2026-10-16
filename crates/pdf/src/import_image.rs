@@ -117,7 +117,24 @@ pub(crate) fn cmyk(st: &Stream<'_>, width: u32, height: u32) -> Result<Option<Im
             ink
         })
         .collect();
-    Inks::new(width, height, inks).and_then(|i| ImageBlob::cmyk_tiff(&i)).map(Some).ok_or(UNREAD)
+    let mut blob = Inks::new(width, height, inks).and_then(|i| ImageBlob::cmyk_tiff(&i)).ok_or(UNREAD)?;
+    // Preserve only unambiguous DeviceCMYK JPEGs. Other colour spaces and decode transforms
+    // keep their normalized, lossless working samples instead.
+    if bpc == 8
+        && channels == [0, 1, 2, 3]
+        && ranges == [(0.0, 1.0); 4]
+        && matches!(filters.as_slice(), [Filter::DctDecode])
+        && d.get::<Name<'_>>(key(d, b"ColorSpace", b"CS")).is_some_and(|n| matches!(n.as_ref(), b"DeviceCMYK" | b"CMYK"))
+        && !d.contains_key(b"DecodeParms")
+        && !d.contains_key(b"DP")
+    {
+        let raw = st.raw_data();
+        if jpeg_components(&raw) == Some(4) {
+            blob.source_jpeg =
+                Some(vectorcraft_doc::PreservedJpeg { bytes: std::sync::Arc::new(raw.into_owned()), decoded_key: blob.content_key(), invert: false });
+        }
+    }
+    Ok(Some(blob))
 }
 
 /// Does the image carry its own transparency (a soft mask, a stencil mask or a colour key)?

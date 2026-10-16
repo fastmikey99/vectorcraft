@@ -1381,7 +1381,7 @@ impl Importer {
         let missing = linked.is_some_and(|l| l.missing);
         let link = linked.map(|l| l.link.clone());
         self.doc.images.entry(key.clone()).or_insert_with(|| {
-            let blob = ImageBlob { mime: mime.into(), bytes: bytes.clone(), proxy: missing.then(|| bytes.clone()) };
+            let blob = ImageBlob { source_jpeg: None, mime: mime.into(), bytes: bytes.clone(), proxy: missing.then(|| bytes.clone()) };
             if link.is_some() && !missing { blob.with_proxy() } else { blob }
         });
         let xf = acc * Affine::scale_non_uniform(size.width() as f64 / pw as f64, size.height() as f64 / ph as f64);

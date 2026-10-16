@@ -423,7 +423,7 @@ fn images_link_png_or_jpeg_files() {
         };
         vec![Node::new(d.alloc_id(), NodeKind::Image(Box::new(im)))]
     });
-    d.images.insert("raster-1".into(), ImageBlob { mime: "image/png".into(), bytes: Arc::new(png), proxy: None });
+    d.images.insert("raster-1".into(), ImageBlob { source_jpeg: None, mime: "image/png".into(), bytes: Arc::new(png), proxy: None });
     let out = export(&d, &opts(&d)).unwrap();
     let e = entities(&out);
     assert_eq!(kind(&e[0]), "IMAGE");

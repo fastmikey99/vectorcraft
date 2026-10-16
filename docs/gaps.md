@@ -406,3 +406,16 @@ Local print-PDF preservation work (16 October): process-only DeviceN bitmap inks
 | 2026-10-10 | minor | G9 evidence counted from the tracker (28 `.ai`/EPS issues, 20 fixed); impact narrowed to handing files back |
 | 2026-10-10 | minor | Alpha blockers checked against the core-workflow gate: none |
 | 2026-10-10 | major | Moved from the ROADMAP's "Where we're lacking"; kept ids G1–G8, added G9–G19 (file formats, stability, bugs, preferences, 30.x additions, pen hardware, performance, localization, ecosystem, AI, accessibility) and re-ranked |
+
+
+### Local separation roundtrip validation — 16 October 2026
+
+The validation branch adds an explicit public-PDF print import mode, a
+Separation Roundtrip export preset, fractional CMYK/spot ink preservation,
+unchanged DeviceCMYK JPEG pass-through across native saves, and proof-aware
+headless screenshots. See [print preservation](pdf-print-preservation.md) for the supported cases
+and remaining limitations. This does not increase the general parity score or
+claim production Switch/RIP approval; separation generation remains separate.
+
+Revision history: 2026-10-16 — narrowed the imported-print preservation gaps;
+production acceptance remains pending.

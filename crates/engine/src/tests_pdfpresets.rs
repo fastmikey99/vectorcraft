@@ -43,7 +43,11 @@ fn built_in_presets_are_listed_and_read_only() {
     assert!(is_bad_params(s.execute("pdf.preset.save", &json!({"name": "press quality", "compatibility": "1.4"}))));
     assert!(is_bad_params(s.execute("pdf.preset.save", &json!({"name": "default"}))));
     assert!(is_bad_params(s.execute("pdf.preset.delete", &json!({"name": "Smallest File Size"}))));
-    assert_eq!(names(&mut s).len(), 7);
+    assert_eq!(names(&mut s).len(), 8);
+    let roundtrip = &row("Separation Roundtrip")["settings"];
+    assert_eq!(roundtrip["createLayers"], true);
+    assert_eq!(roundtrip["disableImageInterpolation"], true);
+    assert_eq!(roundtrip["compression"]["color"]["downsample"], "none");
     // Built-in presets apply as named.
     let v = s.execute("document.pdfSettings", &json!({"preset": "Smallest File Size"})).unwrap();
     assert_eq!((&v["settings"]["fastWebView"], &v["changed"]), (&json!(true), &json!([])), "{v}");

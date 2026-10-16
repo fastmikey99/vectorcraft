@@ -209,3 +209,18 @@ fn a_placeholder_only_pdf_part_is_detected() {
     assert!(open(&mut s, &two, json!({"pages": "1"})).is_err());
     open(&mut s, &two, json!({})).unwrap();
 }
+
+#[test]
+fn print_production_reads_all_public_pages_without_private_editing_data() {
+    let o = LoadOptions::from_params("document.open", &json!({"printProduction":true})).unwrap();
+    assert!(!o.editing_data && !o.trust_editing_data && o.layers);
+    assert_eq!(o.crop, vectorcraft_pdf::CropTo::Media);
+    assert!(!o.is_partial());
+    let mut session = Session::new();
+    open(&mut session, &three_pages(), json!({"printProduction":true})).unwrap();
+    assert_eq!(sizes(&session), [(100.0, 100.0), (200.0, 400.0), (300.0, 100.0)]);
+    assert!(session.active().unwrap().doc.unknown.contains_key("pdf.printSettings.v1"));
+    for key in ["editingData", "colorMode", "cropTo", "crop", "layers", "pages", "page"] {
+        assert!(LoadOptions::from_params("document.open", &json!({"printProduction":true, key:false})).is_err());
+    }
+}

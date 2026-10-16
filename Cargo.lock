@@ -2219,7 +2219,7 @@ dependencies = [
 [[package]]
 name = "krilla"
 version = "0.8.2"
-source = "git+https://github.com/storytold/craft-libs?rev=ca50d63b773c99f96e75c77ce5a1d21e7c9cda0d#ca50d63b773c99f96e75c77ce5a1d21e7c9cda0d"
+source = "git+https://github.com/fastmikey99/craft-libs?rev=851aaee7346f93115b65fbf8349258c3353e1630#851aaee7346f93115b65fbf8349258c3353e1630"
 dependencies = [
  "base64 0.22.1",
  "bumpalo",

@@ -587,6 +587,17 @@ pub struct ImageBlob {
     /// linked images show this blob, and what `bytes` hold while the linked file can't be read.
     #[serde(skip)]
     pub proxy: Option<Arc<Vec<u8>>>,
+    /// Original PDF JPEG encoding, reusable only while the decoded working image is unchanged.
+    #[serde(skip)]
+    pub source_jpeg: Option<PreservedJpeg>,
+}
+
+/// A PDF JPEG alongside its lossless working image. Native files retain both.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreservedJpeg {
+    pub bytes: Arc<Vec<u8>>,
+    pub decoded_key: String,
+    pub invert: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

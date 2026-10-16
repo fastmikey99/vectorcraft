@@ -160,3 +160,16 @@ After placed documents (File › Place of a `.vectorcraft` file, linked), M4.14�
 | 2026-10-10 | minor | M9 row from main: initial Revolve |
 | 2026-10-10 | minor | Added the Alpha gate table (core-workflow gate): all six workflows work end to end, `.ai` exchange partial but not blocking; stage stays alpha |
 | 2026-10-10 | major | Created from ROADMAP.md's milestone table and "Where we're going"; added Current focus and the beta list |
+
+
+### Local separation roundtrip validation — 16 October 2026
+
+The validation branch adds an explicit public-PDF print import mode, a
+Separation Roundtrip export preset, fractional CMYK/spot ink preservation,
+unchanged DeviceCMYK JPEG pass-through across native saves, and proof-aware
+headless screenshots. See [print preservation](pdf-print-preservation.md) for the supported cases
+and remaining limitations. This does not increase the general parity score or
+claim production Switch/RIP approval; separation generation remains separate.
+
+Revision history: 2026-10-16 — narrowed the imported-print preservation gaps;
+production acceptance remains pending.

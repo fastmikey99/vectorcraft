@@ -771,3 +771,16 @@ Moved from the ROADMAP's "Shipped so far" on 2026-10-10. Update it when a featur
 | 2026-10-10 | major | Full re-measure against Illustrator 2026 30.x from code counts, open issues and public docs; added breadth/depth/ready-for-real-work numbers, generative-AI row, calibration from PR timestamps; merged the ROADMAP's parity estimate, honest assessment and "Shipped so far" into this file |
 | 2026-10-05 | major | (in ROADMAP.md) M3 and M4 rows re-derived after the paint and files milestones |
 | 2026-10-02 | major | (in ROADMAP.md) First 22-area weighted estimate |
+
+
+### Local separation roundtrip validation — 16 October 2026
+
+The validation branch adds an explicit public-PDF print import mode, a
+Separation Roundtrip export preset, fractional CMYK/spot ink preservation,
+unchanged DeviceCMYK JPEG pass-through across native saves, and proof-aware
+headless screenshots. See [print preservation](pdf-print-preservation.md) for the supported cases
+and remaining limitations. This does not increase the general parity score or
+claim production Switch/RIP approval; separation generation remains separate.
+
+Revision history: 2026-10-16 — narrowed the imported-print preservation gaps;
+production acceptance remains pending.

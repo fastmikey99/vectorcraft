@@ -39,6 +39,8 @@ pub struct LoadOptions {
     /// A `.ai` opens from its editing copy even where that draws differently from its PDF part
     /// (which can be older than it), with a warning, instead of from the PDF part.
     pub trust_editing_data: bool,
+    /// Import the public PDF print representation with its layers and media frame.
+    pub print_production: bool,
 }
 
 impl Default for LoadOptions {
@@ -54,6 +56,7 @@ impl Default for LoadOptions {
             dxf: Default::default(),
             editing_data: true,
             trust_editing_data: false,
+            print_production: false,
         }
     }
 }
@@ -64,6 +67,16 @@ impl LoadOptions {
     /// `textAs` (`text` | `outlines`), `layers` (true | false), `editingData` (true | false | `always`) and `dxf`
     /// (the DXF import options).
     pub fn from_params(cmd: &str, p: &Value) -> Result<Self> {
+        let print_production = match p.get("printProduction") {
+            None => false,
+            Some(v) => v.as_bool().ok_or_else(|| bad(cmd, "printProduction must be true or false"))?,
+        };
+        if print_production && ["editingData", "colorMode", "cropTo", "crop", "layers", "pages", "page"].iter().any(|k| p.get(*k).is_some()) {
+            return Err(bad(
+                cmd,
+                "printProduction preserves all PDF pages, layers and inks; omit editingData, colorMode, cropTo, crop, layers, pages and page",
+            ));
+        }
         let pages = match p.get("pages").filter(|v| !v.is_null()).or_else(|| p.get("page").filter(|v| !v.is_null())) {
             None => None,
             Some(Value::String(s)) if s.trim().eq_ignore_ascii_case("all") => None,
@@ -80,7 +93,7 @@ impl LoadOptions {
             Some(m) => return Err(bad(cmd, format!("colorMode must be rgb or cmyk, not `{m}`"))),
         };
         let grays = Grays::param(cmd, p)?;
-        let text_as = choice(cmd, "textAs", str_param(p, "textAs"))?;
+        let text_as = choice(cmd, "textAs", str_param(p, "textAs").or(print_production.then_some("outlines")))?;
         let layers = match p.get("layers").filter(|v| !v.is_null()) {
             None => true,
             Some(v) => v.as_bool().ok_or_else(|| bad(cmd, "layers must be true or false"))?,
@@ -91,14 +104,26 @@ impl LoadOptions {
             Some(v) => (v.as_bool().ok_or_else(|| bad(cmd, "editingData must be true, false or \"always\""))?, false),
         };
         let dxf = super::dxfimport::options(cmd, p.get("dxf"))?;
-        Ok(Self { pages, crop, password, color_mode, grays, text_as, layers, dxf, editing_data, trust_editing_data })
+        Ok(Self {
+            pages,
+            crop: if print_production { CropTo::Media } else { crop },
+            password,
+            color_mode,
+            grays,
+            text_as,
+            layers,
+            dxf,
+            editing_data: editing_data && !print_production,
+            trust_editing_data,
+            print_production,
+        })
     }
 
     /// Does the document read only part of the file, or read it differently (a page range, another
     /// box, a password, without its hidden layers)? Writing it back would lose the rest, so Save
     /// doesn't (it asks for a name).
     pub fn is_partial(&self) -> bool {
-        self.pages.is_some() || self.crop != CropTo::default() || self.password.is_some() || !self.layers
+        self.pages.is_some() || (self.crop != CropTo::default() && !self.print_production) || self.password.is_some() || !self.layers
     }
 
     /// The PDF import options: `pages` resolved against the file's page count. A PDF-compatible
