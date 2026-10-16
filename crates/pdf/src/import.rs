@@ -199,6 +199,7 @@ fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_p
     let incomplete = Arc::new(AtomicBool::new(false));
     let incomplete_sink = incomplete.clone();
     let settings = InterpreterSettings {
+        preserve_path_geometry: true,
         warning_sink: Arc::new(move |w| {
             let msg = match w {
                 InterpreterWarning::UnsupportedFont => "a font could not be read; its text was skipped",

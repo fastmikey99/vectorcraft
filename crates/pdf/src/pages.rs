@@ -257,8 +257,23 @@ fn rect(r: craft_pdf::syntax::object::Rect) -> Rect {
 /// Box `which` of `page` in PDF user space, clipped to the media box (Bounding: the crop box,
 /// which the art's bounds replace after import). A missing or empty box is the crop box.
 pub(crate) fn page_box(page: &Page<'_>, which: CropTo) -> Rect {
-    let media = rect(page.media_box());
-    let crop = rect(page.intersected_crop_box());
+    let exact = |key: &[u8], inherit: bool| {
+        let mut dict = page.raw().clone();
+        for _ in 0..32 {
+            if let Some(v) = dict.get::<[f64; 4]>(key) {
+                let r = Rect::new(v[0], v[1], v[2], v[3]).abs();
+                return (r.is_finite() && r.area() > 0.0).then_some(r);
+            }
+            if !inherit {
+                break;
+            }
+            let Some(parent) = dict.get::<Dict<'_>>(b"Parent") else { break };
+            dict = parent;
+        }
+        None
+    };
+    let media = exact(b"MediaBox", true).unwrap_or_else(|| rect(page.media_box()));
+    let crop = exact(b"CropBox", true).unwrap_or(media).intersect(media);
     let key: &[u8] = match which {
         CropTo::Bounding | CropTo::Crop => return crop,
         CropTo::Media if media.area() > 0.0 => return media,
@@ -267,7 +282,7 @@ pub(crate) fn page_box(page: &Page<'_>, which: CropTo) -> Rect {
         CropTo::Trim => b"TrimBox",
         CropTo::Art => b"ArtBox",
     };
-    page.raw().get::<craft_pdf::syntax::object::Rect>(key).map(|r| rect(r).intersect(media)).filter(|r| r.area() > 0.0).unwrap_or(crop)
+    exact(key, false).map(|r| r.intersect(media)).filter(|r| r.area() > 0.0).unwrap_or(crop)
 }
 
 /// Where `page` draws on its artboard: the page transform (PDF user space → y-down page space

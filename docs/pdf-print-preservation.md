@@ -102,3 +102,46 @@ create a GPU adapter in the sandbox and is not claimed passed.
 
 The release CLI passed all ten 50,000-path performance budgets after the build
 finished (fit-page render 41.53 ms, native save 38.80 ms, native open 112.93 ms).
+
+## Edge and tone follow-up — 16 October 2026
+
+The editable route now retains fractional ink components on import, reads page
+boxes in double precision, and writes path/clip coordinates and placement matrices
+without first reducing them to f32. Repeated vertices are retained without the
+reader's 0.0001-point raster workaround; zero-length round-capped strokes remain
+PDF strokes. The shared reader/writer are pinned together at `9a7ceb6f`.
+
+Writer-created transparency groups inherit the retained source page blending
+space. Previously a CMYK working document forced intermediate groups to CMYK even
+inside a source RGB page group, introducing an extra colour conversion. The
+WE134155 broad one-level CMYK discrepancy disappears with this correction. Mask
+luminance groups are not traversed as painted forms. A form shared by source pages
+with conflicting blending spaces is refused rather than silently choosing one.
+This does not yet preserve arbitrary mixed original group-level colour spaces.
+
+No original-PDF pass-through was added. All comparisons exercise editable import,
+native save/reopen and regenerated PDF export. A raster comparison can still show
+isolated boundary pixels after curves/transforms are restructured; pixel identity
+is not asserted. Independent PDF geometry comparison and production RIP validation
+remain separate from these synthetic regression tests.
+
+Hybrid colour policy confirmed by the user: retain RGB and source profiles, retain
+CMYK and its meaning, and retain named spot inks/tints. The exact agreed CMYK
+working profile is Coated FOGRA39 (ISO 12647-2:2004), not an interchangeable ECI
+profile. Do not force RGB to CMYK to enable spreading; final process conversion
+belongs to the configured Indigo RIP. This policy is a requirement for the maker,
+not a claim that every mixed-colour import/spread/export case is already supported.
+
+Final local corpus validation: 12 editable native roundtrips retain page boxes
+and output profile inventories. WE134155 has identical CMYK raster samples at
+300 dpi. Independent line/cubic control comparison measures 69,196 filled
+segments on 27 technical screen plates within 1.37e-12 pt; this does not verify
+clipping semantics or outlined-stroke equivalence. Across 30 screen/spot raster
+plates, 277 coverage pixels differ, all on existing boundaries. Checker warning
+and error findings are unchanged; PA Sharp and Esko trap edits survive native
+reopen and leave WHP/WP pixels unchanged. Production RIP validation remains open.
+
+All nine application CI gates pass (7,193 tests passed, 12 ignored; 23 wasm
+checks). All ten performance budgets pass; before/after builds used different
+optimization profiles, so the timings are not a controlled regression measure.
+No customer PDF fixtures or rendered artwork are committed.

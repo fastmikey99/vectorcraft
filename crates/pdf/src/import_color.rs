@@ -31,10 +31,6 @@ const MAX_SPACES: usize = 4096;
 /// DeviceN (and Separation) colorants that are process plates, in CMYK channel order.
 const PROCESS: [&str; 4] = ["Cyan", "Magenta", "Yellow", "Black"];
 
-fn round3(v: f32) -> f32 {
-    (v * 1000.0).round() / 1000.0
-}
-
 /// A colour in its own model; an ink links to its spot swatch at a tint.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Native {
@@ -261,9 +257,9 @@ impl<'p> Colors<'p> {
 
     /// Components `comps` of `space` in their own model; `None`: use their RGB.
     pub fn native(&mut self, space: Space, comps: &[f32]) -> Option<Native> {
-        let c = |i: usize| round3(comps.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0));
+        let c = |i: usize| comps.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0);
         match space {
-            Space::Gray => Some(Native::plain(Color::gray(round3(1.0 - c(0))))),
+            Space::Gray => Some(Native::plain(Color::gray(1.0 - c(0)))),
             Space::Cmyk => Some(Native::plain(Color::cmyk(c(0), c(1), c(2), c(3)))),
             Space::IccRgb => Some(Native::plain(Color::rgb(c(0), c(1), c(2)))),
             Space::Rgb | Space::Other => None,
@@ -280,7 +276,7 @@ impl<'p> Colors<'p> {
         let mut first_ink = None;
         let mut several = false;
         for (c, t) in colorants.iter().zip(comps) {
-            let t = round3(t.clamp(0.0, 1.0));
+            let t = t.clamp(0.0, 1.0);
             match *c {
                 Colorant::Unknown => return None,
                 Colorant::None => {}
@@ -513,11 +509,11 @@ fn lab_profile(profile: &Stream<'_>) -> bool {
 /// An alternate-space colour (the tint transform's output) as a VectorCraft colour.
 fn alt_color(alt: Alt, v: &[f32]) -> Option<Color> {
     let c = |i: usize| v.get(i).copied().filter(|x| x.is_finite());
-    let u = |i: usize| c(i).map(|x| round3(x.clamp(0.0, 1.0)));
+    let u = |i: usize| c(i).map(|x| x.clamp(0.0, 1.0));
     Some(match alt {
-        Alt::Gray => Color::gray(round3(1.0 - u(0)?)),
+        Alt::Gray => Color::gray(1.0 - u(0)?),
         Alt::Rgb => Color::rgb(u(0)?, u(1)?, u(2)?),
         Alt::Cmyk => Color::cmyk(u(0)?, u(1)?, u(2)?, u(3)?),
-        Alt::Lab => Color::lab(round3(c(0)?.clamp(0.0, 100.0)), round3(c(1)?.clamp(-128.0, 127.0)), round3(c(2)?.clamp(-128.0, 127.0))),
+        Alt::Lab => Color::lab(c(0)?.clamp(0.0, 100.0), c(1)?.clamp(-128.0, 127.0), c(2)?.clamp(-128.0, 127.0)),
     })
 }

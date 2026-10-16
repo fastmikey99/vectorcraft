@@ -465,3 +465,14 @@ fn rgb_numbers_stand_in_editor_documents_only() {
     assert!(near(color(true), Color::rgb(0.2, 0.6, 0.4)), "{:?}", color(true));
     assert!(!near(color(false), Color::rgb(0.2, 0.6, 0.4)), "{:?}", color(false));
 }
+
+#[test]
+fn fractional_process_inks_and_spot_tints_are_not_rounded_on_import() {
+    let spaces = "/Process /DeviceCMYK /Spot [/Separation /PrecisionWhite /DeviceCMYK << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0.123456 0.234567 0.345678 0.456789] /N 1 >>]";
+    let page = page_with(spaces, &[("Process", "0.123456 0.234567 0.345678 0.456789"), ("Spot", "0.543219")]);
+    let doc = import(&pdf_with(&[page], &[], None)).unwrap();
+    let paints = fills(&doc);
+    assert_eq!(solid(&paints[0]).0, Color::cmyk(0.123456, 0.234567, 0.345678, 0.456789));
+    assert_eq!(solid(&paints[1]).2, 0.543219);
+    assert_eq!(doc.swatch("PrecisionWhite").unwrap().paint.color().unwrap(), Color::cmyk(0.123456, 0.234567, 0.345678, 0.456789));
+}

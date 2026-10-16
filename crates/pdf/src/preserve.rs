@@ -1,6 +1,6 @@
 //! Retain the public PDF print settings independently of editable artwork. No
 //! source content streams or application editing data are retained here.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use craft_pdf::syntax::Pdf;
 use craft_pdf::syntax::object::{Array, Dict, Name, Stream};
@@ -152,6 +152,42 @@ fn stream(data: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Groups introduced by the writer inherit the imported page's blending space.
+/// A CMYK working document does not imply that the source PDF blended in CMYK.
+/// Follow painted XObjects only: soft-mask groups have their own luminance space.
+fn inherited_groups(parsed: &crate::linearize::Parsed<'_>, page: u32, space: &str, groups: &mut BTreeMap<u32, String>) -> Result<(), PdfError> {
+    fn resolve<'a>(parsed: &'a crate::linearize::Parsed<'a>, value: &'a Obj<'a>) -> Option<&'a Obj<'a>> {
+        match value {
+            Obj::Ref(n, _) => parsed.objects.get(n).map(|o| &o.value),
+            v => Some(v),
+        }
+    }
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![page];
+    while let Some(number) = pending.pop() {
+        if !seen.insert(number) {
+            continue;
+        }
+        let Some(obj) = parsed.objects.get(&number) else { continue };
+        if number != page && obj.value.get(b"Group").is_some() {
+            if groups.get(&number).is_some_and(|old| old != space) {
+                return Err(error("a transparency form is shared by pages with different blending spaces"));
+            }
+            groups.insert(number, space.into());
+        }
+        let Some(resources) = obj.value.get(b"Resources").and_then(|v| resolve(parsed, v)) else { continue };
+        let Some(Obj::Dict { entries, .. }) = resources.get(b"XObject").and_then(|v| resolve(parsed, v)) else { continue };
+        for (_, value) in entries {
+            if let Obj::Ref(n, _) = value
+                && parsed.objects.get(n).is_some_and(|o| o.value.name(b"Subtype") == Some(b"Form"))
+            {
+                pending.push(*n);
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn finish(pdf: Vec<u8>, doc: &Document, opts: &PdfOptions, warnings: &mut Vec<String>) -> Result<Vec<u8>, PdfError> {
     let Some(value) = doc.unknown.get(KEY) else { return Ok(pdf) };
     if opts.settings.discard_imported_print_settings {
@@ -164,6 +200,7 @@ pub(crate) fn finish(pdf: Vec<u8>, doc: &Document, opts: &PdfOptions, warnings: 
     }
     let parsed = crate::linearize::parse(&pdf).map_err(error)?;
     let mut patch = Patch::new(&parsed.xref);
+    let mut inherited = BTreeMap::new();
     let indices: Vec<usize> = opts.artboards.clone().unwrap_or_else(|| (0..doc.artboards.len()).collect());
     for (&number, &index) in parsed.pages.iter().zip(&indices) {
         let Some(board) = doc.artboards.get(index) else { continue };
@@ -189,6 +226,7 @@ pub(crate) fn finish(pdf: Vec<u8>, doc: &Document, opts: &PdfOptions, warnings: 
             if !matches!(group.space.as_str(), "DeviceRGB" | "DeviceCMYK" | "DeviceGray") {
                 return Err(error("invalid blending space"));
             }
+            inherited_groups(&parsed, number, &group.space, &mut inherited)?;
             replacements.insert("Group", format!("<</Type/Group/S/Transparency/CS/{}/I {}/K {}>>", group.space, group.isolate, group.knockout));
         }
         if keep_boxes && source.origin != [0.0, 0.0] {
@@ -210,6 +248,12 @@ pub(crate) fn finish(pdf: Vec<u8>, doc: &Document, opts: &PdfOptions, warnings: 
         }
         let updated = dictionary(&pdf, &obj.value, &replacements)?;
         patch.replace(obj.value_span.0, obj.value_span.1, updated);
+    }
+    for (number, space) in inherited {
+        let obj = parsed.objects.get(&number).ok_or_else(|| error("missing transparency form"))?;
+        let group = obj.value.get(b"Group").ok_or_else(|| error("missing transparency group"))?;
+        let Obj::Dict { start, end, .. } = group else { return Err(error("indirect transparency group")) };
+        patch.replace(*start, *end, dictionary(&pdf, group, &BTreeMap::from([("CS", format!("/{space}"))]))?);
     }
     let output = &opts.settings.output;
     let explicit_intent = !output.output_intent.is_empty() || !output.output_condition_id.is_empty();
@@ -283,6 +327,53 @@ mod tests {
         assert_eq!(back.document.artboards[0].rect, doc.artboards[0].rect);
         let bounds = |d: &Document| d.layers[0].visual_bounds().unwrap();
         assert_eq!(bounds(&back.document), bounds(&doc));
+    }
+
+    #[test]
+    fn fractional_page_origin_and_path_coordinates_survive_export() {
+        let mut page = PdfPage::new(
+            100.0,
+            80.0,
+            "0 0 0 1 k 12.123456789 9.987654321 m 12.123456789 9.987654321 l 42.135791357 12.246813579 l 45.987654321 39.123456789 l h f",
+        );
+        page.media = [-0.565893, -0.566967, 924.660573, 167.067627];
+        let bytes = pdf_with(&[page], &[], None);
+        let opts = ImportOptions { crop: CropTo::Media, ..Default::default() };
+        let doc = import_with_report(&bytes, &opts).unwrap().document;
+        assert!((doc.artboards[0].rect.width() - 925.226466).abs() < 1e-10);
+        let saved = serde_json::to_vec(&doc).unwrap();
+        let doc: Document = serde_json::from_slice(&saved).unwrap();
+        let out = export(&doc, &PdfOptions::default()).unwrap();
+        let back = import_with_report(&out, &opts).unwrap().document;
+        let a = doc.layers[0].visual_bounds().unwrap();
+        let b = back.layers[0].visual_bounds().unwrap();
+        for (a, b) in rect(a).into_iter().zip(rect(b)) {
+            assert!((a - b).abs() < 1e-9, "{a} changed to {b}");
+        }
+    }
+
+    #[test]
+    fn cmyk_artwork_keeps_rgb_transparency_blending_after_export() {
+        let mut doc = import_with_report(&fixture(), &ImportOptions::default()).unwrap().document;
+        assert_eq!(doc.color_mode, vectorcraft_doc::ColorMode::Cmyk);
+        // Force both a page group and a nested group, as masked/trapped artwork does.
+        doc.page_isolate = true;
+        std::sync::Arc::make_mut(&mut doc.layers[0]).opacity = 0.75;
+        let out = export(&doc, &PdfOptions::default()).unwrap();
+        let parsed = crate::linearize::parse(&out).unwrap();
+        let mut count = 0;
+        for obj in parsed.objects.values() {
+            if let Some(group) = obj.value.get(b"Group") {
+                assert_eq!(group.name(b"CS"), Some(b"DeviceRGB".as_slice()));
+                count += 1;
+            }
+        }
+        assert!(count >= 2, "exercise nested and page blending spaces");
+        // Opting out of imported settings restores the new CMYK document policy.
+        let opts = PdfOptions { settings: crate::PdfSettings { discard_imported_print_settings: true, ..Default::default() }, ..Default::default() };
+        let out = export(&doc, &opts).unwrap();
+        let parsed = crate::linearize::parse(&out).unwrap();
+        assert!(parsed.objects.values().filter_map(|o| o.value.get(b"Group")).any(|g| g.name(b"CS") == Some(b"DeviceCMYK")));
     }
 
     #[test]

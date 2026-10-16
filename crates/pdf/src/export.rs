@@ -9,7 +9,7 @@ use craft_pdf::write::{self, Metadata};
 use krilla::color::separation::{Color as SepColor, SeparationColorant, SeparationSpace};
 use krilla::color::{cmyk, luma, rgb};
 use krilla::configure::{Archival, PdfVersion};
-use krilla::geom::{Path, PathBuilder, Size, Transform};
+use krilla::geom::{Path, PathCommand64, Size, Transform};
 use krilla::image::Image;
 use krilla::num::NormalizedF32;
 use krilla::page::PageSettings;
@@ -216,7 +216,7 @@ impl Writer {
     /// Draw one page: the art of `ex`'s document placed as `sheet` says, then its marks.
     pub(crate) fn page(&mut self, ex: &mut Exporter, sheet: &Sheet) -> Result<(), PdfError> {
         let (w, h) = sheet.size;
-        let size = Size::from_wh(w.max(1.0) as f32, h.max(1.0) as f32).ok_or_else(|| PdfError::BadSetting(format!("page size {w} × {h}")))?;
+        let size = Size::from_wh64(w.max(1.0), h.max(1.0)).ok_or_else(|| PdfError::BadSetting(format!("page size {w} × {h}")))?;
         let at = |b: Rect| krilla::geom::Rect::from_ltrb(b.x0 as f32, b.y0 as f32, b.x1 as f32, b.y1 as f32);
         let mut page = self.pdf.document_mut().start_page_with(PageSettings::new(size).with_trim_box(at(sheet.trim)).with_bleed_box(at(sheet.bleed)));
         let mut s = page.surface();
@@ -540,14 +540,14 @@ const MAX_COORD: f64 = 1e9;
 
 fn xf(a: Affine) -> Transform {
     let c = a.as_coeffs();
-    Transform::from_row(c[0] as f32, c[1] as f32, c[2] as f32, c[3] as f32, c[4] as f32, c[5] as f32)
+    Transform::from_row64(c)
 }
 
 /// The current transform of surface `s` in the content stream it draws into, without that stream's
 /// root transform (a page's y flip).
 fn ctm(s: &Surface) -> Affine {
     let t = s.ctm();
-    Affine::new([t.sx(), t.ky(), t.kx(), t.sy(), t.tx(), t.ty()].map(f64::from))
+    Affine::new(t.coefficients64())
 }
 
 /// Are `values` finite and within [`MAX_COORD`]?
@@ -568,17 +568,38 @@ fn to_path(s: &Surface, bp: &BezPath) -> Option<Path> {
     if !writable(s, Affine::IDENTITY, bp.control_box()) {
         return None;
     }
-    let mut pb = PathBuilder::new();
+    let mut commands = Vec::with_capacity(bp.elements().len());
+    let mut last = vectorcraft_geom::Point::ZERO;
+    let mut start = last;
+    let p = |p: vectorcraft_geom::Point| [p.x, p.y];
     for el in bp.elements() {
-        match *el {
-            PathEl::MoveTo(p) => pb.move_to(p.x as f32, p.y as f32),
-            PathEl::LineTo(p) => pb.line_to(p.x as f32, p.y as f32),
-            PathEl::QuadTo(a, p) => pb.quad_to(a.x as f32, a.y as f32, p.x as f32, p.y as f32),
-            PathEl::CurveTo(a, b, p) => pb.cubic_to(a.x as f32, a.y as f32, b.x as f32, b.y as f32, p.x as f32, p.y as f32),
-            PathEl::ClosePath => pb.close(),
-        }
+        commands.push(match *el {
+            PathEl::MoveTo(v) => {
+                last = v;
+                start = v;
+                PathCommand64::Move(p(v))
+            }
+            PathEl::LineTo(v) => {
+                last = v;
+                PathCommand64::Line(p(v))
+            }
+            PathEl::QuadTo(a, v) => {
+                let c1 = last.lerp(a, 2.0 / 3.0);
+                let c2 = v.lerp(a, 2.0 / 3.0);
+                last = v;
+                PathCommand64::Cubic(p(c1), p(c2), p(v))
+            }
+            PathEl::CurveTo(a, b, v) => {
+                last = v;
+                PathCommand64::Cubic(p(a), p(b), p(v))
+            }
+            PathEl::ClosePath => {
+                last = start;
+                PathCommand64::Close
+            }
+        });
     }
-    pb.finish()
+    Path::from_commands64(commands)
 }
 
 fn norm(v: f32) -> NormalizedF32 {

@@ -173,3 +173,13 @@ claim production Switch/RIP approval; separation generation remains separate.
 
 Revision history: 2026-10-16 — narrowed the imported-print preservation gaps;
 production acceptance remains pending.
+
+
+### Separation precision follow-up — 16 October 2026
+
+Editable PDF page bounds, path/clip coordinates and placement matrices retain
+double precision; fractional ink import and repeated-vertex geometry have
+regressions. Source page blending also governs writer-created transparency
+groups, removing a measured CMYK tone shift. See
+[pdf-print-preservation.md](pdf-print-preservation.md#edge-and-tone-follow-up--16-october-2026)
+for evidence and limits. Scores, hours and production readiness are unchanged.
