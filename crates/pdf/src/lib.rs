@@ -63,6 +63,7 @@ mod pages;
 mod patch;
 mod pdfx;
 mod post;
+mod preserve;
 mod presets;
 mod print;
 mod settings;

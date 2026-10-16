@@ -237,6 +237,8 @@ pub(crate) struct Scan {
     /// Each fill and each stroke of a path the interpreter draws (a fill-and-stroke operator is
     /// a fill, then a stroke; `sh` is a fill): whether it overprints.
     pub paints: Vec<bool>,
+    /// Overprint mode of each path paint, parallel to paints.
+    pub paint_zero: Vec<bool>,
     /// How the text shown before each of [`Self::paints`] (since the one before it) overprints,
     /// and last the text after them all: one more entry than `paints`.
     pub texts: Vec<TextOverprint>,
@@ -520,6 +522,7 @@ impl Walker<'_, '_> {
         self.overprinting(on);
         let k = self.out.paints.len();
         self.out.paints.push(on);
+        self.out.paint_zero.push(!s.nonzero);
         self.out.texts.push(std::mem::take(&mut self.text));
         self.inks_cut |= !self.out.paint_inks.set(k, s.inks[usize::from(stroke)]);
         self.inks_cut |= !self.out.text_inks.set(k, std::mem::take(&mut self.text_inks).map(RunInk::ink));

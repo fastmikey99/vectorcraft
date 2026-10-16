@@ -6,6 +6,7 @@
 //! gradients, images and text (via `vectorcraft-text` glyph outlines).
 #![forbid(unsafe_code)]
 
+mod bitmap_proof;
 mod brush_fx;
 pub mod encode;
 mod freeform;
@@ -1061,7 +1062,8 @@ impl Renderer {
             std::mem::take(&mut self.clip_paths),
             self.picture.take(),
         );
-        self.draw_node(&mut mctx, &Frame { mt: false, ink: Ink::Display, ..*f }, &m.art, true);
+        let mask_opts = RenderOptions { proof: None, overprint_preview: false, ..f.opts.clone() };
+        self.draw_node(&mut mctx, &Frame { mt: false, ink: Ink::Display, opts: &mask_opts, ..*f }, &m.art, true);
         let pm = self.finish(&mut mctx, self.raster);
         (self.knockout, self.nested, self.backdrop, self.clip_paths, self.picture) = outer;
         pm.data().iter().map(|p| mask_value(p.r, p.g, p.b, p.a, m.clip, m.invert)).collect()
@@ -1871,7 +1873,13 @@ impl Renderer {
         let mips = f.opts.image_mips;
         let pixels = if outline && !f.doc.setup.outline_images { None } else { self.image_pixmap(f.doc, &im.key, outline, !mips) };
         if let Some((key, pm)) = pixels {
-            let (key, pm) = if outline { (key, pm) } else { ink::ink_image(&key, &pm, f.ink, f.doc.images.get(&im.key), !mips) };
+            let (key, pm) = if outline {
+                (key, pm)
+            } else if let Some(proof) = f.opts.proof.as_ref().filter(|p| p.separations.is_some()) {
+                bitmap_proof::image(&key, &pm, f.doc.images.get(&im.key), proof, !mips)
+            } else {
+                ink::ink_image(&key, &pm, f.ink, f.doc.images.get(&im.key), !mips)
+            };
             let pm = if mips { image_mip(&key, pm, f.view * im.xf * Affine::scale_non_uniform(im.width as f64, im.height as f64)) } else { pm };
             let sx = im.width as f64 / pm.width().max(1) as f64;
             let sy = im.height as f64 / pm.height().max(1) as f64;
@@ -1989,8 +1997,15 @@ fn lookup(key: &images::ImageKey, touch: bool) -> Option<Arc<Pixmap>> {
 fn blob_pixmap(blob: &vectorcraft_doc::ImageBlob, touch: bool) -> Option<(images::ImageKey, Arc<Pixmap>)> {
     let id = images::blob_id(blob);
     let lut = id.cmyk.then(ink::display_lut);
-    let key =
-        images::ImageKey { content: id.content, adjust: None, grey: false, ink: Ink::Display, luts: (lut.as_ref().map_or(0, |l| l.1), 0), mip: 0 };
+    let key = images::ImageKey {
+        content: id.content,
+        adjust: None,
+        grey: false,
+        ink: Ink::Display,
+        luts: (lut.as_ref().map_or(0, |l| l.1), 0),
+        mip: 0,
+        separation: 0,
+    };
     if let Some(pm) = lookup(&key, touch) {
         return Some((key, pm));
     }

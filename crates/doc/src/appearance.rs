@@ -457,11 +457,14 @@ pub struct FillLayer {
     /// them out (Overprint Preview and Separations Preview show it).
     #[serde(default, skip_serializing_if = "crate::skip::is_default")]
     pub overprint: bool,
+    /// PDF overprint mode 0: zero process components knock out. False retains mode 1.
+    #[serde(default, skip_serializing_if = "crate::skip::is_default")]
+    pub overprint_zero: bool,
 }
 
 impl FillLayer {
     pub fn new(paint: Paint) -> Self {
-        Self { paint, opacity: 1.0, blend: BlendMode::Normal, visible: true, effects: vec![], overprint: false }
+        Self { paint, opacity: 1.0, blend: BlendMode::Normal, visible: true, effects: vec![], overprint: false, overprint_zero: false }
     }
 }
 
@@ -506,6 +509,9 @@ pub struct StrokeLayer {
     /// Overprint Stroke (see [`FillLayer::overprint`]).
     #[serde(default, skip_serializing_if = "crate::skip::is_default")]
     pub overprint: bool,
+    /// PDF overprint mode 0: zero process components knock out. False retains mode 1.
+    #[serde(default, skip_serializing_if = "crate::skip::is_default")]
+    pub overprint_zero: bool,
     /// How a gradient paint maps onto the stroke (within, along or across it).
     #[serde(default, skip_serializing_if = "crate::skip::is_default")]
     pub gradient_mode: StrokeGradientMode,
@@ -583,6 +589,7 @@ impl StrokeLayer {
             effects: vec![],
             arrow_align: ArrowAlign::Extend,
             overprint: false,
+            overprint_zero: false,
             gradient_mode: StrokeGradientMode::Within,
             pressure: None,
         }

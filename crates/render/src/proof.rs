@@ -8,7 +8,8 @@
 //!   renders as greyscale ink coverage (black = 100%); with several, the visible inks are
 //!   composited through the proof profile, spots multiplied on top. Colours linked to the
 //!   Registration swatch print their tint on every plate, spot plates included.
-//!   Placed raster images are not separated (limitation).
+//!   Placed CMYK images use their retained process samples; RGB images are separated through
+//!   the working profile. Bitmap previews are cached by ink selection and colour settings.
 //! * **Overprint Preview** (and Separations Preview, which implies it): fills and strokes that
 //!   overprint ([`vectorcraft_doc::FillLayer::overprint`], characters' too) are drawn with
 //!   Multiply, which approximates their inks printing over the inks below: a zero ink lets the

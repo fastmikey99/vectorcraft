@@ -99,6 +99,7 @@ fn export_with_report_inner(doc: &Document, opts: &PdfOptions) -> Result<ExportR
     let (bytes, more) = w.finish()?;
     let bytes = crate::forms::finish(bytes, doc, set, layers, overprinted)?;
     warnings.extend(more);
+    let bytes = crate::preserve::finish(bytes, doc, opts, &mut warnings)?;
     let bytes = crate::post::finish(bytes, opts, native.is_some(), &mut warnings)?;
     warnings.dedup();
     Ok(ExportReport { bytes, warnings })
@@ -490,7 +491,7 @@ impl<'a> Exporter<'a> {
             brushes: None,
             knockout: doc.page_knockout,
             lab_spots: vec![],
-            interpolate: set.standard != Standard::PdfA2b,
+            interpolate: set.standard != Standard::PdfA2b && !set.disable_image_interpolation,
             compression: &set.compression,
             non_printing: false,
             intent: vectorcraft_color::cms::active().settings().intent,
@@ -1078,7 +1079,7 @@ impl Exporter<'_> {
                         continue;
                     }
                     self.warn_raster(&fl.effects, || "fills".into());
-                    self.overprinting(s, fl.overprint, &fl.paint, |ex, s| {
+                    self.overprinting(s, fl.overprint, fl.overprint_zero, &fl.paint, |ex, s| {
                         if ex.area(s, &path, rule(r), &fl.paint, (fl.opacity, fl.blend), bounds, bounds) {
                             return;
                         }
@@ -1100,7 +1101,7 @@ impl Exporter<'_> {
                         continue;
                     }
                     self.warn_raster(&st.effects, || "strokes".into());
-                    self.overprinting(s, st.overprint, &st.paint, |ex, s| ex.stroke(s, bp, &path, r, st, page, bounds));
+                    self.overprinting(s, st.overprint, st.overprint_zero, &st.paint, |ex, s| ex.stroke(s, bp, &path, r, st, page, bounds));
                 }
             }
         }
@@ -1111,11 +1112,11 @@ impl Exporter<'_> {
     /// Draw a fill or stroke of `paint` with `draw`: as a form marked to overprint when it
     /// `overprints`, paints and overprints are kept (but not a white one with Discard White
     /// Overprint).
-    fn overprinting(&mut self, s: &mut Surface, overprints: bool, paint: &Paint, draw: impl FnOnce(&mut Self, &mut Surface)) {
+    fn overprinting(&mut self, s: &mut Surface, overprints: bool, zero: bool, paint: &Paint, draw: impl FnOnce(&mut Self, &mut Surface)) {
         let white = || self.doc.setup.discard_white_overprint && vectorcraft_doc::overprint::is_white(paint);
         if overprints && self.overprint && !paint.is_none() && !white() {
             self.overprinted = true;
-            crate::forms::form(s, Mark::Overprint, |s| draw(self, s));
+            crate::forms::form(s, Mark::Overprint(zero), |s| draw(self, s));
         } else {
             draw(self, s);
         }
@@ -1398,7 +1399,7 @@ impl Exporter<'_> {
             }
             bp.extend(run_bars.iter());
             let fill = &run.style.fill;
-            self.overprinting(s, run.style.overprint_fill, fill, |ex, s| {
+            self.overprinting(s, run.style.overprint_fill, false, fill, |ex, s| {
                 s.push_transform(&text_space);
                 // The outlines left to fill as paths: all of them, or those real text leaves.
                 let outlines = match plain.as_deref().filter(|_| !fill.is_none() && !ex.area_paint(fill)) {
@@ -1426,7 +1427,7 @@ impl Exporter<'_> {
             if let Some(path) = path {
                 // Character strokes are drawn in text space, with their cap, join and dashes.
                 let st = run.style.stroke_layer();
-                self.overprinting(s, st.overprint, &st.paint, |ex, s| {
+                self.overprinting(s, st.overprint, st.overprint_zero, &st.paint, |ex, s| {
                     s.push_transform(&text_space);
                     ex.stroke(s, &bp, &path, FillRule::NonZero, &st, page, layout.bounds);
                     s.pop();
@@ -1458,7 +1459,7 @@ impl Exporter<'_> {
     fn text_items(&mut self, s: &mut Surface, items: &[AppearanceItem], bp: &BezPath, path: &Path, page: Rect, tb: Rect) {
         for item in items {
             match item {
-                AppearanceItem::Fill(fl) if fl.visible => self.overprinting(s, fl.overprint, &fl.paint, |ex, s| {
+                AppearanceItem::Fill(fl) if fl.visible => self.overprinting(s, fl.overprint, fl.overprint_zero, &fl.paint, |ex, s| {
                     if !ex.area(s, path, krilla::paint::FillRule::NonZero, &fl.paint, (fl.opacity, fl.blend), tb, bp.bounding_box())
                         && let Some(paint) = ex.paint(s, &fl.paint, tb)
                     {
@@ -1468,7 +1469,7 @@ impl Exporter<'_> {
                     }
                 }),
                 AppearanceItem::Stroke(st) if st.visible && st.width > 0.0 => {
-                    self.overprinting(s, st.overprint, &st.paint, |ex, s| ex.stroke(s, bp, path, FillRule::NonZero, st, page, tb))
+                    self.overprinting(s, st.overprint, st.overprint_zero, &st.paint, |ex, s| ex.stroke(s, bp, path, FillRule::NonZero, st, page, tb))
                 }
                 _ => {}
             }

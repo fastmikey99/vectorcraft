@@ -85,6 +85,8 @@ from G14 and the budget run of G15: **~170–270 h** one agent, ~50–80 h wall 
 
 ## G9 Illustrator `.ai` and EPS files from real users
 
+Local print-PDF preservation work (16 October): process-only DeviceN bitmap inks, path overprint modes, compatible page boxes/blending/output intents, hard bitmap export edges and bitmap separation previews are covered by original regression tests; remaining production-fidelity limits are recorded in [pdf-print-preservation.md](pdf-print-preservation.md). Estimates unchanged.
+
 - **Missing:** faithful layer and group structure from the editing data in real files (#951: 109 layers instead
   of 14), guides and non-printing construction
   lines (#779), open speed on large files (#758), live effects, brushes and symbols as live objects (#637; pattern fills and global colours are read since #1025, placed (linked) files since #1264). Writing Illustrator's own editing data is out of scope
@@ -324,6 +326,8 @@ from G14 and the budget run of G15: **~170–270 h** one agent, ~50–80 h wall 
 - **Estimate:** 15–25 h.
 
 ## Revision history
+
+16 October 2026: local print-PDF preservation experiment and remaining limits documented; scores and estimates unchanged.
 
 | Date | Change | Summary |
 |---|---|---|

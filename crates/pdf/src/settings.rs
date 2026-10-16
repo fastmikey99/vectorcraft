@@ -215,6 +215,10 @@ choice! {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct PdfSettings {
+    /// Explicitly discard the original imported PDF page boxes, page blending space and output intent.
+    pub discard_imported_print_settings: bool,
+    /// Keep bitmap sample boundaries sharp in the PDF (including image masks).
+    pub disable_image_interpolation: bool,
     pub standard: Standard,
     pub compatibility: Compatibility,
     // General.

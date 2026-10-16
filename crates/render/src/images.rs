@@ -64,6 +64,8 @@ pub(crate) struct ImageKey {
     pub luts: (u64, u64),
     /// Halved this many times ([`half`]).
     pub mip: u8,
+    /// Separations Preview table generation (0 = ordinary image).
+    pub separation: u64,
 }
 
 /// A blob's content key and whether it holds CMYK inks, worked out once per blob allocation.
@@ -238,7 +240,7 @@ mod tests {
     use super::*;
 
     fn key(content: &str) -> ImageKey {
-        ImageKey { content: content.into(), adjust: None, grey: false, ink: Ink::Display, luts: (0, 0), mip: 0 }
+        ImageKey { content: content.into(), adjust: None, grey: false, ink: Ink::Display, luts: (0, 0), mip: 0, separation: 0 }
     }
 
     #[test]

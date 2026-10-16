@@ -74,6 +74,28 @@ fn cmyk_dict(w: u32, h: u32, more: &str) -> String {
 
 const INVERTED: &str = "/Decode [1 0 1 0 1 0 1 0]";
 
+#[test]
+fn hard_edge_export_disables_interpolation_on_images_and_their_masks() {
+    let mask = stream("/Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8", &[0, 255]);
+    let input = pdf_with_images(&[(cmyk_dict(2, 1, "/SMask 6 0 R"), vec![255, 0, 0, 0, 0, 255, 0, 0])], &[mask]);
+    let doc = import(&input).unwrap();
+    for hard in [true, false] {
+        let opts = PdfOptions { settings: PdfSettings { disable_image_interpolation: hard, ..Default::default() }, ..Default::default() };
+        let out = export(&doc, &opts).unwrap();
+        let file = Pdf::new(Arc::new(out)).unwrap();
+        let mut count = 0;
+        for object in file.objects() {
+            if let Object::Stream(s) = object
+                && s.dict().get::<Name<'_>>(b"Subtype").is_some_and(|n| n.as_str() == "Image")
+            {
+                assert_eq!(s.dict().get::<bool>(b"Interpolate").unwrap_or(false), !hard);
+                count += 1;
+            }
+        }
+        assert_eq!(count, 2, "the colour image and opacity-mask image both survive");
+    }
+}
+
 /// An image XObject of a written PDF: its colour space and the components of its ICC profile,
 /// its Decode array, its filter and its stream data.
 #[derive(Debug)]
@@ -366,4 +388,39 @@ fn the_output_settings_convert_cmyk_images_and_compression_recompresses_them_in_
     let (w, blob, _) = first(json!({"standard": "pdfX1a", "output": {"destination": GENERIC_CMYK}}));
     assert_eq!(w.space, "DeviceCMYK");
     assert_eq!(blob.cmyk().unwrap().data, flat(ink, 16));
+}
+
+#[test]
+fn named_process_image_channels_survive_import_export_and_reopen() {
+    // ISO 32000-1, Separation/DeviceN process colorant names. Deliberately reorder
+    // the samples and leave channels out; the preview tint function is not ink data.
+    for (space, samples, decode, expected) in [
+        ("[/DeviceN [/Yellow /Cyan /Magenta] /DeviceCMYK 6 0 R]", vec![30, 10, 20, 90, 70, 80], "", vec![10, 20, 30, 0, 70, 80, 90, 0]),
+        ("[/DeviceN [/Magenta /Yellow /Black] /DeviceCMYK 6 0 R]", vec![20, 30, 40, 80, 90, 100], "", vec![0, 20, 30, 40, 0, 80, 90, 100]),
+        (
+            "[/DeviceN [/Magenta /Yellow /Black] /DeviceCMYK 6 0 R]",
+            vec![235, 225, 215, 175, 165, 155],
+            "/Decode [1 0 1 0 1 0]",
+            vec![0, 20, 30, 40, 0, 80, 90, 100],
+        ),
+    ] {
+        let dict = format!("/Width 2 /Height 1 /BitsPerComponent 8 /ColorSpace {space} {decode}");
+        let tint = stream("/FunctionType 4 /Domain [0 1 0 1 0 1] /Range [0 1 0 1 0 1 0 1]", b"{ pop pop pop 0 0 0 0 }");
+        let source = pdf_with_images(&[(dict, samples)], &[tint]);
+        let imported = import_with_report(&source, &ImportOptions::default()).unwrap();
+        assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+        assert_eq!(blobs(&imported.document)[0].cmyk().unwrap().data, expected);
+        let bytes = export(&imported.document, &PdfOptions::default()).unwrap();
+        let reopened = import(&bytes).unwrap();
+        assert_eq!(blobs(&reopened)[0].cmyk().unwrap().data, expected);
+    }
+}
+
+#[test]
+fn sixteen_bit_named_process_samples_keep_their_ink_values() {
+    let dict = "/Width 2 /Height 1 /BitsPerComponent 16 /ColorSpace [/Separation /Black /DeviceCMYK 6 0 R]";
+    let tint = b"<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 0 0 1] /N 1 >>".to_vec();
+    let source = pdf_with_images(&[(dict.into(), vec![0x40, 0x40, 0xC0, 0xC0])], &[tint]);
+    let imported = import(&source).unwrap();
+    assert_eq!(blobs(&imported)[0].cmyk().unwrap().data, [0, 0, 0, 64, 0, 0, 0, 192]);
 }

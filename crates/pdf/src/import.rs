@@ -449,6 +449,7 @@ fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_p
         let list = b.missing_fonts.join(", ");
         b.warn(&format!("fonts that aren't available show in the fallback font until they are: {list}"));
     }
+    crate::preserve::capture(&mut doc, &pdf, &picked, opts.crop, &mut b.warnings);
     doc.fix_next_id();
     doc.reserve_ids(b.next);
 
@@ -1051,9 +1052,6 @@ impl<'p> Builder<'p> {
         self.marked.clear();
         self.pending = false;
         (self.scan, self.tag_at, self.group_at, self.aligned, self.paint_at) = (scan, 0, 0, true, 0);
-        if self.scan.overprints && self.scan.zero_mode {
-            self.warn(OVERPRINT_ZERO_MODE);
-        }
     }
 
     /// Whether the path the interpreter draws now (a fill or a stroke, each counted) overprints. It
@@ -1074,6 +1072,9 @@ impl<'p> Builder<'p> {
 
     /// Whether the glyph the interpreter draws now (its fill, or its `stroke`) overprints.
     fn glyph_overprint(&mut self, stroke: bool) -> bool {
+        if self.scan.overprints && self.scan.zero_mode {
+            self.warn(OVERPRINT_ZERO_MODE);
+        }
         if self.nested > 0 || !self.scan.overprints {
             return false;
         }
@@ -1800,6 +1801,7 @@ impl<'a> Device<'a> for Builder<'_> {
         self.flush_text();
         self.pending = false;
         let overprint = self.path_overprint();
+        let overprint_zero = self.nested == 0 && self.paint_at.checked_sub(1).and_then(|i| self.scan.paint_zero.get(i)).copied().unwrap_or(false);
         let mut bp = path.clone();
         bp.apply_affine(transform);
         if bp.elements().is_empty() {
@@ -1840,6 +1842,7 @@ impl<'a> Device<'a> for Builder<'_> {
             PathDrawMode::Fill(rule) => {
                 let mut f = FillLayer::new(paint);
                 (f.opacity, f.overprint) = (opacity, overprint);
+                f.overprint_zero = overprint_zero;
                 let mut n = Node::path(self.id(), pd, Appearance { items: vec![AppearanceItem::Fill(f)], ..Default::default() });
                 if let NodeKind::Path { rule: r, .. } = &mut n.kind {
                     *r = fill_rule(*rule);
@@ -1851,6 +1854,7 @@ impl<'a> Device<'a> for Builder<'_> {
             PathDrawMode::Stroke(props) => {
                 let mut st = stroke_layer(paint, opacity, props, mean_scale(transform));
                 st.overprint = overprint;
+                st.overprint_zero = overprint_zero;
                 // Fill-then-stroke of the same path (the `B` operator, or a fill and then a stroke
                 // of the same outline) becomes one object: a path with a fill and a live stroke.
                 let blend = self.blend;

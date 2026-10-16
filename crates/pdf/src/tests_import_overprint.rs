@@ -73,12 +73,21 @@ fn saved_states_and_forms_keep_their_own_overprint() {
 }
 
 #[test]
-fn overprint_mode_0_is_reported() {
+fn overprint_mode_0_survives_export_and_reopen() {
     // No `/OPM`: mode 0, where a DeviceCMYK colour's zero components knock out.
     let r = open("/Zero gs 0 0 0 1 k 10 10 50 50 re f", "", &[]);
     assert_eq!(overprints(&r.document), [(Some(true), None)]);
-    assert_eq!(about_overprint(&r).len(), 1, "{:?}", r.warnings);
-    assert!(about_overprint(&r)[0].contains("/OPM 0"));
+    assert!(about_overprint(&r).is_empty(), "{:?}", r.warnings);
+    let out = export(&r.document, &PdfOptions::uncompressed()).unwrap();
+    assert!(String::from_utf8_lossy(&out).contains("/OP true/op true/OPM 0"));
+    let back = import(&out).unwrap();
+    let mut modes = vec![];
+    back.walk(|n| {
+        if let Some(f) = n.appearance.fill().filter(|f| f.overprint) {
+            modes.push(f.overprint_zero);
+        }
+    });
+    assert_eq!(modes, [true]);
     // Nothing overprints: nothing to say.
     assert!(about_overprint(&open("0 0 0 1 k 10 10 50 50 re f", "", &[])).is_empty());
 }

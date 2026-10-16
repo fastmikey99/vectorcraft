@@ -75,6 +75,8 @@ the app's own editing copy of a file (an EPS after its `%%EOF`, a `.ai`'s `AIPri
 
 ## Format by format
 
+Local print-PDF preservation work (16 October): process-only DeviceN bitmap inks, path overprint modes, compatible page boxes/blending/output intents, hard bitmap export edges and bitmap separation previews are covered by original regression tests; remaining production-fidelity limits are recorded in [pdf-print-preservation.md](pdf-print-preservation.md). Estimates unchanged.
+
 | Format | Illustrator | Ours: open/place | Ours: save/export | Fidelity and tests |
 |---|---|---|---|---|
 | VectorCraft `.vectorcraft` / `.vctemplate` | — | yes | yes | lossless JSON, versioned, save down to v1; property-tested round trips (`format/tests/prop_format.rs`); documents with a lot of path data are written as compact JSON, about a fifth of the size (#1492); a save falls back to a plain fsync and to writing elsewhere and copying in when the folder refuses the usual steps (#1625, #1649, part of #1620; not confirmed on a real network share); the size limits on embedded data also apply to files read from memory (#1783), and saving over a private file on Unix leaves no readable temporary copy beside it (#1778) |
@@ -110,6 +112,8 @@ the app's own editing copy of a file (an EPS after its `%%EOF`, a `.ai`'s `AIPri
 - [x] PngSuite opt-in downloads are pinned, SHA-256 verified and bounded before publication (#1729); no archive extraction. This secures fixture acquisition and does not raise format-fidelity scores.
 
 ## Revision history
+
+16 October 2026: local print-PDF preservation experiment and remaining limits documented; scores and estimates unchanged.
 
 | Date | Change | Summary |
 |---|---|---|
