@@ -102,6 +102,9 @@ fn export_with_report_inner(doc: &Document, opts: &PdfOptions) -> Result<ExportR
     let bytes = crate::preserve::finish(bytes, doc, opts, &mut warnings)?;
     let bytes = crate::post::finish(bytes, opts, native.is_some(), &mut warnings)?;
     warnings.dedup();
+    if set.output.conversion == crate::ColorConversion::PreserveSource && !warnings.is_empty() {
+        return Err(PdfError::BadSetting(format!("source colour preservation could not be guaranteed: {}", warnings.join("; "))));
+    }
     Ok(ExportReport { bytes, warnings })
 }
 
@@ -645,13 +648,13 @@ fn normalized(v: f32) -> NormalizedF32 {
 
 fn color(c: &Color) -> krilla::color::Color {
     match *c {
-        Color::Rgb { r, g, b } => rgb::Color::new(q(r), q(g), q(b)).into(),
+        Color::Rgb { r, g, b } => rgb::Color::from_normalized([r, g, b].map(normalized)).into(),
         Color::Cmyk { c, m, y, k } => cmyk::Color::from_normalized([c, m, y, k].map(normalized)).into(),
         // VectorCraft grey is ink coverage (0 = white); PDF DeviceGray is lightness.
-        Color::Gray { k } => luma::Color::new(q(1.0 - k)).into(),
+        Color::Gray { k } => luma::Color::from_normalized(normalized(1.0 - k)).into(),
         Color::Lab { .. } => {
             let [r, g, b] = c.to_rgb();
-            rgb::Color::new(q(r), q(g), q(b)).into()
+            rgb::Color::from_normalized([r, g, b].map(normalized)).into()
         }
     }
 }

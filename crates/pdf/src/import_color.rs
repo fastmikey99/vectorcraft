@@ -1,5 +1,5 @@
 //! PDF colours in their own models: DeviceCMYK and CMYK ICC colours stay CMYK, DeviceGray is
-//! Gray, and Separation and DeviceN inks become spot swatches at a tint (for solid paints and
+//! Gray, DeviceRGB retains its original components, and Separation and DeviceN inks become spot swatches at a tint (for solid paints and
 //! shading stops alike). Everything else is RGB, as the interpreter converts it.
 //!
 //! hayro-interpret keeps a colour's space and components private: their `Debug` form is the only
@@ -261,8 +261,8 @@ impl<'p> Colors<'p> {
         match space {
             Space::Gray => Some(Native::plain(Color::gray(1.0 - c(0)))),
             Space::Cmyk => Some(Native::plain(Color::cmyk(c(0), c(1), c(2), c(3)))),
-            Space::IccRgb => Some(Native::plain(Color::rgb(c(0), c(1), c(2)))),
-            Space::Rgb | Space::Other => None,
+            Space::Rgb | Space::IccRgb => Some(Native::plain(Color::rgb(c(0), c(1), c(2)))),
+            Space::Other => None,
             Space::Inks(i) => self.inks_color(i, comps),
         }
     }

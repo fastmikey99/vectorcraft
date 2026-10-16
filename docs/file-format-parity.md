@@ -173,3 +173,26 @@ regressions. Source page blending also governs writer-created transparency
 groups, removing a measured CMYK tone shift. See
 [pdf-print-preservation.md](pdf-print-preservation.md#edge-and-tone-follow-up--16-october-2026)
 for evidence and limits. Scores, hours and production readiness are unchanged.
+
+
+### 17 October 2026: explicit source-colour preservation (local qualification)
+
+RGB and grey PDF output now retain fractional components through the shared
+writer's normalized constructors. DeviceRGB import reads the original components
+instead of an 8-bit display conversion. The `output.conversion: "preserveSource"`
+setting retains RGB/CMYK/grey values in either document colour mode. It refuses
+conflicting destination conversions, PDF/X-1a, PDF 1.3 flattening, ordinary Lab
+fallback and profile conversions that would change the source RGB values. Named
+spots continue using their exact names and tints. Imported print/page settings
+are retained with this setting when their existing preservation checks pass.
+
+Evidence: `tests_output::preserve_source_*`, the craft-pdf writer's fractional
+RGB/grey serialization test, and Reporter's recipe-driven WE qualification
+harness. The shared writer is published and pinned to immutable revision
+`6f322f53d6f73c937b4347a146e911f037d16752`; no local dependency override is used.
+No headline parity score changes and no production compatibility claim.
+
+Validation: all nine `cargo xtask ci` stages passed against the published pin,
+including the immutable PDF dependency gate and all 23 wasm crates. Homebrew Rust
+used `RUSTC_BOOTSTRAP=1 CARGO_UNSTABLE_BUILD_STD=std,panic_abort`. The strict WE
+Dark/Light probe also passed with the CLI built against this published revision.
