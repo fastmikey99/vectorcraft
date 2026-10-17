@@ -150,10 +150,20 @@ mod tests {
             assert!(name.ends_with(".ttf") || name.ends_with(".otf"), "{}", w.url);
             assert!(w.integrity.starts_with("sha256-") && w.integrity.len() == "sha256-".len() + 44, "{}", w.integrity);
         }
-        // The fallbacks the first frame may need: Noto Sans Arabic and Noto Sans Thai, where the
-        // checkout has them.
-        let startup: Vec<_> = WEB_FONTS.iter().filter(|w| w.startup).map(|w| w.family).collect();
-        let expected: Vec<_> = ["Noto Sans Arabic", "Noto Sans Thai"].into_iter().filter(|n| CRAFT_FONTS.iter().any(|f| f.family == *n)).collect();
+        // Guide-label faces and script fallbacks must be ready before a document opens,
+        // where the checkout supplies them. Match styles too: older pins may lack a face.
+        let startup: Vec<_> = WEB_FONTS.iter().filter(|w| w.startup).map(|w| (w.family, w.style)).collect();
+        let expected: Vec<_> = [
+            ("Fira Sans Extra Condensed", "Regular"),
+            ("Fira Sans Extra Condensed", "Medium"),
+            ("Fira Sans Extra Condensed", "SemiBold"),
+            ("Fira Sans Extra Condensed", "Bold"),
+            ("Noto Sans Arabic", "Regular"),
+            ("Noto Sans Thai", "Regular"),
+        ]
+        .into_iter()
+        .filter(|(family, style)| CRAFT_FONTS.iter().any(|f| f.family == *family && f.style == *style))
+        .collect();
         assert_eq!(startup, expected);
     }
 }

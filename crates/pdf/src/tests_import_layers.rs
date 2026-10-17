@@ -4,6 +4,7 @@
 
 use vectorcraft_color::Color;
 use vectorcraft_doc::{Document, Node, NodeKind};
+use vectorcraft_geom::Rect;
 use vectorcraft_testkit::pdf::{PdfPage, first_extra, pdf_with_catalog};
 
 use crate::tests_import_fidelity::stream;
@@ -167,7 +168,7 @@ fn an_ai_file_notes_that_its_art_off_the_artboards_is_not_read() {
 
 fn path_count(d: &Document) -> usize {
     let mut n = 0;
-    d.walk(|c| n += usize::from(matches!(c.kind, NodeKind::Path { .. })));
+    d.walk(|c| n += usize::from(matches!(c.kind, NodeKind::Path { clipping: false, .. })));
     n
 }
 
@@ -351,10 +352,9 @@ fn art_past_the_scan_limit_is_rejected_with_shown_layers() {
     assert!(error.to_string().contains("no document was imported"));
 }
 
-/// Art reaching past the page keeps a clip to it in a plain PDF (as viewers show it), but not in
-/// a PDF-compatible `.ai`, whose art crossing the artboard edge opens whole and editable (#646).
+/// Supacolour print policy keeps the visible page boundary in PDFs and PDF-compatible `.ai`.
 #[test]
-fn art_past_the_page_is_clipped_in_a_pdf_but_not_in_an_ai_file() {
+fn art_past_the_page_is_clipped_in_pdf_and_ai_files() {
     for ai in [false, true] {
         let page = PdfPage {
             entries: if ai { "/PieceInfo << /Illustrator << /Private << /AIPrivateData1 7 /NumBlock 1 >> >> >>".into() } else { String::new() },
@@ -364,9 +364,9 @@ fn art_past_the_page_is_clipped_in_a_pdf_but_not_in_an_ai_file() {
         let mut clips = 0;
         r.document.walk(|n| clips += usize::from(matches!(n.kind, NodeKind::Group { clip: true, .. })));
         let past = r.warnings.iter().any(|w| w == crate::import::PAST_PAGE_NOTE);
-        assert_eq!((clips, past), if ai { (0, false) } else { (1, true) }, "ai: {ai}: {:?}", r.warnings);
+        assert_eq!((clips, past), (1, true), "ai: {ai}: {:?}", r.warnings);
         let art = r.document.art_bounds().unwrap();
-        assert_eq!(art.x1 > 100.5, ai, "ai: {ai}: {art:?}");
+        assert!(art.x1 <= 100.5, "ai: {ai}: {art:?}");
     }
 }
 
@@ -407,4 +407,16 @@ fn a_pdfs_private_data_is_its_pdf_streams_joined() {
     assert_eq!(illustrator_data(&pdf, None).unwrap(), b"%AI24_ZStandard_Data first second");
     let both = format!("/AIPDFPrivateData1 {a} 0 R /AIPDFPrivateData2 {b} 0 R /AIPrivateData1 {c} 0 R");
     assert_eq!(illustrator_data(&pdf_with_catalog(&[page(both)], &[&one, &two, &other], "", None), None).unwrap(), b"%AI24_ZStandard_Data other");
+}
+
+#[test]
+fn ai_print_art_uses_the_crop_box_even_when_the_artboard_uses_media() {
+    let page = PdfPage {
+        entries: "/CropBox [20 10 80 90] /PieceInfo << /Illustrator << /Private << /AIPrivateData1 7 /NumBlock 1 >> >> >>".into(),
+        ..PdfPage::new(100.0, 100.0, "1 0 0 rg 0 0 100 100 re f")
+    };
+    let r = import_with_report(&pdf_with_catalog(&[page], &[], "", None), &ImportOptions { crop: CropTo::Media, ..Default::default() }).unwrap();
+    assert_eq!(r.document.artboards[0].rect, Rect::new(0.0, 0.0, 100.0, 100.0));
+    assert_eq!(r.document.art_bounds().unwrap(), Rect::new(20.0, 10.0, 80.0, 90.0));
+    assert!(r.warnings.iter().any(|w| w == crate::import::PAST_PAGE_NOTE));
 }

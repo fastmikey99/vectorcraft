@@ -233,3 +233,14 @@ fn a_raster_export_says_when_an_image_could_not_be_decoded() {
     let warnings = r["warnings"].as_array().cloned().unwrap_or_default();
     assert!(warnings.iter().any(|w| w.as_str().is_some_and(|w| w.contains("couldn't be decoded"))), "{r}");
 }
+
+#[test]
+fn png_exports_say_their_colours_are_srgb() {
+    let mut s = session(72.0, 36.0, 1);
+    for format in ["png", "png8"] {
+        let png = b64(&s.execute("document.export", &json!({"format": format, "ppi": 150, "background": "transparent"})).unwrap());
+        assert_eq!(png_chunk(&png, b"sRGB"), Some([0u8].as_slice()), "{format}: an sRGB chunk, perceptual");
+        assert!(png_chunk(&png, b"pHYs").is_some(), "{format}: the resolution is still there");
+        assert!(image::load_from_memory(&png).is_ok(), "{format}: still a valid PNG");
+    }
+}

@@ -29,12 +29,21 @@ pub struct Loaded {
 }
 
 impl Loaded {
-    /// The file with the grid of Preferences › Guides & Grid, unless it is a native document (also
-    /// one that an SVG, PDF, `.ai` or EPS file carries, `restored`), which keeps the grid it was
-    /// saved with.
-    pub(crate) fn with_grid_prefs(mut self, prefs: &Prefs) -> Self {
+    /// The file with the grid of Preferences › Guides & Grid and the units of Preferences › Units ›
+    /// General, unless it is a native document (also one that an SVG, PDF, `.ai` or EPS file
+    /// carries, `restored`), which keeps the grid and units it was saved with. A file that names its
+    /// units keeps them too (an SVG sized in mm, a DXF drawing's units); other files (a PDF, EPS, an
+    /// image, an SVG in pixels) don't say which units they were drawn in, so they open in the
+    /// preferred ones, as Illustrator opens them: someone who works in millimetres sees millimetres
+    /// whatever they open.
+    pub(crate) fn with_prefs(mut self, prefs: &Prefs) -> Self {
         if !self.restored && !matches!(self.format.id, "vectorcraft" | "template") {
             self.doc.grid = prefs.grid();
+            // What an importer sets when the file names no unit: pixels for an SVG, else the default.
+            let unnamed = if matches!(self.format.id, "svg" | "svgz") { vectorcraft_doc::Unit::Pixels } else { vectorcraft_doc::Unit::default() };
+            if self.doc.units == unnamed {
+                self.doc.units = vectorcraft_doc::Unit::named(&prefs.units_general).unwrap_or_default();
+            }
         }
         self
     }
@@ -364,7 +373,7 @@ pub fn open_template(s: &mut Session, name: &str, bytes: &[u8], path: Option<&st
 /// Make a loaded file the new active document; `links` is what became of its linked files, and
 /// `opts` are the options it was read with.
 fn open_loaded(s: &mut Session, loaded: Loaded, links: Resolved, path: Option<String>, opts: &LoadOptions, as_template: bool) -> Result<Value> {
-    let Loaded { mut doc, format, warnings, restored, converted, .. } = loaded.with_grid_prefs(&s.prefs);
+    let Loaded { mut doc, format, warnings, restored, converted, .. } = loaded.with_prefs(&s.prefs);
     // What reading the file left out of the document, if anything.
     let losses: Vec<String> = warnings.iter().filter(|w| is_loss(w)).cloned().collect();
     let source_path = path.clone().filter(|_| !losses.is_empty());

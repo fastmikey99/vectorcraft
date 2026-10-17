@@ -110,6 +110,10 @@ fn black_point_compensation_maps_the_darkest_ink_to_rgb_black() {
     assert!(white.iter().all(|v| *v > 0.99), "{white:?}");
     let abs = |bpc| icc_cmyk(bpc).cmyk_to_rgb(rich, Intent::AbsoluteColorimetric);
     assert_eq!(abs(true), abs(false));
+    // Perceptual tables already map black: compensation leaves them alone (as lcms and
+    // Ghostscript do).
+    let perceptual = |bpc| icc_cmyk(bpc).cmyk_to_rgb(rich, Intent::Perceptual);
+    assert_eq!(perceptual(true), perceptual(false));
 }
 
 /// #1584: the profiles written here (built-in RGB spaces) have every tag on a 4-byte boundary and
@@ -133,4 +137,62 @@ fn written_profiles_align_their_tags() {
             assert_eq!((back.red_colorant, back.green_colorant, back.blue_colorant), (orig.red_colorant, orig.green_colorant, orig.blue_colorant));
         }
     }
+}
+
+#[test]
+fn icc_cmyk_converts_into_another_icc_cmyk_directly() {
+    // The same profile under two names. Where sRGB holds a colour, the direct conversion and a
+    // trip through sRGB agree (both carry the profile's own table round trip, black regenerated);
+    // CMYK cyan, which sRGB can't hold, stays cyan directly and loses about 30% through sRGB.
+    let bytes = icc_bytes(GENERIC_CMYK).unwrap();
+    let a = register_icc(&bytes, Some("Test ICC CMYK A".into())).unwrap().name;
+    let b = register_icc(&bytes, Some("Test ICC CMYK B".into())).unwrap().name;
+    let cms = |cmyk: &str, intent| Cms::new(&ColorSettings { cmyk: cmyk.into(), intent, bpc: false, ..ColorSettings::default() }).unwrap();
+    for intent in [Intent::Perceptual, Intent::RelativeColorimetric] {
+        let (src, dest) = (cms(&a, intent), cms(&b, intent));
+        for inks in [[0.0, 1.0, 1.0, 0.0], [0.2, 0.4, 0.6, 0.1], [0.0, 0.0, 0.0, 0.5]] {
+            let direct = src.cmyk_into(&dest, inks, intent).expect("both ICC");
+            let via = dest.srgb_to_cmyk(src.cmyk_to_srgb(inks, false), intent);
+            assert!(direct.iter().zip(via).all(|(x, y)| (x - y).abs() < 0.03), "{intent:?} {inks:?}: {direct:?} vs {via:?}");
+        }
+        let cyan = [1.0, 0.0, 0.0, 0.0];
+        let direct = src.cmyk_into(&dest, cyan, intent).unwrap();
+        let via = dest.srgb_to_cmyk(src.cmyk_to_srgb(cyan, false), intent);
+        assert!(direct[0] > 0.9 && via[0] < 0.8, "{intent:?}: direct {direct:?}, through sRGB {via:?}");
+    }
+    // Perceptual tables map black themselves: compensation leaves them alone.
+    let p = |bpc| {
+        let s = Cms::new(&ColorSettings { cmyk: a.clone(), intent: Intent::Perceptual, bpc, ..ColorSettings::default() }).unwrap();
+        let d = Cms::new(&ColorSettings { cmyk: b.clone(), intent: Intent::Perceptual, bpc, ..ColorSettings::default() }).unwrap();
+        s.cmyk_into(&d, [0.75, 0.68, 0.67, 0.9], Intent::Perceptual)
+    };
+    assert_eq!(p(true), p(false));
+    // The built-in spaces aren't ICC profiles: no direct route.
+    assert!(Cms::default().cmyk_into(&Cms::default(), [1.0, 0.0, 0.0, 0.0], Intent::Perceptual).is_none());
+    // RGB and display sRGB go straight into ICC CMYK too.
+    let dest = cms(&a, Intent::Perceptual);
+    assert!(dest.rgb_into_cmyk(&dest, [1.0, 0.0, 0.0], Intent::Perceptual).is_some());
+    assert!(dest.srgb_into_cmyk([0.0, 0.0, 1.0], Intent::Perceptual).is_some());
+}
+
+#[test]
+fn direct_cmyk_compensation_only_remaps_relative_black() {
+    let src = IccProfile::from_bytes(None, &icc_bytes(SRGB).unwrap()).unwrap();
+    let dest = IccProfile::from_bytes(None, &icc_bytes(GENERIC_CMYK).unwrap()).unwrap();
+    let convert =
+        |intent, bpc, rgb: [f32; 3]| src.to_cmyk_of(&dest, &rgb, intent, bpc).unwrap_or_else(|| panic!("no transform for {intent:?}, BPC {bpc}"));
+    let relative = Intent::RelativeColorimetric;
+    let on = convert(relative, true, [0.05; 3]);
+    let off = convert(relative, false, [0.05; 3]);
+    assert!(on.iter().zip(off).any(|(a, b)| (a - b).abs() > 0.01), "on {on:?}, off {off:?}");
+    assert_eq!(on, convert(relative, true, [0.05; 3]), "cached intent/BPC key");
+    assert_eq!(convert(relative, true, [1.0; 3]), convert(relative, false, [1.0; 3]));
+    for intent in [Intent::Perceptual, Intent::AbsoluteColorimetric] {
+        assert_eq!(convert(intent, true, [0.05; 3]), convert(intent, false, [0.05; 3]));
+    }
+    // This generated profile has no saturation table: the caller must use its fallback.
+    for bpc in [true, false] {
+        assert!(src.to_cmyk_of(&dest, &[0.05; 3], Intent::Saturation, bpc).is_none());
+    }
+    assert!(src.to_cmyk_of(&src, &[0.0; 3], relative, true).is_none());
 }
