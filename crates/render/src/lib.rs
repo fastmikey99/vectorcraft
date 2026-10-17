@@ -106,6 +106,10 @@ pub struct RenderOptions {
     pub proof: Option<proof::ProofSetup>,
     /// Overprint Preview (see [`proof`] for what overprints).
     pub overprint_preview: bool,
+    /// Separations Preview without its implied Overprint Preview: the visible plates show, but
+    /// overprinting fills and strokes knock out what is under them (the production separations
+    /// panel's Overprint Preview off). `overprint_preview` still turns overprinting on.
+    pub knockout_separations: bool,
     /// Trim View: clip the artwork to the artboards (nothing on the pasteboard is drawn).
     pub trim: bool,
     /// Leave template layers and guides out (exports and thumbnails: they're aids to drawing, not
@@ -221,6 +225,7 @@ impl Default for RenderOptions {
             dim_templates: true,
             proof: None,
             overprint_preview: false,
+            knockout_separations: false,
             trim: false,
             skip_templates: false,
             hide_templates: false,

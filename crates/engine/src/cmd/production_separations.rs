@@ -39,6 +39,9 @@ pub struct State {
     /// Per-document ink visibility. Never changes the global proof view or saved artwork.
     pub plates: Option<Vec<String>>,
     pub hidden: BTreeSet<NodeId>,
+    /// Overprint Preview in the production panel: inks see-through (multiplied) when on, each
+    /// ink covering what is under it when off (the default; operators turn it on as needed).
+    pub overprint: bool,
 }
 #[derive(Clone, Debug)]
 pub struct Row {
@@ -91,7 +94,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "{context: {label, inks: [{name, destination: Indigo|Screen, components: [{name, layer}]}], source_layers: [name]}} host-provided exact names; view state only", has_doc, configure),
         cmd!(query "production.separations.list", "List Production Separations", [], None, "{} grouped inks and editable components", has_doc, list),
         cmd!(query "production.separations.preview", "Preview Production Separations", [], None,
-            "{plates?: [name], component?: {ink, name}, reset?: bool} change preview only; never the saved artwork", has_doc, preview),
+            "{plates?: [name], component?: {ink, name}, reset?: bool, overprint?: bool} change preview only; never the saved artwork", has_doc, preview),
         cmd!(query "production.separations.select", "Select Separation Artwork", [], None,
             "{name, component?: name} select existing editable artwork without changing it", has_doc, select),
     ]
@@ -102,7 +105,9 @@ fn configure(s: &mut Session, p: &Value) -> Result<Value> {
     c.validate().map_err(|e| bad("production.separations.configure", e))?;
     let d = s.doc_mut()?;
     let plates = proof::plates(&d.doc).into_iter().map(|p| p.name).collect();
-    d.production_separations = State { context: Some(c), plates: Some(plates), ..Default::default() };
+    // The host re-supplies context on each operation: keep the operator's overprint choice.
+    let overprint = d.production_separations.overprint;
+    d.production_separations = State { context: Some(c), plates: Some(plates), overprint, ..Default::default() };
     d.revision += 1;
     list(s, &json!({}))
 }
@@ -114,6 +119,19 @@ pub fn active_proof(st: &crate::DocState) -> Option<proof::ProofSetup> {
         Some(plates) => Some(proof::ProofSetup { separations: Some(plates.clone()), ..proof::view().setup }),
         None => proof::active_proof(),
     }
+}
+
+/// Whether the canvas draws the production preview with overprints knocking out
+/// ([`vectorcraft_render::RenderOptions::knockout_separations`]).
+pub fn knockout(st: &crate::DocState) -> bool {
+    st.production_separations.plates.is_some() && !st.production_separations.overprint
+}
+
+/// [`vectorcraft_render::RenderOptions::overprint_preview`] for this document: while the
+/// production preview owns it, the panel's checkbox alone decides (the global View →
+/// Overprint Preview / Separations Preview belong to ordinary documents).
+pub fn overprint_preview(st: &crate::DocState) -> bool {
+    if st.production_separations.plates.is_some() { st.production_separations.overprint } else { proof::overprint_preview_on() }
 }
 
 /// Own paints only; descendants are walked separately so selecting a plate does not select
@@ -216,7 +234,16 @@ fn list(s: &mut Session, _: &Value) -> Result<Value> {
 }
 fn preview(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "production.separations.preview";
-    if p.get("reset").and_then(Value::as_bool) == Some(true) {
+    let overprint = match p.get("overprint") {
+        None => None,
+        Some(v) => Some(v.as_bool().ok_or_else(|| bad(C, "overprint must be true or false"))?),
+    };
+    if overprint.is_some() && p.get("reset").is_none() && p.get("component").is_none() && p.get("plates").is_none() {
+        let all: Vec<_> = proof::plates(&s.doc()?.doc).into_iter().map(|p| p.name).collect();
+        let d = s.doc_mut()?;
+        // Turning it on or off starts the production preview if nothing else has yet.
+        d.production_separations.plates.get_or_insert(all);
+    } else if p.get("reset").and_then(Value::as_bool) == Some(true) {
         s.doc_mut()?.production_separations.hidden.clear();
         let plates: Vec<_> = proof::plates(&s.doc()?.doc).into_iter().map(|p| p.name).collect();
         s.doc_mut()?.production_separations.plates = Some(plates);
@@ -247,7 +274,10 @@ fn preview(s: &mut Session, p: &Value) -> Result<Value> {
         s.doc_mut()?.production_separations.plates = Some(plates);
         s.doc_mut()?.selection.clear();
     } else {
-        return Err(bad(C, "Choose plates, a component or reset"));
+        return Err(bad(C, "Choose plates, a component, overprint or reset"));
+    }
+    if let Some(on) = overprint {
+        s.doc_mut()?.production_separations.overprint = on;
     }
     s.doc_mut()?.revision += 1;
     ok()
@@ -398,7 +428,8 @@ mod tests {
                     vectorcraft_geom::Affine::IDENTITY,
                     &vectorcraft_render::RenderOptions {
                         proof: active_proof(s.doc().unwrap()),
-                        overprint_preview: proof::overprint_preview_on(),
+                        overprint_preview: overprint_preview(s.doc().unwrap()),
+                        knockout_separations: knockout(s.doc().unwrap()),
                         ..Default::default()
                     },
                 )
@@ -406,8 +437,24 @@ mod tests {
         };
         let ordinary = render(&mut renderer, &s);
         configure(&mut s);
+        // Overprint Preview starts off: the top powder plate covers the artwork, as ordinary
+        // viewing shows it. Turning it on makes the plate see-through.
+        assert!(!s.doc().unwrap().production_separations.overprint);
+        let covered = render(&mut renderer, &s);
+        s.execute("production.separations.preview", &json!({"overprint":true})).unwrap();
         let initial = render(&mut renderer, &s);
-        assert_ne!(initial, ordinary, "load must not present the covering powder plate");
+        assert_ne!(initial, covered, "overprint preview must make the covering powder plate see-through");
+        assert_ne!(initial, ordinary, "overprint preview must not present the covering powder plate");
+        // The host re-supplies context on each operation; the operator's choice stays.
+        configure(&mut s);
+        assert!(s.doc().unwrap().production_separations.overprint);
+        s.execute("production.separations.preview", &json!({"overprint":false})).unwrap();
+        assert_eq!(render(&mut renderer, &s), covered);
+        // The global Separations Preview (which implies overprinting) doesn't override the box.
+        proof::set_view(proof::ProofView { separations: Some(vec!["WP".into()]), overprint: true, ..Default::default() });
+        assert_eq!(render(&mut renderer, &s), covered);
+        proof::set_view(Default::default());
+        s.execute("production.separations.preview", &json!({"overprint":true})).unwrap();
         let all = s.doc().unwrap().production_separations.plates.clone().unwrap();
         s.execute("production.separations.preview", &json!({"plates":["WHP"]})).unwrap();
         assert_ne!(render(&mut renderer, &s), initial);
@@ -419,6 +466,27 @@ mod tests {
         s.execute("production.separations.preview", &json!({"plates":all})).unwrap();
         assert_eq!(render(&mut renderer, &s), initial);
         assert_eq!(serde_json::to_value(&s.doc().unwrap().doc).unwrap(), before);
+        assert!(!s.doc().unwrap().is_dirty());
+        proof::set_view(Default::default());
+    }
+
+    #[test]
+    fn production_overprint_combines_with_other_preview_changes_and_starts_the_preview() {
+        let _g = crate::tests_colormgmt::GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        proof::set_view(Default::default());
+        let mut s = fixture();
+        // Unconfigured document: the checkbox alone starts the production preview.
+        assert!(s.doc().unwrap().production_separations.plates.is_none());
+        s.execute("production.separations.preview", &json!({"overprint":true})).unwrap();
+        assert!(s.doc().unwrap().production_separations.plates.is_some());
+        assert!(overprint_preview(s.doc().unwrap()) && !knockout(s.doc().unwrap()));
+        // Combined with another change, both apply; an invalid one applies neither.
+        s.execute("production.separations.preview", &json!({"overprint":false,"plates":["WHP"]})).unwrap();
+        assert_eq!(s.doc().unwrap().production_separations.plates, Some(vec!["WHP".to_string()]));
+        assert!(knockout(s.doc().unwrap()));
+        assert!(s.execute("production.separations.preview", &json!({"overprint":true,"plates":["Nope"]})).is_err());
+        assert!(!s.doc().unwrap().production_separations.overprint);
+        assert!(s.execute("production.separations.preview", &json!({"overprint":"yes"})).is_err());
         assert!(!s.doc().unwrap().is_dirty());
         proof::set_view(Default::default());
     }

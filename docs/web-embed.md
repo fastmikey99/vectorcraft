@@ -199,3 +199,12 @@ Shared docking now supplies opaque panel and tab backgrounds to floating groups.
 Regression coverage compares actual composite pixels across load, ink isolation
 and Show all, verifies the source document stays unchanged, and inspects the
 floating panel's painted background.
+
+### Overprint Preview in the production panel (2026-10-18)
+
+The production panel has its own Overprint Preview checkbox, off by default, so
+operators no longer switch to the native Separations Preview panel to toggle it.
+Off, each ink covers what is under it (an opaque top powder plate hides the
+artwork, as in ordinary viewing); on, overprinting inks are see-through. Plate
+eyes and component eyes work either way. The choice is per document view state,
+survives the host re-supplying context, and never changes saved artwork.
