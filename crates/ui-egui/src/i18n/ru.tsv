@@ -4573,3 +4573,21 @@ lighting	Light	Свет
 	Movie Clip	Видеоклип
 @msg	name is empty	имя пустое
 @msg	no symbol named `{n}`	нет символа с именем `{n}`
+
+# Reporter production panel: original translations, not native-speaker reviewed.
+	Production Separations	Производственные цветоделения
+	Configure Production Separations	Настроить производственные цветоделения
+	List Production Separations	Список производственных цветоделений
+	Preview Production Separations	Предпросмотр производственных цветоделений
+	Select Separation Artwork	Выбрать объекты цветоделения
+	Eyes change preview only. All artwork is saved.	Значки глаза меняют только предпросмотр. Все объекты сохраняются.
+	No recipe context.	Рецепт не задан.
+	Existing groups only.	Только существующие группы.
+	Select whole objects containing this ink.	Выбрать целые объекты, содержащие эту краску.
+	Show all	Показать всё
+	Show all components and select this group	Показать все компоненты и выбрать эту группу
+	Show/hide ink (Alt-click: isolate)	Показать/скрыть краску (Alt-щелчок: изолировать)
+	Show/hide group in preview	Показать/скрыть группу в предпросмотре
+	Unassigned	Не назначено
+@msg	Invalid separation context or too many entries	Недопустимый контекст цветоделения или слишком много записей
+@msg	Invalid or duplicate separation name/component	Недопустимое или повторяющееся имя цветоделения либо компонент

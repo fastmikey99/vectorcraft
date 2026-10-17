@@ -4557,3 +4557,21 @@ theme	Appearance	Giao diện
 	Movie Clip	Clip phim
 @msg	name is empty	tên trống
 @msg	no symbol named `{n}`	không có biểu tượng nào tên `{n}`
+
+# Reporter production panel: original translations, not native-speaker reviewed.
+	Production Separations	Tách màu sản xuất
+	Configure Production Separations	Cấu hình tách màu sản xuất
+	List Production Separations	Liệt kê tách màu sản xuất
+	Preview Production Separations	Xem trước tách màu sản xuất
+	Select Separation Artwork	Chọn đối tượng của bản tách màu
+	Eyes change preview only. All artwork is saved.	Biểu tượng mắt chỉ đổi bản xem trước. Mọi đối tượng đều được lưu.
+	No recipe context.	Chưa có công thức.
+	Existing groups only.	Chỉ các nhóm hiện có.
+	Select whole objects containing this ink.	Chọn toàn bộ đối tượng chứa mực này.
+	Show all	Hiện tất cả
+	Show all components and select this group	Hiện mọi thành phần và chọn nhóm này
+	Show/hide ink (Alt-click: isolate)	Hiện/ẩn mực (Alt-nhấp: cô lập)
+	Show/hide group in preview	Hiện/ẩn nhóm trong bản xem trước
+	Unassigned	Chưa gán
+@msg	Invalid separation context or too many entries	Ngữ cảnh tách màu không hợp lệ hoặc quá nhiều mục
+@msg	Invalid or duplicate separation name/component	Tên bản tách màu hoặc thành phần không hợp lệ hoặc trùng lặp

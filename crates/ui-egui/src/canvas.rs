@@ -299,7 +299,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         trim: app.ui.view.trim_view,
         templates: app.ui.view.templates,
         ppp,
-        hidden: vec![],
+        hidden: st.production_separations.hidden.iter().map(|id| id.0).collect(),
         rot: v.rotation,
         anti_alias: app.session.prefs.anti_aliased_artwork,
         placed: vectorcraft_render::placed_document::generation(),
@@ -352,6 +352,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
                 [r, g, b]
             }),
             guide: key.guide,
+            hidden: key.hidden.iter().copied().map(vectorcraft_doc::NodeId).collect(),
             mask_view,
             highlight_substitutions: true,
             // General › Anti-aliased Artwork: off, edges are hard on screen (raster effects and
@@ -1697,7 +1698,9 @@ fn hit_with<T>(
         type_path_only: prefs.type_selection_by_path_only,
         scope: app.session.active().and_then(|st| st.isolation),
     };
-    test(&app.session.active()?.doc, p, opt)
+    let st = app.session.active()?;
+    let viewed = vectorcraft_engine::cmd::production_separations::preview_document(st);
+    test(&viewed, p, opt)
 }
 
 /// Right-click: the object under the pointer is selected first unless it already is, then the
@@ -3827,6 +3830,54 @@ mod tests {
         assert_eq!(painted(&mut app), None, "nothing changed: no re-render");
         assert_eq!(app.run("view.template", json!({})).unwrap(), json!(true));
         assert_eq!(painted(&mut app), Some(shown), "Show Template draws it again as before");
+    }
+
+    #[test]
+    fn production_component_eyes_change_canvas_and_hit_testing_but_not_document() {
+        let mut app = VectorcraftApp::new(Session::new(), Default::default());
+        app.run("file.new", json!({"width":400,"height":300})).unwrap();
+        app.canvas.worker_started = true;
+        app.run("swatch.new", json!({"name":"Test ink","color":"#ff80ff","spot":true})).unwrap();
+        app.run("shape.rectangle", json!({"x":100,"y":50,"width":200,"height":200})).unwrap();
+        app.run("paint.setFill", json!({"swatch":"Test ink"})).unwrap();
+        let group = app.run("object.group", json!({})).unwrap()["id"].as_u64().unwrap();
+        app.run("layer.setProps", json!({"id":group,"name":"A component"})).unwrap();
+        let layer = app.session.active().unwrap().doc.layers[0].name.clone().unwrap();
+        app.run(
+            "production.separations.configure",
+            json!({"context":{"label":"Test context","source_layers":[],"inks":[
+                {"name":"Test ink","destination":"Screen","components":[{"name":"A component","layer":layer}]}
+            ]}}),
+        )
+        .unwrap();
+        app.run("select.none", json!({})).unwrap();
+        app.session.active_mut().unwrap().mark_saved();
+        let before = serde_json::to_value(&app.session.active().unwrap().doc).unwrap();
+        let ctx = egui::Context::default();
+        let painted = |app: &mut VectorcraftApp| {
+            let (_, mut delta) = frame_output(app, &ctx);
+            let art = app.canvas.texture.as_ref().unwrap().id();
+            let n = delta.set.iter().find(|e| e.0.eq(&art)).and_then(|e| e.1.last()).map(|d| {
+                let egui::ImageData::Color(img) = &d.image;
+                img.pixels.iter().filter(|p| p.a() != 0).count()
+            });
+            delta.clear();
+            n
+        };
+        let shown = painted(&mut app).unwrap();
+        assert!(shown > 1000);
+        app.run("production.separations.preview", json!({"component":{"ink":"Test ink","name":"A component"}})).unwrap();
+        assert_eq!(painted(&mut app), Some(0), "the actual canvas must hide the group");
+        let view = app.view_info();
+        for kind in [PointerKind::Down, PointerKind::Up] {
+            app.session.pointer(&PointerEvent::new(kind, 200.0, 150.0), view).unwrap();
+        }
+        assert!(app.session.active().unwrap().selection.objects.is_empty(), "hidden group cannot be picked");
+        assert!(!app.session.active().unwrap().is_dirty());
+        assert_eq!(serde_json::to_value(&app.session.active().unwrap().doc).unwrap(), before);
+        app.run("production.separations.select", json!({"name":"Test ink","component":"A component"})).unwrap();
+        assert_eq!(painted(&mut app), Some(shown));
+        assert_eq!(app.session.active().unwrap().selection.objects, [vectorcraft_doc::NodeId(group)]);
     }
 
     /// General › Anti-aliased Artwork (#394): on (the default), the art's edges are smoothed on

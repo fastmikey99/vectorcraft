@@ -5000,3 +5000,21 @@ mark-style	Japanese	Japonské
 	Movie Clip	Filmový klip
 @msg	name is empty	název je prázdný
 @msg	no symbol named `{n}`	žádný symbol s názvem `{n}`
+
+# Reporter production panel: original translations, not native-speaker reviewed.
+	Production Separations	Výrobní separace
+	Configure Production Separations	Nastavit výrobní separace
+	List Production Separations	Vypsat výrobní separace
+	Preview Production Separations	Náhled výrobních separací
+	Select Separation Artwork	Vybrat objekty separace
+	Eyes change preview only. All artwork is saved.	Oka mění pouze náhled. Ukládají se všechny objekty.
+	No recipe context.	Bez receptury.
+	Existing groups only.	Pouze existující skupiny.
+	Select whole objects containing this ink.	Vybrat celé objekty obsahující tuto barvu.
+	Show all	Zobrazit vše
+	Show all components and select this group	Zobrazit všechny součásti a vybrat tuto skupinu
+	Show/hide ink (Alt-click: isolate)	Zobrazit/skrýt barvu (Alt-kliknutí: izolovat)
+	Show/hide group in preview	Zobrazit/skrýt skupinu v náhledu
+	Unassigned	Nepřiřazeno
+@msg	Invalid separation context or too many entries	Neplatný kontext separace nebo příliš mnoho položek
+@msg	Invalid or duplicate separation name/component	Neplatný nebo duplicitní název separace či součásti

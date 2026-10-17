@@ -11,7 +11,7 @@ pub struct Open {
 }
 
 /// The messages the bridge reads.
-pub const HEARD: [&str; 4] = ["vectorcraft:open", "vectorcraft:export", "vectorcraft:place", "vectorcraft:prefs"];
+pub const HEARD: [&str; 5] = ["vectorcraft:open", "vectorcraft:export", "vectorcraft:place", "vectorcraft:prefs", "vectorcraft:hello"];
 
 /// The longest preferences text a page may hand over (bytes).
 pub const MAX_PREFS: usize = 1 << 20;

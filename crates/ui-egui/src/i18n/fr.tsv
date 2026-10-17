@@ -4999,3 +4999,21 @@ theme	Appearance	Apparence
 	Movie Clip	Clip
 @msg	name is empty	le nom est vide
 @msg	no symbol named `{n}`	aucun symbole nommé `{n}`
+
+# Reporter production panel: original translations, not native-speaker reviewed.
+	Production Separations	Séparations de production
+	Configure Production Separations	Configurer les séparations de production
+	List Production Separations	Lister les séparations de production
+	Preview Production Separations	Prévisualiser les séparations de production
+	Select Separation Artwork	Sélectionner les objets de la séparation
+	Eyes change preview only. All artwork is saved.	Les yeux modifient uniquement l’aperçu. Tous les objets sont enregistrés.
+	No recipe context.	Aucune recette fournie.
+	Existing groups only.	Groupes existants uniquement.
+	Select whole objects containing this ink.	Sélectionner les objets entiers contenant cette encre.
+	Show all	Tout afficher
+	Show all components and select this group	Afficher tous les composants et sélectionner ce groupe
+	Show/hide ink (Alt-click: isolate)	Afficher/masquer l’encre (Alt-clic : isoler)
+	Show/hide group in preview	Afficher/masquer le groupe dans l’aperçu
+	Unassigned	Non attribué
+@msg	Invalid separation context or too many entries	Contexte de séparation invalide ou trop d’entrées
+@msg	Invalid or duplicate separation name/component	Nom de séparation ou composant invalide ou en double

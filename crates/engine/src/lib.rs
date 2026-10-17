@@ -266,6 +266,8 @@ pub struct UndoGroup {
 /// Per-document editing state.
 #[derive(Clone, Debug)]
 pub struct DocState {
+    /// Host-supplied production names and preview-only component visibility.
+    pub production_separations: cmd::production_separations::State,
     pub doc: Arc<Document>,
     pub selection: Selection,
     pub history: History,
@@ -480,6 +482,7 @@ impl DocState {
             imported_from: None,
             import_losses: vec![],
             last_perspective: None,
+            production_separations: Default::default(),
         }
     }
     /// Unsaved changes: the document differs from the saved one (selection changes don't count).
@@ -1646,6 +1649,18 @@ impl Session {
         let before = st.selection.objects.clone();
         f(&st.doc, &mut st.selection);
         st.selection.prune(&st.doc);
+        if !st.production_separations.hidden.is_empty() {
+            let hidden: Vec<_> = st
+                .selection
+                .objects
+                .iter()
+                .copied()
+                .filter(|id| st.doc.ancestry(*id).is_some_and(|a| a.iter().any(|id| st.production_separations.hidden.contains(id))))
+                .collect();
+            for id in hidden {
+                st.selection.remove(id);
+            }
+        }
         // Lock Guides locks the paths made into guides too (#1534), whatever selects them.
         if guides_locked {
             let locked: Vec<NodeId> = st.selection.objects.iter().copied().filter(|id| is_guide_path(&st.doc, *id)).collect();

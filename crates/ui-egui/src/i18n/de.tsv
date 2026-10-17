@@ -4537,3 +4537,21 @@ theme	Appearance	Erscheinungsbild
 	Movie Clip	Movieclip
 @msg	name is empty	Name ist leer
 @msg	no symbol named `{n}`	kein Symbol namens `{n}`
+
+# Reporter production panel: original translations, not native-speaker reviewed.
+	Production Separations	Produktionsfarbauszüge
+	Configure Production Separations	Produktionsfarbauszüge konfigurieren
+	List Production Separations	Produktionsfarbauszüge auflisten
+	Preview Production Separations	Produktionsfarbauszüge in der Vorschau
+	Select Separation Artwork	Grafik des Farbauszugs auswählen
+	Eyes change preview only. All artwork is saved.	Augensymbole ändern nur die Vorschau. Alle Objekte werden gespeichert.
+	No recipe context.	Kein Rezept vorhanden.
+	Existing groups only.	Nur vorhandene Gruppen.
+	Select whole objects containing this ink.	Ganze Objekte mit dieser Druckfarbe auswählen.
+	Show all	Alle anzeigen
+	Show all components and select this group	Alle Komponenten anzeigen und diese Gruppe auswählen
+	Show/hide ink (Alt-click: isolate)	Druckfarbe ein-/ausblenden (Alt-Klick: isolieren)
+	Show/hide group in preview	Gruppe in der Vorschau ein-/ausblenden
+	Unassigned	Nicht zugewiesen
+@msg	Invalid separation context or too many entries	Ungültiger Farbauszugskontext oder zu viele Einträge
+@msg	Invalid or duplicate separation name/component	Ungültiger oder doppelter Farbauszugsname bzw. Komponente

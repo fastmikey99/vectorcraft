@@ -4942,3 +4942,21 @@ mark-style	Japanese	Japonesas
 	Movie Clip	Clip de película
 @msg	name is empty	el nombre está vacío
 @msg	no symbol named `{n}`	no hay ningún símbolo llamado `{n}`
+
+# Reporter production panel: original translations, not native-speaker reviewed.
+	Production Separations	Separaciones de producción
+	Configure Production Separations	Configurar separaciones de producción
+	List Production Separations	Listar separaciones de producción
+	Preview Production Separations	Previsualizar separaciones de producción
+	Select Separation Artwork	Seleccionar objetos de la separación
+	Eyes change preview only. All artwork is saved.	Los ojos solo cambian la vista previa. Se guardan todos los objetos.
+	No recipe context.	Sin receta.
+	Existing groups only.	Solo grupos existentes.
+	Select whole objects containing this ink.	Seleccionar objetos completos que contengan esta tinta.
+	Show all	Mostrar todo
+	Show all components and select this group	Mostrar todos los componentes y seleccionar este grupo
+	Show/hide ink (Alt-click: isolate)	Mostrar/ocultar tinta (Alt-clic: aislar)
+	Show/hide group in preview	Mostrar/ocultar grupo en la vista previa
+	Unassigned	Sin asignar
+@msg	Invalid separation context or too many entries	Contexto de separación no válido o demasiadas entradas
+@msg	Invalid or duplicate separation name/component	Nombre de separación o componente no válido o duplicado

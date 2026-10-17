@@ -4557,3 +4557,21 @@ lighting	Light	Світло
 	Movie Clip	Кліп
 @msg	name is empty	ім’я порожнє
 @msg	no symbol named `{n}`	немає символу з назвою `{n}`
+
+# Reporter production panel: original translations, not native-speaker reviewed.
+	Production Separations	Виробничі кольороподіли
+	Configure Production Separations	Налаштувати виробничі кольороподіли
+	List Production Separations	Список виробничих кольороподілів
+	Preview Production Separations	Перегляд виробничих кольороподілів
+	Select Separation Artwork	Вибрати об’єкти кольороподілу
+	Eyes change preview only. All artwork is saved.	Значки ока змінюють лише перегляд. Усі об’єкти зберігаються.
+	No recipe context.	Рецепт не задано.
+	Existing groups only.	Лише наявні групи.
+	Select whole objects containing this ink.	Вибрати цілі об’єкти, що містять цю фарбу.
+	Show all	Показати все
+	Show all components and select this group	Показати всі компоненти та вибрати цю групу
+	Show/hide ink (Alt-click: isolate)	Показати/сховати фарбу (Alt-клацання: ізолювати)
+	Show/hide group in preview	Показати/сховати групу в перегляді
+	Unassigned	Не призначено
+@msg	Invalid separation context or too many entries	Недійсний контекст кольороподілу або забагато записів
+@msg	Invalid or duplicate separation name/component	Недійсна чи повторювана назва кольороподілу або компонент

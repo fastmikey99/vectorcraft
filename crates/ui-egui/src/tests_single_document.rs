@@ -17,7 +17,7 @@ fn single() -> (VectorcraftApp, Inbox, HostInbox) {
 }
 
 fn hand(app: &mut VectorcraftApp, inbox: &HostInbox, name: &str, bytes: &[u8]) {
-    inbox.lock().unwrap().push(HostOpen { name: name.to_string(), bytes: bytes.to_vec(), print_production: false });
+    inbox.lock().unwrap().push(HostOpen { name: name.to_string(), bytes: bytes.to_vec(), print_production: false, separations: None });
     app.drain_inbox();
 }
 
@@ -104,4 +104,37 @@ fn host_is_told_when_open_completes_or_fails() {
     hand(&mut app, &host, "bad.pdf", b"not a PDF");
     assert!(results.lock().unwrap().last().unwrap().is_err());
     assert_eq!(titles(&app), ["good.svg"], "failed import keeps the earlier document; host must invalidate its token");
+}
+
+#[test]
+fn production_context_is_validated_before_replacing_the_file_and_installed_before_ack() {
+    use vectorcraft_engine::cmd::production_separations::Context;
+    let (mut app, _, host) = single();
+    hand(&mut app, &host, "original.svg", SQUARE);
+    let results = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = results.clone();
+    app.services.host_open_result = Some(Box::new(move |r| captured.lock().unwrap().push(r)));
+    host.lock().unwrap().push(HostOpen {
+        name: "invalid.svg".into(),
+        bytes: CIRCLE.to_vec(),
+        print_production: false,
+        separations: Some(Context::default()),
+    });
+    app.drain_inbox();
+    assert_eq!(titles(&app), ["original.svg"]);
+    assert!(results.lock().unwrap()[0].is_err());
+    let context = Context { label: "Reporter file links".into(), ..Default::default() };
+    host.lock().unwrap().push(HostOpen {
+        name: "configured.svg".into(),
+        bytes: CIRCLE.to_vec(),
+        print_production: false,
+        separations: Some(context.clone()),
+    });
+    app.drain_inbox();
+    assert_eq!(titles(&app), ["configured.svg"]);
+    assert_eq!(app.session.active().unwrap().production_separations.context, Some(context));
+    assert_eq!(app.ui.open_panel.as_deref(), Some("productionSeparations"));
+    assert_eq!(results.lock().unwrap().len(), 2, "one acknowledgement for each attempt");
+    assert!(results.lock().unwrap()[1].is_ok());
+    assert!(!app.session.active().unwrap().is_dirty());
 }

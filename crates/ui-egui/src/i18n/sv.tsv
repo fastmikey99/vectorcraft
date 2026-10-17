@@ -4956,3 +4956,21 @@ theme	Appearance	Utseende
 	Movie Clip	Filmklipp
 @msg	name is empty	namnet är tomt
 @msg	no symbol named `{n}`	ingen symbol med namnet `{n}`
+
+# Reporter production panel: original translations, not native-speaker reviewed.
+	Production Separations	Produktionsseparationer
+	Configure Production Separations	Konfigurera produktionsseparationer
+	List Production Separations	Lista produktionsseparationer
+	Preview Production Separations	Förhandsvisa produktionsseparationer
+	Select Separation Artwork	Markera separationens objekt
+	Eyes change preview only. All artwork is saved.	Ögonen ändrar bara förhandsvisningen. Alla objekt sparas.
+	No recipe context.	Inget recept.
+	Existing groups only.	Endast befintliga grupper.
+	Select whole objects containing this ink.	Markera hela objekt som innehåller denna tryckfärg.
+	Show all	Visa alla
+	Show all components and select this group	Visa alla komponenter och markera denna grupp
+	Show/hide ink (Alt-click: isolate)	Visa/dölj tryckfärg (Alt-klick: isolera)
+	Show/hide group in preview	Visa/dölj grupp i förhandsvisningen
+	Unassigned	Ej tilldelad
+@msg	Invalid separation context or too many entries	Ogiltig separationskontext eller för många poster
+@msg	Invalid or duplicate separation name/component	Ogiltigt eller dubblerat separationsnamn eller komponent

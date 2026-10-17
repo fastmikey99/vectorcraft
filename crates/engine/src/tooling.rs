@@ -182,8 +182,9 @@ impl Session {
     {
         let Some(st) = self.active.and_then(|i| self.docs.get(i)) else { return R::default() };
         let (unit, stroke_unit) = (self.general_unit(), self.stroke_unit());
+        let viewed = crate::cmd::production_separations::preview_document(st);
         let cx = ToolContext {
-            doc: &st.doc,
+            doc: &viewed,
             revision: (st.uid, st.revision),
             selection: &st.selection,
             zoom: view.zoom,

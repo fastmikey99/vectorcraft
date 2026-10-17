@@ -4967,3 +4967,21 @@ imageTrace	Outline	Körvonal
 	Movie Clip	Mozgóklip
 @msg	name is empty	a név üres
 @msg	no symbol named `{n}`	nincs `{n}` nevű szimbólum
+
+# Reporter production panel: original translations, not native-speaker reviewed.
+	Production Separations	Gyártási színkivonatok
+	Configure Production Separations	Gyártási színkivonatok beállítása
+	List Production Separations	Gyártási színkivonatok listázása
+	Preview Production Separations	Gyártási színkivonatok előnézete
+	Select Separation Artwork	A színkivonat objektumainak kijelölése
+	Eyes change preview only. All artwork is saved.	A szemek csak az előnézetet módosítják. Minden objektum mentésre kerül.
+	No recipe context.	Nincs recept.
+	Existing groups only.	Csak meglévő csoportok.
+	Select whole objects containing this ink.	Az ezt a festéket tartalmazó teljes objektumok kijelölése.
+	Show all	Összes megjelenítése
+	Show all components and select this group	Minden összetevő megjelenítése és e csoport kijelölése
+	Show/hide ink (Alt-click: isolate)	Festék megjelenítése/elrejtése (Alt-kattintás: elkülönítés)
+	Show/hide group in preview	Csoport megjelenítése/elrejtése az előnézetben
+	Unassigned	Nincs hozzárendelve
+@msg	Invalid separation context or too many entries	Érvénytelen színkivonati környezet vagy túl sok bejegyzés
+@msg	Invalid or duplicate separation name/component	Érvénytelen vagy ismétlődő színkivonatnév vagy összetevő

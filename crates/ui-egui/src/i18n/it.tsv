@@ -4577,3 +4577,21 @@ lighting	Light	Luce
 	Movie Clip	Clip filmato
 @msg	name is empty	il nome è vuoto
 @msg	no symbol named `{n}`	nessun simbolo denominato `{n}`
+
+# Reporter production panel: original translations, not native-speaker reviewed.
+	Production Separations	Separazioni di produzione
+	Configure Production Separations	Configura separazioni di produzione
+	List Production Separations	Elenca separazioni di produzione
+	Preview Production Separations	Anteprima separazioni di produzione
+	Select Separation Artwork	Seleziona oggetti della separazione
+	Eyes change preview only. All artwork is saved.	Gli occhi modificano solo l’anteprima. Tutti gli oggetti vengono salvati.
+	No recipe context.	Nessuna ricetta.
+	Existing groups only.	Solo gruppi esistenti.
+	Select whole objects containing this ink.	Seleziona gli oggetti interi contenenti questo inchiostro.
+	Show all	Mostra tutto
+	Show all components and select this group	Mostra tutti i componenti e seleziona questo gruppo
+	Show/hide ink (Alt-click: isolate)	Mostra/nascondi inchiostro (Alt-clic: isola)
+	Show/hide group in preview	Mostra/nascondi gruppo nell’anteprima
+	Unassigned	Non assegnato
+@msg	Invalid separation context or too many entries	Contesto di separazione non valido o troppe voci
+@msg	Invalid or duplicate separation name/component	Nome della separazione o componente non valido o duplicato

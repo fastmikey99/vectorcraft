@@ -158,3 +158,27 @@ window.addEventListener('message', async (event) => {
 let unsaved = false
 window.addEventListener('beforeunload', (event) => { if (unsaved) event.preventDefault() })
 ```
+
+### Production Separations (Reporter fork)
+
+The ready message advertises `productionSeparations: true`. An open can include
+`separations: {label, inks: [{name, destination: "Indigo"|"Screen", components:
+[{name, layer}]}], source_layers: [name]}`. Names are exact, case-sensitive file-link
+names supplied by the host's recipe database. This is viewing context, not a recipe
+execution request. The host must resolve conflicts rather than infer destinations.
+
+The native **Window → Production Separations** panel keeps process artwork together
+as CMYK under Indigo. Explicit named inks take precedence over an Indigo source
+layer; unmatched inks remain Unassigned. Component children are offered only for
+existing named groups on their configured PDF layer. A flattened legacy plate is
+never split by inference. Clicking a row selects existing objects for normal editing;
+a multi-ink object is selected whole. Eyes are view state and do not remove artwork
+from a save/export. Source RGB and CMYK values and spot names are not converted by
+this panel. This is separation inspection, not a calibrated finished-transfer proof.
+
+Context is validated before replacing a file. `opened` is sent after context is
+installed. A host can retry `vectorcraft:hello` until it receives `ready`; repeated
+ready replies must not reopen the document. Context is supplied on each host open;
+it is not embedded as production recipe authority in the PDF. Named object groups
+persist in native documents; public PDF import cannot reconstruct group roles that
+were flattened or omitted by an exporter.

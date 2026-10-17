@@ -4952,3 +4952,21 @@ effect	Points	Σημεία
 	Movie Clip	Κλιπ ταινίας
 @msg	name is empty	το όνομα είναι κενό
 @msg	no symbol named `{n}`	κανένα σύμβολο με όνομα `{n}`
+
+# Reporter production panel: original translations, not native-speaker reviewed.
+	Production Separations	Διαχωρισμοί παραγωγής
+	Configure Production Separations	Ρύθμιση διαχωρισμών παραγωγής
+	List Production Separations	Λίστα διαχωρισμών παραγωγής
+	Preview Production Separations	Προεπισκόπηση διαχωρισμών παραγωγής
+	Select Separation Artwork	Επιλογή αντικειμένων διαχωρισμού
+	Eyes change preview only. All artwork is saved.	Τα μάτια αλλάζουν μόνο την προεπισκόπηση. Αποθηκεύονται όλα τα αντικείμενα.
+	No recipe context.	Χωρίς συνταγή.
+	Existing groups only.	Μόνο υπάρχουσες ομάδες.
+	Select whole objects containing this ink.	Επιλογή ολόκληρων αντικειμένων που περιέχουν αυτό το μελάνι.
+	Show all	Εμφάνιση όλων
+	Show all components and select this group	Εμφάνιση όλων των στοιχείων και επιλογή αυτής της ομάδας
+	Show/hide ink (Alt-click: isolate)	Εμφάνιση/απόκρυψη μελανιού (Alt-κλικ: απομόνωση)
+	Show/hide group in preview	Εμφάνιση/απόκρυψη ομάδας στην προεπισκόπηση
+	Unassigned	Μη αντιστοιχισμένο
+@msg	Invalid separation context or too many entries	Μη έγκυρο πλαίσιο διαχωρισμού ή πάρα πολλές καταχωρίσεις
+@msg	Invalid or duplicate separation name/component	Μη έγκυρο ή διπλό όνομα διαχωρισμού ή στοιχείο
