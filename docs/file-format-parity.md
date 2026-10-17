@@ -256,3 +256,13 @@ alpha soft-mask regressions cover import and PDF export. See
 hours and milestone estimates remain unchanged.
 
 Revision history: 2026-10-17 — add CMYK substitution regression evidence; no parity increase.
+
+### DF.10 — printed CMYK occurrences (18 October 2026)
+
+Editing-copy adoption now pairs printed image occurrences in paint order and page-relative
+placement. Hidden, nonprinting, misplaced and duplicate resources cannot authorize an RGB
+substitution. Matched CMYK objects use the public PDF image bytes without replacing the
+editable layer tree or its hidden originals, including JPEG/lossless pairs. Ambiguous
+compositing and multi-artboard mappings retain the public PDF with a warning. This is a
+conservative import guard, not a general lossless-editing guarantee. Synthetic regressions
+cover masking, opacity, clipping, repeated uses and PDF export/reopen. Scores unchanged.

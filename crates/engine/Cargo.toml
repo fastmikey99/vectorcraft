@@ -42,6 +42,7 @@ thiserror = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
+jpeg-encoder = { workspace = true }
 vectorcraft-affinity = { workspace = true, features = ["synth"] }
 crc32fast = { workspace = true }
 vectorcraft-testkit = { workspace = true }

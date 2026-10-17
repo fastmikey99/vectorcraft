@@ -443,3 +443,76 @@ fn ordinary_pdf_open_keeps_masked_cmyk_instead_of_rgb_editing_preview() {
         assert!(exported.images.values().any(|b| b.cmyk().is_some_and(|i| i.data == inks[0])));
     }
 }
+
+fn cmyk_guard_raster(space: &str, hex: &str, components: u8, w: u32, h: u32) -> String {
+    format!(
+        "%AI5_File:\n%AI5_BeginRaster\n() 1 XG\n/{space} XN\n[ 2 0 0 2 10 60 ] {w} {h} 0 Xh\n\
+         [ 2 0 0 2 10 60 ] 0 0 {w} {h} {w} {h} 8 {components} 0 0 0 0 4 4 0 0\n\
+         %%BeginData: {}\rXI\n{hex}\n%%EndData\r\nXH\r\n%AI5_EndRaster\r\nN\r\n",
+        hex.len() + 2
+    )
+}
+
+fn cmyk_guard_pdf(body: &str, samples: &str, filter: &str, w: u32, h: u32) -> Vec<u8> {
+    let private = ai::editing_data(200.0, 100.0, body);
+    let stream = |dict: &str, text: &str| format!("<< {dict} /Length {} >>\nstream\n{text}\nendstream", text.len());
+    let image =
+        stream(&format!("/Type /XObject /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceCMYK /BitsPerComponent 8 {filter}"), samples);
+    let mut page = PdfPage::new(200.0, 100.0, &format!("q {} 0 0 {} 10 {} cm /Im Do Q", 2 * w, 2 * h, 60 - 2 * h));
+    page.resources = "/XObject << /Im 5 0 R >>".into();
+    page.entries = "/PieceInfo << /Illustrator << /Private << /AIPDFPrivateData1 6 0 R /NumBlock 1 >> >> >>".into();
+    pdf_with(&[page], &[&image, &stream("", &private)], None)
+}
+
+#[test]
+fn a_hidden_cmyk_copy_does_not_authorize_a_visible_rgb_replacement() {
+    let hex = "000000ff000000ff";
+    let rgb = ai::layer("Visible RGB", &cmyk_guard_raster("DeviceRGB", "000000000000", 3, 2, 1));
+    let hidden = ai::layer("Hidden CMYK", &cmyk_guard_raster("DeviceCMYK", hex, 4, 2, 1)).replacen("1 1 1 1 0 0 1", "0 1 1 1 0 0 1", 1);
+    let file = cmyk_guard_pdf(&(rgb + &hidden), &format!("{hex}>"), "/Filter /ASCIIHexDecode", 2, 1);
+    let mut s = Session::new();
+    let r = open(&mut s, "hidden.pdf", &file, json!({})).unwrap();
+    assert_eq!(names(&s.doc().unwrap().doc.layers), ["Page 1"], "{r}");
+    assert!(r["warnings"].to_string().contains("CMYK image inks"), "{r}");
+    let exported = s.execute("document.exportPdf", &json!({"preserveEditing": false})).unwrap();
+    let bytes = vectorcraft_format::base64_decode(exported["dataBase64"].as_str().unwrap()).unwrap();
+    open(&mut s, "saved.pdf", &bytes, json!({"editingData": false})).unwrap();
+    let doc = &s.doc().unwrap().doc;
+    let mut images = 0;
+    doc.visit_images(|_, im| {
+        images += 1;
+        assert_eq!(doc.images[&im.key].cmyk().unwrap().data, [0, 0, 0, 255, 0, 0, 0, 255]);
+    });
+    assert_eq!(images, 1);
+}
+
+#[test]
+fn jpeg_public_inks_keep_editable_layers_and_hidden_originals() {
+    let inks: Vec<u8> = (0..16 * 16).flat_map(|i| [((i * 7) % 256) as u8, 40, 100, 20]).collect();
+    let mut jpg = vec![];
+    jpeg_encoder::Encoder::new(&mut jpg, 90).encode(&inks, 16, 16, jpeg_encoder::ColorType::Cmyk).unwrap();
+    let hex = |data: &[u8]| data.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let raster = cmyk_guard_raster("DeviceCMYK", &hex(&inks), 4, 16, 16);
+    let hidden = ai::layer("Hidden original", &raster).replacen("1 1 1 1 0 0 1", "0 1 1 1 0 0 1", 1);
+    let body = ai::layer("Editable art", &raster) + &hidden;
+    let file = cmyk_guard_pdf(&body, &format!("{}>", hex(&jpg)), "/Filter [/ASCIIHexDecode /DCTDecode] /Decode [1 0 1 0 1 0 1 0]", 16, 16);
+    let page = load_with("page.pdf", &file, &LoadOptions { editing_data: false, ..Default::default() }).unwrap();
+    let mut expected = vec![];
+    page.doc.visit_images(|_, im| expected.push(page.doc.images[&im.key].cmyk().unwrap().data));
+    assert_ne!(expected[0], inks, "the fixture must exercise lossy compression");
+    let mut s = Session::new();
+    let r = open(&mut s, "jpeg.pdf", &file, json!({})).unwrap();
+    let doc = &s.doc().unwrap().doc;
+    assert_eq!(names(&doc.layers), ["Editable art", "Hidden original"], "{r}");
+    assert!(!doc.layers[1].visible);
+    let mut actual = vec![];
+    doc.visit_images(|_, im| actual.push(doc.images[&im.key].cmyk().unwrap().data));
+    assert_eq!(actual, [expected[0].clone(), inks], "only the printed occurrence uses public pixels");
+    let exported = s.execute("document.exportPdf", &json!({"preserveEditing": false})).unwrap();
+    let bytes = vectorcraft_format::base64_decode(exported["dataBase64"].as_str().unwrap()).unwrap();
+    open(&mut s, "saved.pdf", &bytes, json!({"editingData": false})).unwrap();
+    let doc = &s.doc().unwrap().doc;
+    let mut actual = vec![];
+    doc.visit_images(|_, im| actual.push(doc.images[&im.key].cmyk().unwrap().data));
+    assert_eq!(actual, expected, "export/reopen keeps public process samples");
+}
