@@ -374,3 +374,72 @@ fn bled_file_opens_on_its_artboard(name: &str, key: &str) {
     open(&mut s, name, &file, json!({})).unwrap();
     assert_eq!(names(&s.doc().unwrap().doc.layers), ["Art"], "{name}: the editing data's layers are read");
 }
+
+/// Original synthetic PDF: a CMYK image and soft mask, plus an RGB editing
+/// preview. Looking alike on screen must not allow that preview to replace inks.
+#[test]
+fn ordinary_pdf_open_keeps_masked_cmyk_instead_of_rgb_editing_preview() {
+    // Small art passes the existing page-wide visual tolerance despite different inks.
+    let hex = "000000000000ff80"; // two RGB black pixels, then alpha
+    let raster = format!(
+        "%AI5_File:\n%AI5_BeginRaster\n() 1 XG\n/DeviceRGB XN\n[ 2 0 0 2 10 60 ] 2 1 0 Xh\n\
+         [ 2 0 0 2 10 60 ] 0 0 2 1 2 1 8 3 1 0 0 0 4 4 0 0\n%%BeginData: {}\rXI\n{hex}\n%%EndData\r\nXH\r\n%AI5_EndRaster\r\nN\r\n",
+        hex.len() + 2
+    );
+    let private = ai::editing_data(200.0, 100.0, &ai::layer("RGB preview", &raster));
+    let stream = |dict: &str, text: &str| format!("<< {dict} /Length {} >>\nstream\n{text}\nendstream", text.len());
+    for mask_kind in ["image", "Luminosity", "Alpha"] {
+        let mut page = PdfPage::new(200.0, 100.0, "q 4 0 0 2 10 58 cm /Im Do Q");
+        page.resources = "/XObject << /Im 5 0 R >> /ExtGState << /GS << /SMask << /S /Luminosity /G 8 0 R >> >> >>".into();
+        if mask_kind != "image" {
+            page.content = "q /GS gs 4 0 0 2 10 58 cm /Im Do Q".into();
+            page.resources = page.resources.replace("/Luminosity", &format!("/{mask_kind}"));
+        }
+        // The private-data dictionary name is part of the documented file format.
+        let piece = "Illustrator"; // brand-ok: PDF dictionary key
+        page.entries = format!("/PieceInfo << /{piece} << /Private << /AIPDFPrivateData1 7 0 R /NumBlock 1 >> >> >>");
+        let image = stream(
+            &format!(
+                "/Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceCMYK /BitsPerComponent 8 /Filter /ASCIIHexDecode {}",
+                if mask_kind == "image" { "/SMask 6 0 R" } else { "" }
+            ),
+            "000000ff000000ff>",
+        );
+        let mask =
+            stream("/Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /ASCIIHexDecode", "ff80>");
+        let data = stream("", &private);
+        let form = stream(
+            "/Type /XObject /Subtype /Form /BBox [10 58 14 60] /Group << /S /Transparency /CS /DeviceGray >> /Resources << /ExtGState << /Half << /ca 0.5 >> >> >>",
+            if mask_kind == "Alpha" { "1 g 10 58 2 2 re f /Half gs 12 58 2 2 re f" } else { "1 g 10 58 2 2 re f 0.5 g 12 58 2 2 re f" },
+        );
+        let file = pdf_with(&[page], &[&image, &mask, &data, &form], None);
+        let mut s = Session::new();
+        let result = open(&mut s, "masked.pdf", &file, json!({})).unwrap();
+        if mask_kind == "image" {
+            assert!(
+                result["warnings"].as_array().unwrap().iter().any(|w| w.as_str().is_some_and(|w| w.contains("changes CMYK image inks"))),
+                "fixture must exercise the ink guard: {result}"
+            );
+        }
+        let doc = &s.doc().unwrap().doc;
+        let mut inks = vec![];
+        let mut masks = 0;
+        doc.walk(|n| masks += usize::from(n.extras().mask.is_some()));
+        doc.visit_images(|_, im| {
+            if let Some(cmyk) = doc.images[&im.key].cmyk() {
+                inks.push(cmyk.data);
+            }
+        });
+        assert_eq!(inks, [vec![0, 0, 0, 255, 0, 0, 0, 255]], "{mask_kind}: {result}");
+        assert!(masks > 0, "{mask_kind}: mask retained");
+        // Force the alternative route to prove this fixture exercises substitution.
+        let mut trusted = Session::new();
+        open(&mut trusted, "masked.pdf", &file, json!({"editingData": "always"})).unwrap();
+        assert!(trusted.doc().unwrap().doc.images.values().all(|b| !b.is_cmyk()));
+        let out = s.execute("document.exportPdf", &json!({"preserveEditing": false})).unwrap();
+        let bytes = vectorcraft_format::base64_decode(out["dataBase64"].as_str().unwrap()).unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("/DeviceCMYK"), "{mask_kind}: export keeps DeviceCMYK");
+        let exported = vectorcraft_pdf::import(&bytes).unwrap();
+        assert!(exported.images.values().any(|b| b.cmyk().is_some_and(|i| i.data == inks[0])));
+    }
+}

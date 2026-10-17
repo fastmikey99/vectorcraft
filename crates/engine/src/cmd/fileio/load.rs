@@ -171,7 +171,17 @@ fn through_editing_data(bytes: &[u8], opts: &LoadOptions, doc: Document, warning
     }
     let Some(private) = vectorcraft_pdf::illustrator_data(bytes, opts.password.as_deref()) else { return (doc, warnings) };
     let outlined = opts.text_as == vectorcraft_pdf::TextAs::Outlines;
+    let page = doc.clone();
+    let page_warnings = warnings.clone();
     let (doc, mut warnings, read) = vectorcraft_eps::layered_ai(&private, doc, warnings, outlined, opts.trust_editing_data, unit);
+    // The editing copy can contain RGB previews of the PDF's CMYK images. A visual
+    // comparison cannot detect lost ink separations; keep the public PDF artwork
+    // unless the caller explicitly asked to trust the editing copy.
+    if read && !opts.trust_editing_data && !preserves_cmyk_images(&page, &doc) {
+        let mut warnings = page_warnings;
+        warnings.push("the editing data changes CMYK image inks: artwork was kept from the PDF part".into());
+        return (page, warnings);
+    }
     // The layers weren't read (or couldn't be): the notes of reading the PDF part still hold.
     if !read {
         return (doc, warnings);
@@ -180,6 +190,39 @@ fn through_editing_data(bytes: &[u8], opts: &LoadOptions, doc: Document, warning
     // to the page.
     warnings.retain(|w| w != vectorcraft_pdf::OFF_ARTBOARD_NOTE && w != vectorcraft_pdf::PAST_PAGE_NOTE);
     (doc, warnings)
+}
+
+/// Every CMYK image used by the PDF must still have its ink samples in the editing
+/// copy. Encoding and resource names may differ (JPEG versus lossless TIFF).
+fn preserves_cmyk_images(page: &Document, editing: &Document) -> bool {
+    let mut source = std::collections::BTreeSet::new();
+    page.visit_images(|_, im| {
+        if page.images.get(&im.key).is_some_and(ImageBlob::is_cmyk) {
+            source.insert(im.key.clone());
+        }
+    });
+    if source.is_empty() {
+        return true;
+    }
+    let mut candidates = std::collections::BTreeSet::new();
+    editing.visit_images(|_, im| {
+        if editing.images.get(&im.key).is_some_and(ImageBlob::is_cmyk) {
+            candidates.insert(im.key.clone());
+        }
+    });
+    source.iter().all(|key| {
+        let Some(blob) = page.images.get(key) else { return false };
+        // Equal encoded data needs no decode. Otherwise hold only one source and
+        // one candidate's samples at a time, even for a document with many images.
+        if candidates.iter().filter_map(|k| editing.images.get(k)).any(|other| blob.bytes == other.bytes) {
+            return true;
+        }
+        let Some(inks) = blob.cmyk() else { return false };
+        candidates
+            .iter()
+            .filter_map(|k| editing.images.get(k))
+            .any(|other| other.cmyk().is_some_and(|other| inks.width == other.width && inks.height == other.height && inks.data == other.data))
+    })
 }
 
 /// A `.ai` saved without PDF compatibility (its PDF part is a placeholder page) from the editor's
