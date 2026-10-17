@@ -68,8 +68,9 @@ fn plural_french(n: u64) -> usize {
     usize::from(n > 1)
 }
 
-/// Russian: 1 (but not 11) is `one`, 2–4 (but not 12–14) `few`, everything else `many`.
-fn plural_russian(n: u64) -> usize {
+/// Russian and Ukrainian integer counts: 1 (but not 11) is `one`, 2–4 (but not 12–14)
+/// `few`, everything else `many`.
+fn plural_east_slavic(n: u64) -> usize {
     match n % 100 {
         11..=14 => 2,
         _ => match n % 10 {
@@ -80,14 +81,56 @@ fn plural_russian(n: u64) -> usize {
     }
 }
 
+/// Polish: only 1 is `one`; 2–4 (but not 12–14) `few`; everything else (0, 5–21, 25…) `many`
+/// (unlike Russian and Ukrainian, 21, 31 … take `many`: "21 warstw").
+fn plural_polish(n: u64) -> usize {
+    if n == 1 {
+        return 0;
+    }
+    match (n % 10, n % 100) {
+        (2..=4, r) if !(12..=14).contains(&r) => 1,
+        _ => 2,
+    }
+}
+
 /// The registry. English first: it is the fallback and the source language.
-pub static LANGUAGES: [LangInfo; 10] = [
+pub static LANGUAGES: [LangInfo; 20] = [
     LangInfo { code: "en", name: "English", source: "", plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
-    // Japanese: the whole interface (every menu string and `tl!` literal), keeping the product,
-    // workspace and perspective preset names in English (`MENU_KEEP_AS_IS`).
+    // Greek: the whole interface and the status and error messages, keeping the same names in
+    // English as Spanish; every `el-*` locale (including `el-GR` and `el-CY`) resolves here.
+    LangInfo {
+        code: "el",
+        name: "Ελληνικά",
+        source: include_str!("el.tsv"),
+        plural: plural_one_other,
+        complete_menus: true,
+        catalog: OnceLock::new(),
+    },
+    // Japanese: the whole interface (every menu string and `tl!` literal) and the status and error
+    // messages, keeping the product, workspace and perspective preset names in English (`MENU_KEEP_AS_IS`).
     LangInfo { code: "ja", name: "日本語", source: include_str!("ja.tsv"), plural: plural_none, complete_menus: true, catalog: OnceLock::new() },
-    // Czech: every menu label (`menu_catalogs_translate_every_menu_label`); panels and dialogs not yet.
-    LangInfo { code: "cs", name: "Čeština", source: include_str!("cs.tsv"), plural: plural_czech, complete_menus: false, catalog: OnceLock::new() },
+    // Korean: the whole interface and the status and error messages, keeping the same names in
+    // English as Japanese; a count takes no plural, so plurals have one form. Hangul is drawn with an
+    // installed system font (craft-fonts has no Korean UI face yet); every `ko-*` locale resolves here.
+    LangInfo { code: "ko", name: "한국어", source: include_str!("ko.tsv"), plural: plural_none, complete_menus: true, catalog: OnceLock::new() },
+    // Vietnamese: complete menus and messages, with one plural form.
+    // Every `vi-*` locale resolves here.
+    LangInfo {
+        code: "vi", name: "Tiếng Việt", source: include_str!("vi.tsv"), plural: plural_none, complete_menus: true, catalog: OnceLock::new()
+    },
+    // Czech: the whole interface (every menu string and `tl!` literal) and the status and error
+    // messages, with one/few/other plurals, keeping the same names in English as Spanish.
+    LangInfo { code: "cs", name: "Čeština", source: include_str!("cs.tsv"), plural: plural_czech, complete_menus: true, catalog: OnceLock::new() },
+    // German: the whole interface and the status and error messages, keeping the same names in
+    // English as Spanish; every `de-*` locale (`de-DE`, `de-AT`, `de-CH`, `de-LU` …) resolves here.
+    LangInfo {
+        code: "de",
+        name: "Deutsch",
+        source: include_str!("de.tsv"),
+        plural: plural_one_other,
+        complete_menus: true,
+        catalog: OnceLock::new(),
+    },
     // Spanish: the whole interface in neutral, international Spanish, keeping the same names in
     // English as Japanese; every `es-*` locale (`es-ES`, `es-MX`, `es-AR`, `es-419` …) resolves here.
     LangInfo {
@@ -114,17 +157,60 @@ pub static LANGUAGES: [LangInfo; 10] = [
     // Russian: the whole interface and the status and error messages, keeping the same names in
     // English as Spanish; every `ru-*` locale (`ru-RU`, `ru-BY`, `ru-KZ` …) resolves here.
     LangInfo {
-        code: "ru", name: "Русский", source: include_str!("ru.tsv"), plural: plural_russian, complete_menus: true, catalog: OnceLock::new()
+        code: "ru",
+        name: "Русский",
+        source: include_str!("ru.tsv"),
+        plural: plural_east_slavic,
+        complete_menus: true,
+        catalog: OnceLock::new(),
     },
-    // Brazilian Portuguese: every menu label (`menu_catalogs_translate_every_menu_label`), every
-    // `tl!` literal and the plural messages; left English on purpose are the `MENU_KEEP_AS_IS`
-    // strings (product name, language names, workspace names, perspective grid presets).
+    // Ukrainian: the whole interface and the status and error messages, with one/few/many
+    // plural forms; every `uk-*` locale (including `uk-UA`) resolves here.
+    LangInfo {
+        code: "uk",
+        name: "Українська",
+        source: include_str!("uk.tsv"),
+        plural: plural_east_slavic,
+        complete_menus: true,
+        catalog: OnceLock::new(),
+    },
+    // Bulgarian: the whole interface (every menu string and `tl!` literal) and the status and error
+    // messages, with one/other plural forms; every `bg-*` locale (including `bg-BG`) resolves here.
+    LangInfo {
+        code: "bg",
+        name: "Български",
+        source: include_str!("bg.tsv"),
+        plural: plural_one_other,
+        complete_menus: true,
+        catalog: OnceLock::new(),
+    },
+    // Hungarian: the whole interface and the status and error messages, keeping the same names in
+    // English as Spanish; a count takes the singular ("3 réteg"), so plurals have one form. Every
+    // `hu-*` locale (including `hu-HU`) resolves here.
+    LangInfo { code: "hu", name: "Magyar", source: include_str!("hu.tsv"), plural: plural_none, complete_menus: true, catalog: OnceLock::new() },
+    // Polish: the whole interface and the status and error messages, with one/few/many plurals,
+    // keeping the same names in English as Spanish; every `pl-*` locale (including `pl-PL`)
+    // resolves here.
+    LangInfo { code: "pl", name: "Polski", source: include_str!("pl.tsv"), plural: plural_polish, complete_menus: true, catalog: OnceLock::new() },
+    // Swedish: the whole interface and the status and error messages, keeping the same names in
+    // English as Spanish; every `sv-*` locale (`sv-SE`, `sv-FI` …) resolves here.
+    LangInfo {
+        code: "sv",
+        name: "Svenska",
+        source: include_str!("sv.tsv"),
+        plural: plural_one_other,
+        complete_menus: true,
+        catalog: OnceLock::new(),
+    },
+    // Brazilian Portuguese: the whole interface and the status and error messages, keeping the
+    // same names in English as Spanish; every `pt-BR` / `pt_BR` locale resolves here (see
+    // `candidates`: `pt-br` then `pt`).
     LangInfo {
         code: "pt-br",
         name: "Português (Brasil)",
         source: include_str!("pt-br.tsv"),
         plural: plural_one_other,
-        complete_menus: false,
+        complete_menus: true,
         catalog: OnceLock::new(),
     },
     // Traditional Chinese in the vocabulary used in Taiwan; `zh-TW`, `zh-HK`, `zh-MO` and `zh-Hant-*`
@@ -147,6 +233,10 @@ pub static LANGUAGES: [LangInfo; 10] = [
         complete_menus: true,
         catalog: OnceLock::new(),
     },
+    // Finnish: the whole interface and the status and error messages, keeping the same names in
+    // English as Spanish; one/other plurals with the partitive after any number but 1 ("2 tasoa").
+    // Every `fi-*` locale resolves here.
+    LangInfo { code: "fi", name: "Suomi", source: include_str!("fi.tsv"), plural: plural_one_other, complete_menus: true, catalog: OnceLock::new() },
 ];
 
 impl LangInfo {
@@ -238,6 +328,14 @@ pub fn lang_from_tag(tag: &str) -> Option<Lang> {
     cands.iter().find_map(|c| Lang::from_code(c))
 }
 
+/// True when `tag` names the generic `C` / `POSIX` locale (or a variant like `C.UTF-8`), which on
+/// macOS means "no particular language" rather than English: the system language list decides.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_c_locale(tag: &str) -> bool {
+    let base = tag.split(['.', '@']).next().unwrap_or("").to_ascii_lowercase();
+    matches!(base.as_str(), "c" | "posix")
+}
+
 /// Work out the system language on a background thread, so the first frame doesn't wait for the
 /// locale probe (which runs `reg.exe` on Windows and `defaults` on macOS). Call it at startup; a
 /// frame that needs the language before the probe finishes waits for it. A no-op on wasm.
@@ -279,6 +377,11 @@ fn detect_system_lang() -> Lang {
     // variables. `LANGUAGE` is a colon-separated priority list.
     for var in ["VECTORCRAFT_LOCALE", "LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"] {
         let Some(v) = std::env::var(var).ok().filter(|v| !v.is_empty()) else { continue };
+        // `C` / `POSIX` (and variants like `C.UTF-8`, `POSIX.UTF-8`) mean "no particular locale":
+        // don't force English, fall through to the OS preferred-languages list below.
+        if v.split(':').all(is_c_locale) {
+            continue;
+        }
         if let Some(l) = v.split(':').find_map(lang_from_tag) {
             return l;
         }
@@ -367,6 +470,12 @@ pub fn tr(lang: Lang, s: &str) -> &str {
 /// Like [`tr`], for an English string that needs a disambiguating `context`.
 pub fn tr_ctx<'a>(lang: Lang, context: &str, s: &'a str) -> &'a str {
     lang.catalog().contextual(context, s).unwrap_or_else(|| tr(lang, s))
+}
+
+/// A name the app gives something (a default swatch's), translated where the current language has
+/// a `context` row for it; any other name (one the user gave) comes back as it is.
+pub fn t_name<'a>(context: &str, name: &'a str) -> &'a str {
+    current().catalog().contextual(context, name).unwrap_or(name)
 }
 
 /// A string keyed by its command id, falling back to the translation of the English `label`.

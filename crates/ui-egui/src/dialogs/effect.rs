@@ -11,13 +11,19 @@ use serde_json::{Map, Value, json};
 
 use vectorcraft_color::Color;
 
-use super::{DialogSpec, form};
+use super::{DialogSpec, form, free_distort, transform_each};
 use crate::panels::c32;
 use crate::state::Dialog;
 use crate::theme::Tokens;
 use crate::{VectorcraftApp, widgets};
 
-pub(super) const SPEC: DialogSpec = DialogSpec { heading: |d| heading_label(d), body, confirm, preview: true, ..DialogSpec::FORM };
+pub(super) const SPEC: DialogSpec = DialogSpec {
+    heading: |d| if super::warp_effect::is_warp(&d.str("__effect")) { tl!("Warp Options").to_string() } else { heading_label(d) },
+    body,
+    confirm,
+    preview: true,
+    ..DialogSpec::FORM
+};
 
 /// The effect's name (`__label`, English) in the UI language: the catalog may carry it with or
 /// without its trailing ellipsis. A plug-in effect's name is shown as it is.
@@ -127,15 +133,46 @@ fn confirm_exists(app: &mut VectorcraftApp, d: &Dialog) -> Result<Value, String>
 
 fn body(app: &mut VectorcraftApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
     let (id, relative) = (d.str("__effect"), d.bool("relative"));
+    if super::warp_effect::is_warp(&id) {
+        super::warp_effect::body(ui, d);
+        let (cmd, params) = command(d);
+        form::preview(app, ui, d, "Warp Options", cmd, params);
+        return false;
+    }
+    if vectorcraft_effects::is_three_d(&id) {
+        super::revolve::body(app, ui, d);
+        let (cmd, params) = command(d);
+        form::preview(app, ui, d, &d.str("__label"), cmd, params);
+        return false;
+    }
     // Plug-in effects get fields from their parameter schema; colour adjustments their sliders.
     let changed = match vectorcraft_plugins::effect::installed(&id) {
         Some(plugin) => form::schema_fields(ui, d, &plugin.manifest().params),
         None if vectorcraft_effects::is_adjustment(&id) => adjust_fields(ui, d),
-        None => form::param_fields(ui, d, &|k| vectorcraft_effects::is_length(&id, k, relative), &|_| None, app.session.general_unit()),
+        None if id == GLASS => glass_fields(app, ui, d),
+        None if id == TRANSFORM => transform_fields(ui, d, app.session.general_unit()),
+        None if id == ZIG_ZAG => zig_zag_fields(ui, d, app.session.general_unit()),
+        None if id == DROP_SHADOW => drop_shadow_fields(ui, d, app.session.general_unit()),
+        None if id == "artistic.filmGrain" => film_grain_fields(ui, d),
+        None if id == free_distort::FREE_DISTORT => {
+            free_distort::fields(app, ui, d);
+            values_changed(d)
+        }
+        None => {
+            let doc = vectorcraft_effects::effect_info(&id).map(|e| e.params).unwrap_or_default();
+            let unit = app.session.general_unit();
+            let changed =
+                form::param_fields(ui, d, &|k| vectorcraft_effects::is_length(&id, k, relative), &|k| choices(&id, k), &|k| doc_rank(doc, k), unit);
+            // The fields show what the effect stores: Scribble's 270° angle reads -90°.
+            if let Value::Object(m) = vectorcraft_effects::upgrade_params(&id, &Value::Object(d.fields.clone())) {
+                d.fields = m;
+            }
+            changed
+        }
     };
     ui.add_space(6.0);
-    let mut pv = d.bool("preview");
-    let pv_changed = ui.checkbox(&mut pv, tl!("Preview")).changed();
+    let pv_changed = widgets::check(ui, tl!("Preview"), d.bool("preview"), true);
+    let pv = d.bool("preview") != pv_changed;
     d.fields.insert("preview".into(), json!(pv));
     if pv && (changed || pv_changed || !app.session.in_interaction()) {
         let label = d.str("__label");
@@ -146,6 +183,111 @@ fn body(app: &mut VectorcraftApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
         let _ = app.session.cancel_interaction();
     }
     false
+}
+
+/// Film Grain's bounded, whole-number controls, in the same order as its parameter docs.
+pub(crate) const FILM_GRAIN_FIELDS: [(&str, &str, f64); 3] =
+    [("grain", "Grain", 20.0), ("highlightArea", "Highlight Area", 20.0), ("intensity", "Intensity", 10.0)];
+
+fn film_grain_fields(ui: &mut egui::Ui, d: &mut Dialog) -> bool {
+    let before = d.fields.clone();
+    // Use one column wide enough for this language's longest label, keeping every rail aligned.
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let text = Tokens::get(ui.ctx()).text;
+    let label_w = FILM_GRAIN_FIELDS
+        .iter()
+        .map(|(_, label, _)| ui.painter().layout_no_wrap(tl!(label).to_string(), font.clone(), text).size().x)
+        .fold(form::SLIDER_LABEL, f32::max)
+        .ceil()
+        + 4.0;
+    for (key, label, max) in FILM_GRAIN_FIELDS {
+        form::slider_w(ui, d, (key, label, label_w), 0.0..=max, "", &grey_rail);
+    }
+    before != d.fields
+}
+
+/// The Glass effect (Effect › Distort › Glass…).
+const GLASS: &str = "distort.glass";
+
+/// Glass's dialog: its parameters, the Texture menu ending with Loaded Texture once a texture is
+/// loaded, and Load Texture… with the loaded texture's size. Returns whether the values differ from
+/// those last previewed.
+fn glass_fields(app: &mut VectorcraftApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
+    use vectorcraft_effects::pixel::{GLASS_TEXTURES, GLASS_TEXTURES_LOADED, TEXTURE_IMAGE, texture};
+    // The stored texture is shown as its size, not as a text field.
+    let stored = d.fields.remove(TEXTURE_IMAGE);
+    let size = stored.as_ref().and_then(Value::as_str).and_then(texture).map(|t| t.size());
+    let menu: form::Choices = if size.is_some() { &GLASS_TEXTURES_LOADED } else { &GLASS_TEXTURES };
+    let doc = vectorcraft_effects::effect_info(GLASS).map(|e| e.params).unwrap_or_default();
+    let unit = app.session.general_unit();
+    let pick = |k: &str| if k == "texture" { Some(menu) } else { choices(GLASS, k) };
+    form::param_fields(ui, d, &|k| vectorcraft_effects::is_length(GLASS, k, false), &pick, &|k| doc_rank(doc, k), unit);
+    if let Some(v) = stored {
+        d.fields.insert(TEXTURE_IMAGE.into(), v);
+    }
+    let mut load = false;
+    ui.horizontal(|ui| {
+        let can_read = app.services.read.is_some();
+        load = ui.add_enabled_ui(can_read, |ui| widgets::flat_button(ui, tl!("Load Texture…"), 110.0)).inner.clicked();
+        if let Some((w, h)) = size {
+            widgets::dim_label(ui, &format!("{w} × {h} px"));
+        }
+    });
+    if load
+        && let Err(e) = crate::picks::in_dialog(app, d, load_texture)
+        && e != "cancelled"
+    {
+        app.status(e);
+    }
+    values_changed(d)
+}
+
+/// Glass's Load Texture…: an image file the user picks, read into `textureImage` as Glass stores
+/// it and picked in the Texture menu.
+fn load_texture(app: &mut VectorcraftApp, d: &mut Dialog) -> Result<(), String> {
+    use vectorcraft_engine::cmd::fileio;
+    let filters = fileio::FORMATS.iter().filter(|f| f.read && f.raster).map(|f| (f.label, f.extensions)).collect();
+    let path = crate::picks::open(app, &crate::FilePick { filters, ..Default::default() }).ok_or("cancelled")?;
+    // The button is off where files can't be read.
+    let Some(read) = app.services.read.as_ref() else { return Ok(()) };
+    let stored = fileio::texture_image(&read(&path)?).map_err(|e| e.to_string())?;
+    d.fields.insert(vectorcraft_effects::pixel::TEXTURE_IMAGE.into(), json!(stored));
+    d.fields.insert("texture".into(), json!(vectorcraft_effects::pixel::LOADED));
+    Ok(())
+}
+
+/// The parameters of the effect dialogs that pick one of some values, as (label, value).
+fn choices(effect: &str, key: &str) -> Option<form::Choices> {
+    match (effect, key) {
+        ("blur.radial", "method") => Some(&[("Spin", "spin"), ("Zoom", "zoom")]),
+        ("blur.radial", "quality") => Some(&[("Draft", "draft"), ("Good", "good"), ("Best", "best")]),
+        ("blur.smart", "quality") => Some(&[("Low", "low"), ("Medium", "medium"), ("High", "high")]),
+        ("blur.smart", "blurMode") => Some(&vectorcraft_effects::pixel::SMART_BLUR_MODES),
+        ("brushStrokes.sprayedStrokes", "strokeDirection") => Some(&vectorcraft_effects::pixel::STROKE_DIRECTIONS),
+        ("distort.glass", "texture") => Some(&vectorcraft_effects::pixel::GLASS_TEXTURES),
+        ("pixelate.mezzotint", "type") => Some(&vectorcraft_effects::pixel::MEZZOTINT_TYPES),
+        ("sketch.halftonePattern", "patternType") => Some(&vectorcraft_effects::pixel::HALFTONE_TYPES),
+        ("texture.grain", "grainType") => Some(&vectorcraft_effects::pixel::GRAIN_TYPES),
+        ("texture.texturizer", "texture") => Some(&vectorcraft_effects::pixel::TEXTURES),
+        ("texture.texturizer", "lightDirection") => Some(&vectorcraft_effects::pixel::LIGHT_DIRECTIONS),
+        ("video.deinterlace", "eliminate") => Some(&[("Odd Fields", "odd"), ("Even Fields", "even")]),
+        ("video.deinterlace", "create") => Some(&[("Duplication", "duplication"), ("Interpolation", "interpolation")]),
+        ("stylize.innerGlow", "source") => Some(&[("Center", "center"), ("Edge", "edge")]),
+        ("stylize.dropShadow", "shade") => Some(SHADES),
+        ("path.offsetPath", "joins") => Some(&[("Miter", "miter"), ("Round", "round"), ("Bevel", "bevel")]),
+        ("distort.roughen" | "distort.zigZag", "points") => Some(&[("Smooth", "smooth"), ("Corner", "corner")]),
+        _ => None,
+    }
+}
+
+/// Where parameter `key` comes in the effect's parameter documentation `doc` (`{radius: …,
+/// threshold: …}`), which lists them in its dialog's order; the end when it isn't there.
+pub(super) fn doc_rank(doc: &str, key: &str) -> usize {
+    let starts = |at: usize| doc.get(..at).and_then(|s| s.chars().last()).is_some_and(|c| c == '{' || c == ' ');
+    doc.match_indices(key)
+        .map(|(at, _)| at)
+        .find(|at| starts(*at) && doc.get(at + key.len()..).is_some_and(|rest| rest.starts_with(':') || rest.starts_with("?:")))
+        .unwrap_or(usize::MAX)
 }
 
 /// A slider of a colour adjustment dialog: (effect, field, label, range, rail colour at 0..1).
@@ -235,10 +377,132 @@ fn adjust_fields(ui: &mut egui::Ui, d: &mut Dialog) -> bool {
             form::check(ui, d, key, label);
         }
     }
+    values_changed(d)
+}
+
+/// Do the dialog's values differ from those last previewed? (Remembers them for the next frame.)
+fn values_changed(d: &mut Dialog) -> bool {
     let params = form::params(d);
     let changed = d.fields.get(form::PREVIEWED) != Some(&params);
     d.fields.insert(form::PREVIEWED.into(), params);
     changed
+}
+
+/// The Transform effect (Effect › Distort & Transform › Transform…).
+const TRANSFORM: &str = "distort.transform";
+
+/// The Transform effect's dialog: Transform Each's Scale and Move sliders and Rotate dial, then
+/// Copies, the reflections, the reference point and Random. Returns whether the values differ from
+/// those last previewed.
+fn transform_fields(ui: &mut egui::Ui, d: &mut Dialog, unit: vectorcraft_doc::Unit) -> bool {
+    ui.horizontal_top(|ui| {
+        ui.vertical(|ui| transform_each::sections(ui, d, unit));
+        ui.add_space(16.0);
+        ui.vertical(|ui| {
+            widgets::subheader(ui, tl!("Options"));
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                widgets::dim_label(ui, tl!("Copies:"));
+                if let Some(n) = widgets::range_field(ui, "fx-copies", d.f64("copies", 0.0), 0.0..=1000.0, "", 0, 50.0) {
+                    d.fields.insert("copies".into(), json!(n));
+                }
+            });
+            transform_each::reflect_options(ui, d);
+        });
+    });
+    values_changed(d)
+}
+
+/// The Zig Zag effect (Effect › Distort & Transform › Zig Zag…).
+const ZIG_ZAG: &str = "distort.zigZag";
+
+/// Zig Zag's dialog (#1133): Size and Ridges per segment as sliders with their fields, Relative or
+/// Absolute and the Points as radio buttons. Returns whether the values differ from those last
+/// previewed.
+fn zig_zag_fields(ui: &mut egui::Ui, d: &mut Dialog, unit: vectorcraft_doc::Unit) -> bool {
+    const LABEL_W: f32 = 124.0;
+    const FIELD_W: f32 = 70.0;
+    let rail = Tokens::get(ui.ctx()).input_border;
+    let track = move |_| rail;
+    let relative = d.bool("relative");
+    widgets::subheader(ui, tl!("Options"));
+    // Size is a share of the object's size (Relative) or a distance (Absolute).
+    widgets::label_row(ui, tl!("Size:"), LABEL_W, |ui| {
+        form::slider_rail(ui, d, "size", 0.0..=100.0, &track);
+        if !relative {
+            form::length(ui, d, "size", unit, FIELD_W);
+        } else if let Some(n) = widgets::range_field(ui, ("zz", "size"), d.f64("size", 10.0), 0.0..=100.0, "%", 0, FIELD_W) {
+            d.fields.insert("size".into(), json!(n));
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.add_space(LABEL_W + ui.spacing().item_spacing.x);
+        for (label, on) in [(tl!("Relative"), true), (tl!("Absolute"), false)] {
+            if widgets::radio(ui, label, relative == on, true) {
+                d.fields.insert("relative".into(), json!(on));
+            }
+        }
+    });
+    widgets::label_row(ui, tl!("Ridges per segment:"), LABEL_W, |ui| {
+        form::slider_rail(ui, d, "ridges", 0.0..=100.0, &track);
+        if let Some(n) = widgets::range_field(ui, ("zz", "ridges"), d.f64("ridges", 4.0), 0.0..=100.0, "", 0, FIELD_W) {
+            d.fields.insert("ridges".into(), json!(n));
+        }
+    });
+    ui.add_space(4.0);
+    widgets::subheader(ui, crate::i18n::tr_ctx(crate::i18n::current(), "effect", "Points"));
+    let points = d.str("points");
+    ui.horizontal(|ui| {
+        for (label, value) in choices(ZIG_ZAG, "points").unwrap_or_default() {
+            if widgets::radio(ui, crate::i18n::tr_ctx(crate::i18n::current(), "effect", label), points == *value, true) {
+                d.fields.insert("points".into(), json!(value));
+            }
+        }
+    });
+    values_changed(d)
+}
+
+/// Drop Shadow (Effect › Stylize › Drop Shadow…).
+const DROP_SHADOW: &str = "stylize.dropShadow";
+
+/// What Drop Shadow's shadow takes its color from (`shade`), as (label, value).
+pub(crate) const SHADES: form::Choices = &[("Color", "color"), ("Darkness", "darkness")];
+
+/// Drop Shadow's dialog: Mode, Opacity, the offsets and Blur as the other effects show them, then
+/// Color and Darkness as radio buttons, each with its field (the field of the one not chosen is
+/// dimmed). Returns whether the values differ from those last previewed.
+fn drop_shadow_fields(ui: &mut egui::Ui, d: &mut Dialog, unit: vectorcraft_doc::Unit) -> bool {
+    let doc = vectorcraft_effects::effect_info(DROP_SHADOW).map(|e| e.params).unwrap_or_default();
+    // The generic rows, without the three this dialog shows as radio buttons.
+    let own: Vec<(String, Value)> = ["shade", "color", "darkness"].iter().filter_map(|k| d.fields.remove(*k).map(|v| (k.to_string(), v))).collect();
+    form::param_fields(ui, d, &|k| vectorcraft_effects::is_length(DROP_SHADOW, k, false), &|k| choices(DROP_SHADOW, k), &|k| doc_rank(doc, k), unit);
+    d.fields.extend(own);
+    let darkness = d.str("shade").eq_ignore_ascii_case("darkness");
+    ui.add_space(4.0);
+    egui::Grid::new("fx-shade").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+        if widgets::radio(ui, tl!("Color"), !darkness, true) {
+            d.fields.insert("shade".into(), json!("color"));
+        }
+        ui.add_enabled_ui(!darkness, |ui| match d.fields.get("color") {
+            Some(Value::String(_)) | None => {
+                form::text(ui, d, "color", 128.0);
+            }
+            Some(other) => {
+                widgets::dim_label(ui, &other.to_string());
+            }
+        });
+        ui.end_row();
+        if widgets::radio(ui, tl!("Darkness"), darkness, true) {
+            d.fields.insert("shade".into(), json!("darkness"));
+        }
+        ui.add_enabled_ui(darkness, |ui| {
+            if let Some(v) = widgets::range_field(ui, "fx-darkness", d.f64("darkness", 100.0), 0.0..=100.0, "%", 0, 70.0) {
+                d.fields.insert("darkness".into(), json!(v));
+            }
+        });
+        ui.end_row();
+    });
+    values_changed(d)
 }
 
 /// Curves' graph of its `points` (input across, output up, 0..255): drag a point to move it
@@ -322,7 +586,14 @@ fn command(d: &Dialog) -> (&'static str, Value) {
     let params = form::params(d);
     let item = d.fields.get("__item").cloned();
     if let Some(index) = d.fields.get("__index") {
-        return ("effect.setParams", json!({"index": index, "item": item.unwrap_or(Value::Null), "params": params}));
+        let mut p = json!({"index": index, "item": item.unwrap_or(Value::Null), "params": params});
+        let id = d.str("__effect");
+        // The displayed style comes from the first target. Preserve other targets' Warp IDs
+        // unless the user deliberately chooses Style, including after a preview rollback.
+        if super::warp_effect::is_warp(&id) && d.bool("__warp_style_changed") {
+            p["warpStyle"] = json!(id.strip_prefix("warp."));
+        }
+        return ("effect.setParams", p);
     }
     let mut p = json!({"effect": d.str("__effect"), "params": params});
     if let Some(item) = item {
@@ -333,6 +604,13 @@ fn command(d: &Dialog) -> (&'static str, Value) {
 
 fn confirm(app: &mut VectorcraftApp, d: &Dialog) -> Result<Value, String> {
     let (cmd, p) = command(d);
+    if super::warp_effect::is_warp(&d.str("__effect")) {
+        let r = form::commit_preview(app, cmd, p.clone())?;
+        if cmd == "effect.apply" {
+            app.last_effect = Some((d.str("__effect"), p["params"].clone()));
+        }
+        return Ok(r);
+    }
     let r = if app.session.in_interaction() {
         // Live preview already applied: keep it (the interaction commits as one undo step).
         let _ = app.session.preview(cmd, &p);
@@ -346,4 +624,61 @@ fn confirm(app: &mut VectorcraftApp, d: &Dialog) -> Result<Value, String> {
     }
     app.ui.dialog = None;
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fields_that_pick_a_value_are_dropdowns_of_its_values() {
+        // The values come from the effect's parameter documentation (`joins: "miter"|"round"|…`).
+        for (effect, key) in [
+            ("path.offsetPath", "joins"),
+            ("distort.zigZag", "points"),
+            ("distort.roughen", "points"),
+            ("stylize.innerGlow", "source"),
+            (DROP_SHADOW, "shade"),
+        ] {
+            let doc = vectorcraft_effects::effect_info(effect).unwrap().params;
+            let listed = doc.split(&format!("{key}: ")).nth(1).unwrap().split([',', '}', ' ']).next().unwrap().to_string();
+            let values: Vec<String> = choices(effect, key).unwrap().iter().map(|(_, v)| format!("\"{v}\"")).collect();
+            assert_eq!(values.join("|"), listed, "{effect} {key}");
+        }
+    }
+
+    /// Glass's Load Texture… reads the picked image into the dialog, the Texture menu shows Loaded
+    /// Texture and the texture's size instead of its stored text, and OK applies it.
+    #[test]
+    fn glass_load_texture_reads_the_picked_image_into_the_effect() {
+        let dir = std::env::temp_dir().join(format!("vectorcraft-glass-dialog-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("texture.png");
+        image::RgbaImage::from_fn(6, 4, |x, y| image::Rgba([(x * 40) as u8, (y * 60) as u8, 90, 255])).save(&path).unwrap();
+        let mut app = VectorcraftApp::new(vectorcraft_engine::Session::new(), Default::default());
+        let picked = path.to_string_lossy().into_owned();
+        app.services.pick_open = Some(Box::new(move |_: &crate::FilePick| Some(picked.clone())));
+        app.services.read = Some(Box::new(|p: &str| std::fs::read(p).map_err(|e| e.to_string())));
+        app.run("file.new", json!({"width": 200, "height": 200})).unwrap();
+        let id = app.run("shape.rectangle", json!({"x": 10, "y": 10, "width": 50, "height": 50})).unwrap()["id"].as_u64().unwrap();
+        app.run("select.all", json!({})).unwrap();
+        app.run("effect.dialog", json!({"effect": GLASS})).unwrap();
+        let paint = |app: &mut VectorcraftApp| crate::tests_labels::painted_text(app, |app, ui| super::super::show(app, ui.ctx()));
+        let text = paint(&mut app);
+        assert!(text.lines().any(|l| l == "Load Texture…") && text.lines().any(|l| l == "Frosted"), "{text}");
+        assert!(!text.contains("Loaded Texture") && !text.contains(" px"), "{text}");
+        let mut d = app.ui.dialog.take().unwrap();
+        load_texture(&mut app, &mut d).unwrap();
+        let stored = d.str(vectorcraft_effects::pixel::TEXTURE_IMAGE);
+        assert_eq!((d.str("texture"), vectorcraft_effects::pixel::texture(&stored).map(|t| t.size())), ("loaded".to_string(), Some((6, 4))));
+        app.ui.dialog = Some(d);
+        let text = paint(&mut app);
+        assert!(text.lines().any(|l| l == "Loaded Texture") && text.lines().any(|l| l == "6 × 4 px"), "{text}");
+        assert!(!text.contains(&stored[..24]), "the stored text isn't shown");
+        super::super::confirm(&mut app).unwrap();
+        let st = app.session.doc().unwrap();
+        let params = &st.doc.node(vectorcraft_doc::NodeId(id)).unwrap().appearance.effects[0].params;
+        assert_eq!((&params["texture"], &params["textureImage"]), (&json!("loaded"), &json!(stored)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

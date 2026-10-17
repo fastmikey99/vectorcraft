@@ -79,6 +79,13 @@ pub struct Targets {
     segments: Vec<(Rect, PathSeg)>,
     /// Ruler guides, which pull a point into line where they run (Snap to Point).
     rulers: Vec<Ruler>,
+    /// The bounds of the objects a moved selection spaces itself evenly with (Spacing Guides):
+    /// gathered only for moves ([`Self::for_move`]).
+    boxes: Vec<Rect>,
+    /// Line Extension: the lines a single dragged anchor keeps to, along the straight segments
+    /// it ends, as the end that stays put and the unit direction towards the dragged one
+    /// ([`Self::for_anchor_drag`]).
+    extensions: Vec<(Point, Vec2)>,
     /// How the guides these targets produce look.
     style: GuideStyle,
 }
@@ -145,9 +152,46 @@ fn lines_near(lines: &[(f64, Point, Kind)], v: f64, tol: f64) -> &[(f64, Point, 
     within(lines, |l| l.0, v, tol)
 }
 
+/// `r`'s extent along the x axis (`x`) or the y axis.
+fn span(r: &Rect, x: bool) -> (f64, f64) {
+    if x { (r.x0, r.x1) } else { (r.y0, r.y1) }
+}
+
+/// The objects a moved selection (`moving`) spaces itself evenly with, by their bounds: each
+/// visible object on a layer as a whole (a group too), and inside a group holding some of the
+/// moving objects its other objects. At most [`BUDGET`].
+fn object_boxes(doc: &Document, moving: &[NodeId]) -> Vec<Rect> {
+    fn push(nodes: &[Arc<Node>], moving: &HashSet<NodeId>, holders: &HashSet<NodeId>, out: &mut Vec<Rect>) {
+        for n in nodes.iter().filter(|n| n.visible && !moving.contains(&n.id)) {
+            if out.len() >= BUDGET {
+                return;
+            }
+            match n.children() {
+                Some(ch) if n.is_layer() || holders.contains(&n.id) => push(ch, moving, holders, out),
+                _ => out.extend(n.geometric_bounds()),
+            }
+        }
+    }
+    let holders: HashSet<NodeId> = moving.iter().filter_map(|id| doc.ancestry(*id)).flatten().collect();
+    let mut out = vec![];
+    push(&doc.layers, &moving.iter().copied().collect(), &holders, &mut out);
+    out
+}
+
 impl Targets {
     pub fn collect(doc: &Document, exclude: &[NodeId], visible: Option<Rect>) -> Self {
         Self::collect_inner(doc, exclude, None, visible, Gather::Bounds)
+    }
+
+    /// Targets for moving the selection of `cx`: [`Self::collect`]'s but `exclude` (the selection,
+    /// or nothing for a copy, which leaves it behind), styled as `cx` asks, and with Smart Guides ›
+    /// Spacing Guides the objects it spaces itself evenly with ([`Self::snap_rect`]).
+    pub fn for_move(cx: &ToolContext, exclude: &[NodeId]) -> Self {
+        let mut t = Self::collect(cx.doc, exclude, None).styled(cx);
+        if cx.spacing_guides {
+            t.boxes = object_boxes(cx.doc, &cx.selection.objects);
+        }
+        t
     }
 
     /// Targets for a drawn point: the art in `visible` (all of it for None) but `exclude`, its
@@ -224,10 +268,14 @@ impl Targets {
 
     /// Targets for dragging the direct-selected anchors of `sel` (and its objects selected as a
     /// whole): the other art, its path segments too, and the anchors and segments that stay put on
-    /// the paths being reshaped (their bounds move along, so they are no targets).
+    /// the paths being reshaped (their bounds move along, so they are no targets). A single anchor
+    /// also keeps to the extensions of the straight segments it ends (#2120).
     pub fn for_anchor_drag(doc: &Document, sel: &Selection) -> Self {
         let mut t = Self::collect_inner(doc, &sel.objects, None, None, Gather::Segments);
         let (mut anchors, mut segments) = (BUDGET, BUDGET);
+        // With several anchors moving, the one under the pointer is not known here, and the
+        // others' extensions don't run through it.
+        let single = sel.objects.len() <= 1 && sel.anchors.values().map(|s| s.len()).sum::<usize>() == 1;
         for (id, set) in &sel.anchors {
             let Some(path) = doc.node(*id).and_then(|n| n.path_data()) else { continue };
             for (si, sp) in path.subpaths.iter().enumerate() {
@@ -237,9 +285,28 @@ impl Targets {
                     anchors -= 1;
                 }
                 t.push_segments(sp, moving, &mut segments);
+                if single {
+                    t.push_extensions(sp, moving);
+                }
             }
         }
         t.index()
+    }
+
+    /// The extensions of the straight segments of `sp` with one end among the anchors `moving`
+    /// accepts and the other staying put. Horizontal and vertical ones are left out: lining up
+    /// with the other end already keeps the point on them, and says "align".
+    fn push_extensions(&mut self, sp: &SubPath, moving: impl Fn(usize) -> bool) {
+        let n = sp.anchors.len();
+        for seg in (0..sp.segment_count()).filter(|&seg| moving(seg) != moving((seg + 1) % n) && sp.segment_is_line(seg)) {
+            let c = sp.segment(seg);
+            let (fixed, dragged) = if moving(seg) { (c.p3, c.p0) } else { (c.p0, c.p3) };
+            let d = dragged - fixed;
+            let len = d.hypot();
+            if len.is_finite() && d.x.abs() > 1e-9 * len && d.y.abs() > 1e-9 * len {
+                self.extensions.push((fixed, d / len));
+            }
+        }
     }
 
     /// The segments of `sp` that stay put while the anchors `moving` accepts move, as targets, at
@@ -320,17 +387,35 @@ impl Targets {
         self.xs.clear();
         self.ys.clear();
         self.segments.clear();
+        self.extensions.clear();
         self
     }
 
     /// View → Snap to Point: only these targets' anchors pull, and the ruler guides (shown and
     /// unlocked, as the selection tools pick them) pull the pointer into line where they run.
     fn for_snap_to_point(self, cx: &ToolContext) -> Self {
-        let mut t = self.anchors_only();
+        self.anchors_only().with_rulers(cx)
+    }
+
+    /// These targets and the ruler guides, when they are shown (and so unlocked to the selection
+    /// tools): they pull a point into line where they run.
+    fn with_rulers(mut self, cx: &ToolContext) -> Self {
         if cx.guides {
-            t.rulers = cx.doc.guides.iter().map(|g| Ruler { vertical: g.vertical, pos: g.pos, span: cx.doc.guide_span(g) }).collect();
+            self.rulers = cx
+                .doc
+                .guides
+                .iter()
+                .filter(|g| cx.doc.guide_shown(g))
+                .map(|g| Ruler { vertical: g.vertical, pos: g.pos, span: cx.doc.guide_span(g) })
+                .collect();
         }
-        t
+        self
+    }
+
+    /// The ruler guides alone ([`Self::with_rulers`]): what a dragged selection's grabbed point
+    /// still snaps to with View → Snap to Point when Smart Guides line the selection up.
+    pub(crate) fn rulers(cx: &ToolContext) -> Self {
+        Self::default().styled(cx).with_rulers(cx)
     }
 
     /// What a dragged selection's grabbed point snaps to with View → Snap to Point and Smart
@@ -383,14 +468,17 @@ impl Targets {
         if let Some((q, k)) = self.nearest_point(p, tol) {
             return (q, self.label(q, k.label()).into_iter().collect());
         }
+        if let Some(q) = self.crossing(p, tol) {
+            return (q, self.label(q, "intersect").into_iter().collect());
+        }
         if let Some(q) = self.on_segment(p, tol) {
             return (q, self.label(q, Kind::Edge.label()).into_iter().collect());
         }
-        if let Some(f) = from
-            && let Some((dir, q)) = f.construction(p, tol)
-        {
-            let construction = |q: Point| Overlay::Line { a: f.at, b: q, color: self.style.color, dashed: false };
-            return match self.slide(f.at, dir, q, tol, false) {
+        // A construction guide through the point it leaves, else a dragged segment's extension:
+        // it lands on the guide, sliding into line with a target crossing it nearby.
+        if let Some((at, dir, q)) = from.and_then(|f| f.construction(p, tol).map(|(dir, q)| (f.at, dir, q))).or_else(|| self.extension(p, tol)) {
+            let construction = |q: Point| Overlay::Line { a: at, b: q, color: self.style.color, dashed: false };
+            return match self.slide(at, dir, q, tol, false) {
                 Some((q, target)) => (q, std::iter::once(construction(q)).chain(self.lined_up(q, target)).collect()),
                 None => (q, vec![construction(q)]),
             };
@@ -425,7 +513,27 @@ impl Targets {
         (out, ov)
     }
 
+    /// The segment extension nearest `p`, within `tol` of it (and `p` farther than that from the
+    /// end it starts at): that end, its direction and where `p` lands on it. Where `p` is nearer
+    /// the horizontal or the vertical through that end there is none: lining up with it ("align")
+    /// is what straightens a segment that is nearly level or upright.
+    fn extension(&self, p: Point, tol: f64) -> Option<(Point, Vec2, Point)> {
+        self.extensions
+            .iter()
+            .filter(|(at, _)| at.distance(p) > tol)
+            .map(|&(at, d)| (at, d, at + d * (p - at).dot(d)))
+            .map(|(at, d, q)| (at, d, q, q.distance(p)))
+            .filter(|(at, .., dist)| *dist <= tol && (p.x - at.x).abs().min((p.y - at.y).abs()) > *dist)
+            .min_by(|a, b| a.3.total_cmp(&b.3))
+            .map(|(at, d, q, _)| (at, d, q))
+    }
+
     /// The anchor or centre nearest `p`, within `tol`.
+    /// Is a target point (an anchor, a centre) within `tol` of `p`?
+    pub(crate) fn has_point_near(&self, p: Point, tol: f64) -> bool {
+        self.nearest_point(p, tol).is_some()
+    }
+
     fn nearest_point(&self, p: Point, tol: f64) -> Option<(Point, Kind)> {
         within(&self.points, |q| q.0.x, p.x, tol)
             .iter()
@@ -447,8 +555,10 @@ impl Targets {
             if d.abs() <= 1e-9 {
                 continue;
             }
+            // The ruler guides that way count as lines too (#812).
+            let rulers: Vec<(f64, Point, Kind)> = self.rulers.iter().filter(|r| r.vertical == vertical).filter_map(|r| r.line_at(q, reach)).collect();
             // A line that far across the way crosses it at least that far along.
-            for (t, from, _) in lines_near(lines, v, reach) {
+            for (t, from, _) in lines_near(lines, v, reach).iter().chain(&rulers) {
                 let s = (t - a) / d;
                 // Exactly on the line, whatever the rounding along the way.
                 let hit = if vertical { Point::new(*t, at.y + dir.y * s) } else { Point::new(at.x + dir.x * s, *t) };
@@ -481,6 +591,43 @@ impl Targets {
             .map(|(c, n)| c.eval(n.t))
     }
 
+    /// Where two target paths, a path and a ruler guide, or two ruler guides cross, the crossing
+    /// nearest `p` within `tol` ("intersect", #1602).
+    fn crossing(&self, p: Point, tol: f64) -> Option<Point> {
+        // A ruler guide running past, as a short line through the reach of `p`.
+        let ruler = |r: &Ruler| {
+            let (pos, ..) = r.line_at(p, tol)?;
+            let (across, along) = if r.vertical { (p.x, p.y) } else { (p.y, p.x) };
+            let (a, b) = (along - tol, along + tol);
+            ((pos - across).abs() <= tol)
+                .then(|| PathSeg::Line(if r.vertical { Line::new((pos, a), (pos, b)) } else { Line::new((a, pos), (b, pos)) }))
+        };
+        let near: Vec<PathSeg> = self
+            .segments
+            .iter()
+            .filter(|(b, c)| b.inflate(tol, tol).contains(p) && c.nearest(p, 1e-6).distance_sq <= tol * tol)
+            .map(|(_, c)| *c)
+            .chain(self.rulers.iter().filter_map(ruler))
+            // shortcut: the first 32 lines in reach are paired, raise it if busier crossings matter
+            .take(32)
+            .collect();
+        let mut best: Option<Point> = None;
+        for (i, a) in near.iter().enumerate() {
+            for b in near.iter().skip(i + 1) {
+                let hits: Vec<Point> = match (a, b) {
+                    (PathSeg::Line(l), c) | (c, PathSeg::Line(l)) => c.intersect_line(*l).iter().map(|x| l.eval(x.line_t)).collect(),
+                    _ => meeting(a, b, p).into_iter().collect(),
+                };
+                for q in hits {
+                    if q.distance(p) <= tol && best.is_none_or(|b| q.distance(p) < b.distance(p)) {
+                        best = Some(q);
+                    }
+                }
+            }
+        }
+        best
+    }
+
     /// Snap a ruler guide at `v` (the x of a vertical one, the y of a horizontal one) into line
     /// with the nearest edge, centre or anchor within `tol`: where it goes, and a label there.
     pub fn snap_guide(&self, vertical: bool, v: f64, tol: f64) -> (f64, Vec<Overlay>) {
@@ -508,7 +655,7 @@ impl Targets {
         let rects: Vec<Rect> = std::iter::once(Vec2::ZERO).chain(offsets.iter().copied()).map(|o| Rect::from_points(p + o, p + o)).collect();
         let (adj, mut ov, aligned) = self.align_rects(&rects, tol);
         let out = p + adj;
-        if aligned {
+        if aligned.contains(&true) {
             ov.extend(self.label(out, "align"));
         }
         (out, ov)
@@ -520,15 +667,107 @@ impl Targets {
     }
 
     /// Snap rectangles that move together (an artboard and its bleed): the edge or centre of any
-    /// of them nearest a target, per axis. Returns the shift and the guides.
+    /// of them nearest a target, per axis. A single moved selection with Spacing Guides
+    /// ([`Self::for_move`]) is spaced evenly along an axis that lines up with nothing
+    /// ([`Self::even_spacing`]). Returns the shift and the guides.
     pub fn snap_rects(&self, rects: &[Rect], tol: f64) -> (Vec2, Vec<Overlay>) {
-        let (d, ov, _) = self.align_rects(rects, tol);
+        let (mut d, mut ov, aligned) = self.align_rects(rects, tol);
+        if let [r] = rects
+            && !self.boxes.is_empty()
+        {
+            let moved = *r + d;
+            let mut spaced = false;
+            for (x, lined_up) in [true, false].into_iter().zip(aligned) {
+                if let Some((shift, _)) = self.even_spacing(moved, x, tol).filter(|_| !lined_up) {
+                    *(if x { &mut d.x } else { &mut d.y }) += shift;
+                    spaced = true;
+                }
+            }
+            // The equal gaps, marked where the rectangle ends up.
+            if spaced {
+                let done = *r + d;
+                for (x, lined_up) in [true, false].into_iter().zip(aligned) {
+                    let gaps = if lined_up { None } else { self.even_spacing(done, x, tol) };
+                    ov.extend(gaps.into_iter().flat_map(|(_, gaps)| gaps).flat_map(|g| self.gap_marks(g, x, tol)));
+                }
+            }
+        }
         (d, ov)
     }
 
-    /// [`Self::snap_rects`], also saying whether an axis lined up (even with Alignment Guides
-    /// off, or already in line, when there is no line or shift to tell).
-    fn align_rects(&self, rects: &[Rect], tol: f64) -> (Vec2, Vec<Overlay>, bool) {
+    /// Spacing Guides along the x axis (`x`) or the y axis for the moved rectangle `r`, among the
+    /// objects of its row (column): the shift (within `tol`) that leaves it as far from its
+    /// neighbour before or after it as two other objects of the row are apart, or as far from both
+    /// neighbours; and the equal gaps then, as (start, end, where across) along that axis.
+    fn even_spacing(&self, r: Rect, x: bool, tol: f64) -> Option<(f64, Vec<[f64; 3]>)> {
+        let (r0, r1) = span(&r, x);
+        let len = r1 - r0;
+        let (c0, c1) = span(&r, !x);
+        // The objects beside it, before or after, overlapping it across, by where they start.
+        let mut row: Vec<(Rect, f64, f64)> = self
+            .boxes
+            .iter()
+            .map(|b| (*b, span(b, x).0, span(b, x).1))
+            .filter(|(b, a0, a1)| span(b, !x).0 < c1 && span(b, !x).1 > c0 && (*a1 <= r0 + tol || *a0 >= r1 - tol))
+            .collect();
+        row.sort_by(|a, b| a.1.total_cmp(&b.1));
+        // Where two boxes overlap across: the middle of that (or of the space between them).
+        let mid = |a: &Rect, b: &Rect| (span(a, !x).0.max(span(b, !x).0) + span(a, !x).1.min(span(b, !x).1)) / 2.0;
+        // Each object and the nearest one after it, unless the moved rectangle sits between them.
+        let pairs: Vec<(f64, [f64; 3])> = row
+            .iter()
+            .filter_map(|(p, _, p1)| {
+                let next = row.partition_point(|(_, a0, _)| *a0 < *p1);
+                let (q, q0, _) = row.get(next)?;
+                let straddles = *p1 <= r0 + tol && *q0 >= r1 - tol;
+                (*q0 > *p1 && !straddles).then(|| (q0 - p1, [*p1, *q0, mid(p, q)]))
+            })
+            .collect();
+        let before = row.iter().filter(|(_, _, a1)| *a1 <= r0 + tol).max_by(|a, b| a.2.total_cmp(&b.2));
+        let after = row.iter().filter(|(_, a0, _)| *a0 >= r1 - tol).min_by(|a, b| a.1.total_cmp(&b.1));
+        // Where it could start, and the gap it repeats (None: halfway between its neighbours).
+        let mut starts: Vec<(f64, Option<f64>)> = vec![];
+        if let (Some(a), Some(b)) = (before, after)
+            && b.1 - a.2 > len
+        {
+            starts.push(((a.2 + b.1 - len) / 2.0, None));
+        }
+        for (g, _) in &pairs {
+            starts.extend(before.map(|a| (a.2 + g, Some(*g))));
+            starts.extend(after.map(|b| (b.1 - g - len, Some(*g))));
+        }
+        let (start, repeats) =
+            starts.into_iter().filter(|(t, _)| (t - r0).abs() <= tol).min_by(|a, b| (a.0 - r0).abs().total_cmp(&(b.0 - r0).abs()))?;
+        let at = r + if x { Vec2::new(start - r0, 0.0) } else { Vec2::new(0.0, start - r0) };
+        let (end, mut gaps) = (start + len, vec![]);
+        if let Some((a, _, a1)) = before
+            && repeats.is_none_or(|g| (start - a1 - g).abs() <= 1e-9)
+        {
+            gaps.push([*a1, start, mid(a, &at)]);
+        }
+        if let Some((b, b0, _)) = after
+            && repeats.is_none_or(|g| (b0 - end - g).abs() <= 1e-9)
+        {
+            gaps.push([end, *b0, mid(b, &at)]);
+        }
+        if let Some(g) = repeats {
+            gaps.extend(pairs.iter().filter(|(pg, _)| (pg - g).abs() <= 1e-9).map(|(_, gap)| *gap));
+        }
+        Some((start - r0, gaps))
+    }
+
+    /// A Spacing Guides mark: a line across the gap (start, end, where across) along the x axis
+    /// (`x`) or the y axis, with a tick `tick` long either side of it at each end.
+    fn gap_marks(&self, [u0, u1, c]: [f64; 3], x: bool, tick: f64) -> [Overlay; 3] {
+        let pt = |u: f64, c: f64| if x { Point::new(u, c) } else { Point::new(c, u) };
+        let line = |a: Point, b: Point| Overlay::Line { a, b, color: self.style.color, dashed: false };
+        [line(pt(u0, c), pt(u1, c)), line(pt(u0, c - tick), pt(u0, c + tick)), line(pt(u1, c - tick), pt(u1, c + tick))]
+    }
+
+    /// [`Self::snap_rects`] before Spacing Guides, also saying whether each axis (x, y) lined up
+    /// (even with Alignment Guides off, or already in line, when there is no line or shift to
+    /// tell).
+    fn align_rects(&self, rects: &[Rect], tol: f64) -> (Vec2, Vec<Overlay>, [bool; 2]) {
         let nearest = |targets: &[(f64, Point, Kind)], along: fn(&Rect) -> [f64; 3]| {
             rects
                 .iter()
@@ -553,7 +792,7 @@ impl Targets {
             let (x0, x1) = (from.x.min(r.x0), from.x.max(r.x1));
             ov.extend(self.line(Point::new(x0, y), Point::new(x1, y)));
         }
-        (d, ov, best_x.is_some() || best_y.is_some())
+        (d, ov, [best_x.is_some(), best_y.is_some()])
     }
 
     /// Snap a bounding-box resize. `a` is the scale [`crate::bbox::scale_for_drag`] gave for
@@ -672,6 +911,20 @@ impl Targets {
     }
 }
 
+/// Where curves `a` and `b` cross near `p`: a point projected from one onto the other and back
+/// settles where they meet (none when they don't nearby).
+fn meeting(a: &PathSeg, b: &PathSeg, p: Point) -> Option<Point> {
+    let mut q = p;
+    for _ in 0..32 {
+        let on_a = a.eval(a.nearest(q, 1e-9).t);
+        q = b.eval(b.nearest(on_a, 1e-9).t);
+        if on_a.distance(q) <= 1e-6 {
+            return Some(q);
+        }
+    }
+    None
+}
+
 /// Snap `p` for a drawing tool when smart guides (or grid snapping) are on.
 pub fn snap_draw(cx: &ToolContext, p: Point, exclude: &[NodeId]) -> (Point, Vec<Overlay>) {
     snap_with(cx, p, || Targets::collect(cx.doc, exclude, None))
@@ -696,7 +949,9 @@ impl PointSnap {
         let targets = if cx.snap_to_pixel || cx.snap_to_grid {
             None
         } else if cx.smart_guides {
-            Some((targets().styled(cx), cx.snapping_tolerance))
+            // Snap to Point keeps pulling points onto the ruler guides with Smart Guides on (#812).
+            let t = targets().styled(cx);
+            Some((if cx.snap_to_point { t.with_rulers(cx) } else { t }, cx.snapping_tolerance))
         } else if cx.snap_to_point {
             Some((targets().for_snap_to_point(cx), cx.snap_tolerance))
         } else {
@@ -1064,6 +1319,53 @@ mod tests {
         assert!(anchor(&ov), "{ov:?}");
     }
 
+    /// Smart Guides › Spacing Guides (#394): a moved selection lands as far from its neighbour as
+    /// two other objects of its row are apart, or halfway between its two neighbours, and the
+    /// equal gaps are marked; up and down the same in a column. Off, it stays where it is dragged.
+    #[test]
+    fn spacing_guides_space_a_moved_selection_evenly() {
+        let mut d = Document::new(500.0, 500.0);
+        let l = d.layers[0].id;
+        // A and B 20 apart in a row at y 300–340, C and D 30 apart in a column at x 400–440.
+        for r in [
+            Rect::new(20.0, 300.0, 60.0, 340.0),
+            Rect::new(80.0, 300.0, 120.0, 340.0),
+            Rect::new(400.0, 20.0, 440.0, 50.0),
+            Rect::new(400.0, 80.0, 440.0, 110.0),
+        ] {
+            let id = d.alloc_id();
+            d.insert(Some(l), 0, Node::path(id, vectorcraft_geom::shapes::rectangle(r), Default::default())).unwrap();
+        }
+        let (s, p) = (Selection::default(), paint());
+        let lines = |ov: &[Overlay]| ov.iter().filter(|o| matches!(o, Overlay::Line { color, .. } if *color == MAGENTA)).count();
+        let t = Targets::for_move(&cx(&d, &s, &p), &s.objects);
+        // 21 after B: 20, as A and B, with both gaps marked (a line and two ticks each).
+        let (dv, ov) = t.snap_rect(Rect::new(141.0, 305.0, 181.0, 345.0), 4.0);
+        assert_eq!(dv, Vec2::new(-1.0, 0.0));
+        assert_eq!(lines(&ov), 6, "{ov:?}");
+        assert!(ov.iter().any(|o| matches!(o, Overlay::Line { a, b, .. } if (a.x, b.x) == (120.0, 140.0) && a.y == b.y)), "{ov:?}");
+        assert!(ov.iter().any(|o| matches!(o, Overlay::Line { a, b, .. } if (a.x, b.x) == (60.0, 80.0) && a.y == b.y)), "{ov:?}");
+        // Halfway between B and a box at 220–260: 50 either side.
+        let mut wide = d.clone();
+        let id = wide.alloc_id();
+        wide.insert(Some(l), 0, Node::path(id, vectorcraft_geom::shapes::rectangle(Rect::new(220.0, 300.0, 260.0, 340.0)), Default::default()))
+            .unwrap();
+        let (dv, ov) = Targets::for_move(&cx(&wide, &s, &p), &s.objects).snap_rect(Rect::new(148.0, 305.0, 188.0, 345.0), 4.0);
+        assert_eq!(dv, Vec2::new(2.0, 0.0));
+        assert!(lines(&ov) >= 6, "{ov:?}");
+        // A column: 28 under D, as C and D are 30 apart.
+        let (dv, ov) = t.snap_rect(Rect::new(405.0, 138.0, 445.0, 168.0), 4.0);
+        assert_eq!(dv, Vec2::new(0.0, 2.0));
+        assert!(ov.iter().any(|o| matches!(o, Overlay::Line { a, b, .. } if (a.y, b.y) == (110.0, 140.0) && a.x == b.x)), "{ov:?}");
+        // Above C, 32 over it: 30.
+        let (dv, _) = t.snap_rect(Rect::new(405.0, -42.0, 445.0, -12.0), 4.0);
+        assert_eq!(dv, Vec2::new(0.0, 2.0));
+        // Off: nowhere to go, and no marks.
+        let off = ToolContext { spacing_guides: false, ..cx(&d, &s, &p) };
+        let (dv, ov) = Targets::for_move(&off, &s.objects).snap_rect(Rect::new(141.0, 305.0, 181.0, 345.0), 4.0);
+        assert_eq!((dv, lines(&ov)), (Vec2::ZERO, 0));
+    }
+
     /// Preferences › Smart Guides › Display Options (#394): the colour, and Alignment Guides and
     /// Anchor/Path Labels off, change what shows and never where a point lands.
     #[test]
@@ -1123,6 +1425,72 @@ mod tests {
         assert_eq!(t.snap_point(Point::new(101.0, 99.0), 4.0).0, Point::new(100.0, 100.0), "in line with its neighbours, not on itself");
     }
 
+    /// #2120: the dragged end of a straight segment at any angle lands on the segment's own
+    /// extension (Line Extension), past its other end or short of it, the guide drawn from that
+    /// end; with two anchors moving there is none to keep to.
+    #[test]
+    fn dragged_end_of_a_slanted_line_keeps_to_its_extension() {
+        use vectorcraft_doc::{Appearance, Node};
+        let (mut d, _) = doc_with_rect();
+        let l = d.layers[0].id;
+        let id = d.alloc_id();
+        // From (300, 400) up to (380, 340): along (4, -3), about 37° up.
+        d.insert(
+            Some(l),
+            1,
+            Node::path(id, vectorcraft_geom::shapes::line(Point::new(300.0, 400.0), Point::new(380.0, 340.0)), Appearance::default_art()),
+        )
+        .unwrap();
+        let (mut s, p) = (Selection::default(), paint());
+        s.set([id]);
+        s.anchors.insert(id, [(0, 1)].into_iter().collect());
+        let t = Targets::for_anchor_drag(&d, &s).styled(&cx(&d, &s, &p));
+        // 150 along it (2.5 off), and 50 along it (shorter).
+        for (pointer, on) in [(Point::new(421.5, 312.0), Point::new(420.0, 310.0)), (Point::new(341.5, 372.0), Point::new(340.0, 370.0))] {
+            let (q, ov) = t.snap_point(pointer, 4.0);
+            assert!((q - on).hypot() < 1e-9, "{q:?}");
+            assert_eq!(lines(&ov), vec![(Point::new(300.0, 400.0), q)]);
+        }
+        // Two anchors moving, the middle one staying put: no telling which one the pointer drags,
+        // so neither keeps to the extension of its segment.
+        let id = d.alloc_id();
+        let bent = vectorcraft_geom::PathData::single(SubPath::polyline(
+            &[Point::new(250.0, 450.0), Point::new(300.0, 400.0), Point::new(380.0, 340.0)],
+            false,
+        ));
+        d.insert(Some(l), 1, Node::path(id, bent, Appearance::default_art())).unwrap();
+        let mut s = Selection::default();
+        s.set([id]);
+        s.anchors.insert(id, [(0, 0), (0, 2)].into_iter().collect());
+        let t = Targets::for_anchor_drag(&d, &s);
+        assert_eq!(t.snap_point(Point::new(421.5, 312.0), 4.0), (Point::new(421.5, 312.0), vec![]));
+    }
+
+    /// A segment nearly level (0.3°) is still straightened by dragging its end into line with
+    /// the other one; along its own direction, farther from level, it keeps to its extension.
+    #[test]
+    fn a_nearly_level_segment_still_lines_up_with_its_other_end() {
+        use vectorcraft_doc::{Appearance, Node};
+        let (mut d, _) = doc_with_rect();
+        let l = d.layers[0].id;
+        let id = d.alloc_id();
+        d.insert(
+            Some(l),
+            1,
+            Node::path(id, vectorcraft_geom::shapes::line(Point::new(100.0, 300.0), Point::new(300.0, 301.0)), Appearance::default_art()),
+        )
+        .unwrap();
+        let (mut s, p) = (Selection::default(), paint());
+        s.set([id]);
+        s.anchors.insert(id, [(0, 1)].into_iter().collect());
+        let t = Targets::for_anchor_drag(&d, &s).styled(&cx(&d, &s, &p));
+        let (q, ov) = t.snap_point(Point::new(300.0, 300.0), 4.0);
+        assert_eq!((q, labels(&ov)), (Point::new(300.0, 300.0), vec!["align"]));
+        let (q, ov) = t.snap_point(Point::new(400.0, 301.5), 4.0);
+        assert!((q - Point::new(400.0, 301.5)).hypot() < 1e-9, "{q:?}");
+        assert_eq!(lines(&ov), vec![(Point::new(100.0, 300.0), q)]);
+    }
+
     fn labels(ov: &[Overlay]) -> Vec<&str> {
         ov.iter().filter_map(|o| if let Overlay::Label { text, .. } = o { Some(text.as_str()) } else { None }).collect()
     }
@@ -1175,6 +1543,43 @@ mod tests {
         assert_eq!(q, Point::new(340.0, 340.0));
     }
 
+    /// #1602: a drawn point lands where two paths cross, where a path crosses a ruler guide and
+    /// where two ruler guides cross, labelled "intersect"; an anchor nearby still wins.
+    #[test]
+    fn drawn_points_land_on_intersections() {
+        use vectorcraft_doc::{Appearance, Node};
+        use vectorcraft_geom::shapes;
+        let (mut d, _) = doc_with_rect();
+        let l = d.layers[0].id;
+        // A slanted line through the rect's top side (y = 100) at x = 150, and a circle across its
+        // right side (x = 200).
+        for path in [shapes::line(Point::new(145.0, 90.0), Point::new(165.0, 130.0)), shapes::ellipse(Rect::new(175.0, 130.0, 215.0, 170.0))] {
+            let id = d.alloc_id();
+            d.insert(Some(l), 1, Node::path(id, path, Appearance::default_art())).unwrap();
+        }
+        d.guides.push(vectorcraft_doc::Guide::new(true, 400.0));
+        d.guides.push(vectorcraft_doc::Guide::new(false, 300.0));
+        d.guides.push(vectorcraft_doc::Guide::new(false, 150.0));
+        let (s, p) = (Selection::default(), paint());
+        let c = ToolContext { guides: true, ..cx(&d, &s, &p) };
+        let t = Targets::for_drawing(&d, &[], None).styled(&c).with_rulers(&c);
+        let (q, ov) = t.snap_from(Point::new(152.0, 101.5), None, 4.0);
+        assert!((q - Point::new(150.0, 100.0)).hypot() < 1e-9, "{q:?}");
+        assert_eq!(labels(&ov), ["intersect"]);
+        // The circle (curves, centre (195, 150), radius 20) crosses the rect's right side.
+        let (q, ov) = t.snap_from(Point::new(201.5, 131.5), None, 4.0);
+        assert!((q - Point::new(200.0, 150.0 - 375f64.sqrt())).hypot() < 0.02, "{q:?}");
+        assert_eq!(labels(&ov), ["intersect"]);
+        // A ruler guide across a path, and two ruler guides.
+        let (q, ov) = t.snap_from(Point::new(101.0, 151.0), None, 4.0);
+        assert_eq!((q, labels(&ov)), (Point::new(100.0, 150.0), vec!["intersect"]));
+        let (q, ov) = t.snap_from(Point::new(402.0, 298.0), None, 4.0);
+        assert_eq!((q, labels(&ov)), (Point::new(400.0, 300.0), vec!["intersect"]));
+        // An anchor in reach wins, and a path alone is still "path".
+        assert_eq!(labels(&t.snap_from(Point::new(146.0, 91.0), None, 4.0).1), ["anchor"]);
+        assert_eq!(labels(&t.snap_from(Point::new(170.0, 201.0), None, 4.0).1), ["path"]);
+    }
+
     /// The angle sets of Preferences › Smart Guides › Construction Guides.
     #[test]
     fn construction_angle_sets() {
@@ -1217,6 +1622,27 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// #812: with Smart Guides on, ruler guides pull a drawn point too (Snap to Point), horizontal
+    /// and vertical alike, also while it slides along a construction guide or Shift's angle.
+    #[test]
+    fn drawn_points_snap_to_ruler_guides_with_smart_guides_on() {
+        let (mut d, _) = doc_with_rect();
+        d.guides.push(vectorcraft_doc::Guide::new(false, 313.0));
+        d.guides.push(vectorcraft_doc::Guide::new(true, 331.0));
+        let (s, p) = (Selection::default(), paint());
+        let c = cx(&d, &s, &p);
+        let mut snap = DrawSnap::default();
+        assert_eq!(snap.press(&c, Point::new(260.0, 315.0), &[], None), Point::new(260.0, 313.0), "the horizontal guide");
+        assert_eq!(snap.press(&c, Point::new(329.0, 260.0), &[], None), Point::new(331.0, 260.0), "the vertical guide");
+        // On the 45° construction guide from (210, 210), where the horizontal guide crosses it.
+        let from = Leave::segment(&c, Point::new(210.0, 210.0), false);
+        let q = snap.press(&c, Point::new(312.0, 311.0), &[], Some(&from));
+        assert!((q - Point::new(313.0, 313.0)).hypot() < 1e-9, "{q:?}");
+        // Snap to Point off: Smart Guides alone don't use the ruler guides.
+        let off = ToolContext { snap_to_point: false, ..cx(&d, &s, &p) };
+        assert_eq!(snap.press(&off, Point::new(260.0, 315.0), &[], None), Point::new(260.0, 315.0));
     }
 
     /// A drawing tool's snapper reuses its targets while hovering over the same document state, and

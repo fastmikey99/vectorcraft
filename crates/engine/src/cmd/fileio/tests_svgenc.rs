@@ -74,3 +74,37 @@ fn a_chosen_artboard_s_svg_holds_only_its_own_art() {
     let whole = text(&s.execute("document.serialize", &json!({"format": "svg"})).unwrap());
     assert_eq!(shapes(&whole).0, 2, "nothing named: the whole document's art");
 }
+
+/// Art grouped across artboards (one variant per artboard in one group) splits by artboard too.
+#[test]
+fn a_chosen_artboard_s_svg_leaves_out_its_neighbours_art_in_a_shared_group() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({"width": 100, "height": 100, "artboards": 3})).unwrap();
+    let x = |s: &Session, b: usize| s.doc().unwrap().doc.artboards[b].rect.x0;
+    let (first, third) = (x(&s, 0), x(&s, 2));
+    s.execute("shape.rectangle", &json!({"x": first + 10.0, "y": 10, "width": 30, "height": 30})).unwrap();
+    s.execute("shape.ellipse", &json!({"x": third + 10.0, "y": 10, "width": 30, "height": 30})).unwrap();
+    s.execute("select.all", &json!({})).unwrap();
+    s.execute("object.group", &json!({})).unwrap();
+    let text = |v: &serde_json::Value| v["text"].as_str().unwrap().to_string();
+    let third_only = text(&s.execute("document.serialize", &json!({"format": "svg", "useArtboards": true, "range": "3"})).unwrap());
+    assert_eq!(third_only.matches("<path").count() + third_only.matches("<rect").count(), 1, "{third_only}");
+    assert!(third_only.contains(" C") || third_only.contains("<ellipse"), "{third_only}");
+}
+
+/// An object off a chosen artboard whose drop shadow reaches onto it is in that artboard's SVG.
+#[test]
+fn a_chosen_artboard_s_svg_keeps_an_object_whose_shadow_reaches_it() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({"width": 100, "height": 100})).unwrap();
+    let x0 = s.doc().unwrap().doc.artboards[0].rect.x0;
+    let id = s.execute("shape.rectangle", &json!({"x": x0 - 30.0, "y": 10, "width": 20, "height": 20})).unwrap()["id"].as_u64().unwrap();
+    let paths = |s: &mut Session| {
+        let svg = s.execute("document.serialize", &json!({"format": "svg", "artboard": 0})).unwrap();
+        let text = svg["text"].as_str().unwrap().to_string();
+        text.matches("<path").count() + text.matches("<rect").count()
+    };
+    assert_eq!(paths(&mut s), 0, "the plain rectangle is off the artboard");
+    s.execute("effect.apply", &json!({"effect": "stylize.dropShadow", "ids": [id], "params": {"x": 20, "y": 0, "blur": 0}})).unwrap();
+    assert_eq!(paths(&mut s), 1, "its shadow reaches 10 pt onto the artboard");
+}

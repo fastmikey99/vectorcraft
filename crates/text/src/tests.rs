@@ -139,6 +139,29 @@ fn tracking_and_scale() {
 }
 
 #[test]
+fn underline_and_strikethrough_bars() {
+    let mut t = point("ab", style(20.0));
+    t.runs = vec![
+        TextRun { text: "ab".into(), style: style(20.0), inline: None },
+        TextRun { text: "cd".into(), style: CharStyle { underline: true, strikethrough: true, ..style(20.0) }, inline: None },
+    ];
+    let l = layout(db(), &t);
+    let bars = decorations(&l, db(), &t);
+    assert_eq!(bars.len(), 2, "one underline and one strikethrough: {bars:?}");
+    assert!(bars.iter().all(|(run, _)| *run == 1), "only the styled run");
+    let (under, strike) = (bars[0].1.bounding_box(), bars[1].1.bounding_box());
+    // The bars span the run's glyphs: from "c" to the end of "d".
+    let (c, d) = (&l.glyphs[2], &l.glyphs[3]);
+    assert!((under.x0 - c.origin.x).abs() < 1e-6 && (under.x1 - d.origin.x - d.advance).abs() < 1e-6, "{under:?}");
+    // y runs down: the underline sits below the baseline, the strikethrough above it, both thin.
+    assert!(under.y0 > 0.0 && under.y1 < 5.0, "{under:?}");
+    assert!(strike.y1 < 0.0 && strike.y0 > -10.0, "{strike:?}");
+    assert!(under.height() < 3.0 && strike.height() < 3.0);
+    // No bars for plain text.
+    assert!(decorations(&layout(db(), &point("ab", style(20.0))), db(), &point("ab", style(20.0))).is_empty());
+}
+
+#[test]
 fn all_caps() {
     let a = width(&point("abc", CharStyle { all_caps: true, ..style(10.0) }));
     let b = width(&point("ABC", style(10.0)));
@@ -382,6 +405,26 @@ fn fallback_font_per_character() {
     assert_eq!(l.glyphs[2].font_id, primary.id());
 }
 
+/// A space the primary font doesn't map goes to the fallback face like any other character
+/// (#1844): an ideographic space in a face without U+3000 keeps its em, so an indent made with it
+/// isn't lost. A tab, which the layout handles itself, stays with the primary face. Needs a bundled
+/// face with U+3000 and あ (craft-fonts; skipped without it).
+#[test]
+fn whitespace_the_primary_font_lacks_takes_the_fallback_face() {
+    let primary = db().face("Source Sans 3", "Regular").unwrap();
+    assert!(!primary.covers('\u{3000}'));
+    if ['\u{3000}', 'あ'].iter().any(|&c| db().fallback_for(c, primary.id()).is_none()) {
+        eprintln!("skipped: built without craft-fonts (set CRAFT_FONTS_DIR to a craft-fonts checkout to run it)");
+        return;
+    }
+    let l = layout(db(), &point("あ\u{3000}あ", style(20.0)));
+    let width: f64 = l.glyphs.iter().map(|g| g.advance).sum();
+    assert!((width - 60.0).abs() < 0.01, "あ　あ sets at 3 em: {:?}", l.glyphs.iter().map(|g| g.advance).collect::<Vec<_>>());
+    assert_ne!(l.glyphs[1].font_id, primary.id());
+    let l = layout(db(), &point("a\tb", style(20.0)));
+    assert!(l.glyphs.iter().all(|g| g.font_id == primary.id()));
+}
+
 #[test]
 fn multiple_runs_and_styles() {
     let mut t = point("", style(10.0));
@@ -443,6 +486,33 @@ fn tab_stops_position_text() {
     assert!((x_of(&p, 4) - 72.0).abs() < 1e-6);
 }
 
+#[test]
+fn tab_leaders_line_up_from_line_to_line_and_stop_short_of_the_stop() {
+    use vectorcraft_doc::{TabAlign, TabStop};
+    let mut t = point("A\t1\nAAAAA\t2", style(12.0));
+    t.para.tabs = vec![TabStop { position: 120.0, align: TabAlign::Left, leader: ".".into(), align_on: '.' }];
+    let lay = layout(db(), &t);
+    // The left edges of the dots of each line's tab.
+    let dots = |byte: usize| -> Vec<f64> {
+        let tab = lay.glyphs.iter().find(|g| g.byte == byte).unwrap();
+        let mut xs: Vec<f64> = vec![];
+        for el in tab.outline.elements() {
+            if let kurbo::PathEl::MoveTo(p) = el {
+                xs.push(p.x);
+            }
+        }
+        xs.sort_by(f64::total_cmp);
+        xs.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        xs
+    };
+    let (short, long) = (dots(1), dots(9));
+    assert!(short.len() > long.len() && long.len() > 10, "{short:?} {long:?}");
+    // The longer line's dots are the shorter line's last ones, at the same x.
+    let tail = &short[short.len() - long.len()..];
+    assert!(tail.iter().zip(&long).all(|(a, b)| (a - b).abs() < 1e-6), "{tail:?} {long:?}");
+    assert!(short.last().is_some_and(|&x| x < 120.0));
+}
+
 /// Are the Japanese craft-fonts faces built in? Tests of Japanese glyphs skip (and say so) when
 /// they aren't: the bundled fonts have none, and [`db`] reads no system fonts.
 fn japanese_fonts() -> bool {
@@ -466,6 +536,19 @@ fn japanese_text_uses_the_craft_fonts_mincho_after_the_bundled_fonts() {
     assert!(CRAFT_FONTS.iter().any(|f| f.family == face.family));
     // Latin keeps the bundled fallback family.
     assert_eq!(db().face_covering('a').unwrap().family, FALLBACK_FAMILY);
+}
+
+#[test]
+fn all_supplied_craft_font_families_are_registered_without_system_fonts() {
+    if CRAFT_FONTS.is_empty() {
+        eprintln!("skipped: built without craft-fonts (set CRAFT_FONTS_DIR to a checkout)");
+        return;
+    }
+    let db = FontDb::with_font_dirs(vec![]);
+    for font in CRAFT_FONTS {
+        let face = db.face(font.family, font.style).unwrap();
+        assert_eq!(face.family, font.family, "{} {}", font.family, font.style);
+    }
 }
 
 #[test]
@@ -704,4 +787,59 @@ fn burasagari_leaves_latin_commas_and_full_stops_inside_the_line() {
             assert_eq!(lay(text, b), none, "{text} {b:?}");
         }
     }
+}
+
+/// With craft-fonts and no installed fonts (the web), Thai is set in Noto Sans Thai, not as empty
+/// boxes. Skipped when built without craft-fonts or with a checkout that has no Thai font.
+#[test]
+fn thai_without_installed_fonts_takes_the_craft_fonts_thai_font() {
+    if !crate::CRAFT_FONTS.iter().any(|f| f.is_thai()) {
+        eprintln!("skipping: no Thai font in craft-fonts (set CRAFT_FONTS_DIR to a checkout that has one)");
+        return;
+    }
+    let l = layout(db(), &point("ภาษาไทย", style(20.0)));
+    assert!(!l.glyphs.is_empty() && l.glyphs.iter().all(|g| g.gid != 0), "no .notdef");
+    let families: Vec<String> = l.glyphs.iter().filter_map(|g| db().face_by_id(g.font_id)).map(|f| f.family.clone()).collect();
+    assert!(families.iter().all(|f| f == "Noto Sans Thai"), "{families:?}");
+}
+
+/// Thai is written without spaces between words: area type breaks its lines between words (as a
+/// model of Thai words finds them), never inside a word nor before a vowel or tone mark.
+#[test]
+fn thai_lines_break_between_words() {
+    let text = "สวัสดีครับ ภาษาไทยง่ายนิดเดียว";
+    // Narrower than the shortest words: each line holds one word.
+    let l = layout(db(), &area(text, style(12.0), Rect::new(0.0, 0.0, 70.0, 2000.0), Justify::Left));
+    let lines: Vec<&str> = l.lines.iter().map(|ln| &text[ln.start..ln.end]).collect();
+    assert!(lines.len() >= 3, "{lines:?}");
+    // Its words: สวัสดี ครับ, ภาษา ไทย ง่าย นิดเดียว ("hello", "the Thai language is very easy").
+    let words = ["สวัสดี", "ครับ ", "ภาษา", "ไทย", "ง่าย", "นิดเดียว"];
+    let ends: Vec<usize> = words
+        .iter()
+        .scan(0, |at, w| {
+            *at += w.len();
+            Some(*at)
+        })
+        .collect();
+    assert_eq!(ends.last(), Some(&text.len()));
+    for ln in &l.lines {
+        assert!(ends.contains(&ln.end), "a line ends inside a word: {lines:?}");
+    }
+    for w in l.lines.windows(2) {
+        assert_eq!(w[0].end, w[1].start, "lines tile the text");
+    }
+    let mark = |c: char| matches!(c, '\u{0E31}' | '\u{0E34}'..='\u{0E3A}' | '\u{0E47}'..='\u{0E4E}');
+    assert!(lines.iter().all(|s| s.chars().next().is_some_and(|c| !mark(c))), "a line starts with a mark: {lines:?}");
+}
+
+/// The desktop's dictionaries keep loanwords whole that a smaller model splits: โปรแกรม
+/// ("program").
+#[test]
+fn thai_loanwords_stay_whole() {
+    let text = "ยินดีต้อนรับสู่โปรแกรมวาดภาพเวกเตอร์";
+    let l = layout(db(), &area(text, style(12.0), Rect::new(0.0, 0.0, 70.0, 2000.0), Justify::Left));
+    let lines: Vec<&str> = l.lines.iter().map(|ln| &text[ln.start..ln.end]).collect();
+    // No line ends inside the word, whatever the Thai font's widths put beside it.
+    let word = text.find("โปรแกรม").unwrap();
+    assert!(l.lines.iter().all(|ln| ln.end <= word || ln.end >= word + "โปรแกรม".len()), "{lines:?}");
 }

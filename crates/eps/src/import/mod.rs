@@ -10,24 +10,34 @@
 //! - `data`: data the program reads from itself through decoding filters, and images.
 //! - `text`: fonts by name and type as point type; Type 3 fonts' glyphs drawn by their procedures.
 //! - `preview`: the previews a file carries, for when its PostScript can't be read.
+//! - `native`: the layers of an Illustrator file, from the editing copy of its art that it carries.
 //!
 //! Clipped art comes in as clipping groups. In a file in the legacy Illustrator format (versions
 //! 3–8, with the prolog that defines its operators), the group operators `u` … `U` (nested) come in
 //! as groups. The format's published specification documents its header comments (`%AI…`,
 //! `%%Creator`) and these operators: Adobe Illustrator File Format Specification, version 7.0
-//! (1998), listed by PRONOM at https://www.nationalarchives.gov.uk/PRONOM/fmt/423.
+//! (1998), listed by PRONOM at https://www.nationalarchives.gov.uk/PRONOM/fmt/423. A file in that
+//! format whose program has its layers (`%AI5_BeginLayer`) comes in through them, as `native` reads
+//! an Illustrator EPS's editing copy (#1027). One VectorCraft wrote (its prolog the procedure set
+//! [`crate::legacy_ai::PROCSET`], which prints its gradients flat and leaves its type out) comes in
+//! from those layers alone, without its page.
 //!
 //! The page is the file's `%%BoundingBox` (`%%HiResBoundingBox` when it has one), the first page
 //! of a PostScript file without one. A file whose program can't be read (an operator the
-//! interpreter doesn't know, an error, a limit reached) or that draws nothing comes in as its
-//! preview (a TIFF image, a Windows metafile or an EPSI bitmap), with a warning that names the
-//! error, the operator and the procedures it ran in; without a preview, what was drawn before the
-//! error is kept (with that warning), else the file is refused.
+//! interpreter doesn't know, an error, a limit reached) or that draws nothing comes in from its
+//! layers when its program has them (a `.ai` in PostScript form whose prolog is named but not
+//! included, as other apps write it), else as its preview (a TIFF image, a Windows metafile or an
+//! EPSI bitmap), with a warning that names the error, the operator and the procedures it ran in;
+//! without a preview, what was drawn before the error is kept (with that warning), else the file
+//! is refused.
 
+mod ai;
+mod ate;
 mod data;
 mod graphics;
 mod interp;
 mod lex;
+mod native;
 mod obj;
 mod preview;
 mod shading;
@@ -43,11 +53,14 @@ mod tests_generators;
 mod tests_illustrator;
 #[cfg(test)]
 mod tests_images;
+#[cfg(test)]
+mod tests_native;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use vectorcraft_color::Paint;
-use vectorcraft_color::swatch::Swatch;
+use vectorcraft_color::swatch::{REGISTRATION, Swatch};
 use vectorcraft_doc::{ColorMode, Document, LayerColor, Node};
 use vectorcraft_geom::{Affine, Rect};
 
@@ -55,6 +68,7 @@ use graphics::{GState, Out};
 use interp::{Fault, Interp};
 use obj::PsError;
 
+pub use native::{ai_alone, is_loss, layered_ai};
 pub use text::family_style;
 
 /// The page of a PostScript file without a bounding box (US Letter).
@@ -80,6 +94,9 @@ struct Dsc {
     /// In the legacy Illustrator format: its header has `%AI…` comments or names the app as the
     /// creator (see the module docs for the specification).
     illustrator: bool,
+    /// Its prolog is the one VectorCraft's legacy `.ai` writer includes
+    /// ([`crate::legacy_ai::PROCSET`] in `%%DocumentSuppliedResources`).
+    own_legacy: bool,
 }
 
 /// The four numbers of a bounding box comment's value, when it has them and they make a box.
@@ -113,6 +130,9 @@ impl Dsc {
             let creator = value("%%Creator:").is_some_and(|v| v.contains("Illustrator")); // brand-ok: the creator its files name
             if header && (line.starts_with("%AI") || line.starts_with("%%AI") || creator) {
                 d.illustrator = true;
+            }
+            if header && value("%%DocumentSuppliedResources:").is_some_and(|v| v.strip_prefix("procset ") == Some(crate::legacy_ai::PROCSET)) {
+                d.own_legacy = true;
             }
             if let Some(v) = value("%%HiResBoundingBox:") {
                 if header || atend {
@@ -159,13 +179,29 @@ fn reason(e: &PsError, fault: Option<&Fault>) -> String {
     }
 }
 
-/// Read an EPS or PostScript file (its first page).
+/// Read an EPS or PostScript file (its first page), an Illustrator EPS through the editing copy of
+/// its art when it carries one (see `native`).
 pub fn import(bytes: &[u8]) -> Result<Imported, String> {
+    import_with(bytes, true)
+}
+
+/// [`import`], an Illustrator EPS through the editing copy of its art only when `editing_data`
+/// (else what its page prints, as any EPS).
+pub fn import_with(bytes: &[u8], editing_data: bool) -> Result<Imported, String> {
     let (ps, _) = crate::sections(bytes).ok_or("the file's preview header points outside the file")?;
     if !ps.starts_with(b"%!") {
         return Err("this is not a PostScript file".into());
     }
     let dsc = Dsc::read(ps);
+    // A legacy `.ai` VectorCraft wrote: its prolog prints the art plainly (gradients flat, no
+    // type), and its program has all of it, which is read as the format (as before the file
+    // printed).
+    if editing_data
+        && dsc.own_legacy
+        && let Some(Ok((document, warnings))) = native::program_alone(ps)
+    {
+        return Ok(Imported { document, warnings, preview: false });
+    }
     let [llx, lly, urx, ury] = dsc.bbox.unwrap_or(LETTER);
     let frame = Rect::new(0.0, 0.0, urx - llx, ury - lly);
     let mut doc = Document::new(frame.width(), frame.height());
@@ -182,9 +218,17 @@ pub fn import(bytes: &[u8]) -> Result<Imported, String> {
     }
     let drew = !out.drawn.is_empty();
     let why = match (&result, drew) {
+        (Ok(()), true) if editing_data => return Ok(native::layered(ps, finish(out))),
         (Ok(()), true) => return Ok(finish(out)),
         (Ok(()), false) => "it draws nothing VectorCraft's PostScript reader can show".to_string(),
         (Err(e), _) => reason(e, fault.as_ref()),
+    };
+    // A file in the legacy Illustrator format whose program can't be run (a `.ai` that names the
+    // prolog defining its operators without including it): its layers, which the program has.
+    let why = match editing_data.then(|| native::program_alone(ps)).flatten() {
+        Some(Ok((document, warnings))) => return Ok(Imported { document, warnings, preview: false }),
+        Some(Err(e)) => format!("{why}; its layers couldn't be read either ({e})"),
+        None => why,
     };
     if let Some(p) = preview::preview(bytes, ps, frame) {
         let warnings = vec![format!("this file's PostScript couldn't be read ({why}): {}", p.what)];
@@ -199,7 +243,7 @@ pub fn import(bytes: &[u8]) -> Result<Imported, String> {
             out.warn("the file draws nothing");
             Ok(finish(out))
         }
-        Err(e) => Err(format!("this PostScript file can't be read ({}): save it as PDF or SVG in the app that made it", reason(&e, fault.as_ref()))),
+        Err(_) => Err(format!("this PostScript file can't be read ({why}): save it as PDF or SVG in the app that made it")),
     }
 }
 
@@ -211,26 +255,37 @@ fn finish(mut out: Out) -> Imported {
     if !out.shadings.is_empty() {
         graphics::collapse(&mut children, &out.shadings);
     }
+    let mut layer = Node::layer(out.doc.alloc_id(), "Layer 1", LayerColor::Preset(0));
+    if let Some(c) = layer.children_mut() {
+        *c = children;
+    }
+    finish_with(out, vec![Arc::new(layer)])
+}
+
+/// The document of what `out` drew, as `layers`: the spot inks as spot swatches, in CMYK when
+/// most process colours were.
+fn finish_with(out: Out, layers: Vec<Arc<Node>>) -> Imported {
     let mut doc = out.doc;
     if out.cmyk > out.rgb {
         doc.color_mode = ColorMode::Cmyk;
-        (doc.swatches, doc.swatch_groups) = vectorcraft_color::default_swatches(ColorMode::Cmyk.model());
+        let (swatches, groups) = vectorcraft_color::default_swatches(ColorMode::Cmyk.model());
+        (doc.swatches, doc.swatch_groups) = (swatches.into(), groups.into());
     }
+    // `taken` holds the names `Document::swatch` finds: each swatch's name, and Registration.
+    let mut taken: HashSet<String> = doc.swatches_iter().map(|s| s.name.clone()).chain([REGISTRATION.to_string()]).collect();
     for (name, color) in out.spots {
-        if doc.swatch(&name).is_none() {
+        if taken.insert(name.clone()) {
             doc.swatches.push(Swatch { name, paint: Paint::solid(color), global: true, spot: true });
         }
     }
     // Tiling patterns are pattern swatches.
     for name in doc.patterns.iter().map(|p| p.name.clone()).collect::<Vec<_>>() {
-        if doc.swatch(&name).is_none() {
+        if taken.insert(name.clone()) {
             doc.swatches.push(Swatch { paint: Paint::Pattern { pattern: name.clone(), xf: Affine::IDENTITY }, name, global: false, spot: false });
         }
     }
-    let mut layer = Node::layer(doc.alloc_id(), "Layer 1", LayerColor::Preset(0));
-    if let Some(c) = layer.children_mut() {
-        *c = children;
-    }
-    doc.layers = vec![Arc::new(layer)];
-    Imported { document: doc, warnings: out.warnings, preview: false }
+    doc.layers = layers;
+    let mut warnings = out.warnings;
+    doc.limit_depth_noting(&mut warnings);
+    Imported { document: doc, warnings, preview: false }
 }

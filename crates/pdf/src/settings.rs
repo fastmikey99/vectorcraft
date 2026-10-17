@@ -109,6 +109,11 @@ impl Compatibility {
     pub fn has_layers(self) -> bool {
         matches!(self, Self::Pdf15 | Self::Pdf16 | Self::Pdf17 | Self::Pdf20)
     }
+
+    /// The version has a page's `UserUnit` (PDF 1.6).
+    pub fn has_user_unit(self) -> bool {
+        matches!(self, Self::Pdf16 | Self::Pdf17 | Self::Pdf20)
+    }
 }
 
 choice! {
@@ -167,6 +172,8 @@ choice! {
     /// Colour conversion on output.
     ColorConversion {
         None = "none", "No conversion";
+        /// Retain source RGB/CMYK/gray values in either document mode; refuse conflicting conversions.
+        PreserveSource = "preserveSource", "Preserve source colour values";
         Destination = "destination", "Convert to destination";
         /// Convert only colours whose profile differs from the destination's.
         PreserveNumbers = "preserveNumbers", "Convert to destination (preserve numbers)";
@@ -215,6 +222,10 @@ choice! {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct PdfSettings {
+    /// Explicitly discard the original imported PDF page boxes, page blending space and output intent.
+    pub discard_imported_print_settings: bool,
+    /// Keep bitmap sample boundaries sharp in the PDF (including image masks).
+    pub disable_image_interpolation: bool,
     pub standard: Standard,
     pub compatibility: Compatibility,
     // General.
@@ -373,7 +384,7 @@ pub struct AdvancedSettings {
 
 impl Default for AdvancedSettings {
     fn default() -> Self {
-        Self { font_subset_percent: 100.0, outline_text: true, overprint: Overprint::Preserve }
+        Self { font_subset_percent: 100.0, outline_text: false, overprint: Overprint::Preserve }
     }
 }
 

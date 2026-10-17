@@ -318,6 +318,7 @@ impl PlannedSheet {
     fn sheet(&self) -> Sheet<'_> {
         Sheet {
             size: self.size,
+            unit: 1.0,
             trim: self.trim,
             bleed: self.bleed,
             view: self.view,
@@ -390,6 +391,10 @@ pub fn plan<'a>(doc: &'a Document, opts: &PrintOptions) -> Result<PrintPlan<'a>,
 
 /// Print `doc` to a PDF as `opts` say.
 pub fn print(doc: &Document, opts: &PrintOptions) -> Result<PrintReport, PdfError> {
+    craft_pdf::write::guard(|| print_inner(doc, opts))
+}
+
+fn print_inner(doc: &Document, opts: &PrintOptions) -> Result<PrintReport, PdfError> {
     let plan = plan(doc, opts)?;
     let doc = &*plan.doc;
     let separations = opts.settings.output.mode == OutputMode::Separations;

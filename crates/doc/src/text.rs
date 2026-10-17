@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use vectorcraft_color::{Color, Paint};
 use vectorcraft_geom::{Affine, PathData, Point, Rect, Vec2};
 
-use crate::appearance::{Appearance, AppearanceItem, Dash, FillLayer, LineCap, LineJoin, StrokeLayer};
+use crate::appearance::{Appearance, AppearanceItem, Dash, FillLayer, LineCap, LineJoin, StrokeAlign, StrokeLayer};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Justify {
@@ -27,6 +27,11 @@ pub struct CharStyle {
     pub font_family: String,
     #[serde(default = "regular")]
     pub font_style: String,
+    /// Which installed version of the font (its version string) when several versions of the
+    /// family and style are installed and the text was set in one the family and style alone
+    /// wouldn't pick (an imported file's type matched to it); None = the one they pick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_version: Option<String>,
     /// Size in points.
     pub size: f64,
     /// Leading in points; None = Auto (120% of size).
@@ -79,6 +84,10 @@ pub struct CharStyle {
     pub stroke_miter_limit: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stroke_dash: Option<Dash>,
+    /// Align Stroke of the character stroke (Stroke panel, with type selected): centred on the
+    /// glyph outlines, inside or outside them, as for object strokes; the type stays live.
+    #[serde(default, skip_serializing_if = "crate::skip::is_default")]
+    pub stroke_align: StrokeAlign,
     /// Superscript or subscript (Character panel).
     #[serde(default, skip_serializing_if = "crate::skip::is_default")]
     pub position: CharPosition,
@@ -90,6 +99,52 @@ pub struct CharStyle {
     /// their line line up with it.
     #[serde(default, rename = "charAlign", skip_serializing_if = "crate::skip::is_default")]
     pub char_align: CharAlign,
+    /// Proportional Metrics (Character panel menu, East Asian options): full-width glyphs take the
+    /// font's own proportional widths, OpenType `palt` (#966); in vertical type upright glyphs take
+    /// its proportional heights, `vpal`.
+    #[serde(default, rename = "proportionalMetrics", skip_serializing_if = "crate::skip::is_default")]
+    pub proportional_metrics: bool,
+    /// Digits (Character panel menu, Middle Eastern options): the numeral system the digits of
+    /// these characters are drawn in, whatever digits were typed.
+    #[serde(default, skip_serializing_if = "crate::skip::is_default")]
+    pub digits: Digits,
+}
+
+/// The numeral system digits are drawn in ([`CharStyle::digits`]): as typed, or every digit of
+/// the Western, Arabic-Indic and Eastern Arabic-Indic sets drawn in one of them. The text keeps
+/// the digits that were typed; only the glyphs change (like All Caps).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Digits {
+    /// Each digit as typed.
+    #[default]
+    Default,
+    /// Western digits 0–9 (the digits Arabic typography calls Arabic).
+    Arabic,
+    /// Arabic-Indic digits ٠–٩ (U+0660–U+0669), used in Arabic.
+    Hindi,
+    /// Eastern Arabic-Indic digits ۰–۹ (U+06F0–U+06F9), used in Persian and Urdu.
+    Farsi,
+}
+
+impl Digits {
+    /// The digit `c` is drawn as in this numeral system: the same digit in the chosen set, or `c`
+    /// itself when `c` isn't a digit of the Western, Arabic-Indic or Eastern Arabic-Indic set.
+    pub fn map(self, c: char) -> char {
+        let value = match c {
+            '0'..='9' => c as u32 - '0' as u32,
+            '\u{660}'..='\u{669}' => c as u32 - 0x660,
+            '\u{6F0}'..='\u{6F9}' => c as u32 - 0x6F0,
+            _ => return c,
+        };
+        let base = match self {
+            Digits::Default => return c,
+            Digits::Arabic => '0' as u32,
+            Digits::Hindi => 0x660,
+            Digits::Farsi => 0x6F0,
+        };
+        char::from_u32(base + value).unwrap_or(c)
+    }
 }
 
 /// Where a character smaller than the largest on its line lines up with it: on the Roman
@@ -175,6 +230,7 @@ impl Default for CharStyle {
         Self {
             font_family: "Source Sans 3".into(),
             font_style: "Regular".into(),
+            font_version: None,
             size: 12.0,
             leading: None,
             tracking: 0.0,
@@ -197,9 +253,12 @@ impl Default for CharStyle {
             stroke_join: LineJoin::Miter,
             stroke_miter_limit: 10.0,
             stroke_dash: None,
+            stroke_align: StrokeAlign::Center,
             position: CharPosition::Normal,
             char_align: CharAlign::RomanBaseline,
+            proportional_metrics: false,
             small_caps: None,
+            digits: Digits::Default,
         }
     }
 }
@@ -212,8 +271,9 @@ impl CharStyle {
     pub fn has_stroke(&self) -> bool {
         !self.stroke.is_none() && self.stroke_width > 0.0
     }
-    /// The character stroke as a stroke layer (paint, weight, cap, join, miter limit, dashes and
-    /// overprint), so type strokes share the object strokes' geometry, rendering and export.
+    /// The character stroke as a stroke layer (paint, weight, cap, join, miter limit, dashes,
+    /// alignment and overprint), so type strokes share the object strokes' geometry, rendering
+    /// and export.
     pub fn stroke_layer(&self) -> StrokeLayer {
         StrokeLayer {
             overprint: self.overprint_stroke,
@@ -221,11 +281,13 @@ impl CharStyle {
             join: self.stroke_join,
             miter_limit: self.stroke_miter_limit,
             dash: self.stroke_dash.clone(),
+            align: self.stroke_align,
             ..StrokeLayer::new(self.stroke.clone(), self.stroke_width)
         }
     }
-    /// Take the paint, weight, cap, join, miter limit and dashes of `st` as the character stroke
-    /// (the options characters have no use for, such as alignment and arrowheads, are dropped).
+    /// Take the paint, weight, cap, join, miter limit, dashes and alignment of `st` as the
+    /// character stroke (the options characters have no use for, such as arrowheads and width
+    /// profiles, are dropped).
     pub fn set_stroke_layer(&mut self, st: &StrokeLayer) {
         self.stroke = st.paint.clone();
         self.stroke_width = st.width;
@@ -233,6 +295,19 @@ impl CharStyle {
         self.stroke_join = st.join;
         self.stroke_miter_limit = st.miter_limit;
         self.stroke_dash = st.dash.clone();
+        self.stroke_align = st.align;
+    }
+    /// How far the character stroke paints past the glyph outlines (text space): half the weight
+    /// centred, the whole weight outside, nothing inside (miter spikes aside).
+    pub fn stroke_outset(&self) -> f64 {
+        if !self.has_stroke() {
+            return 0.0;
+        }
+        match self.stroke_align {
+            StrokeAlign::Center => self.stroke_width / 2.0,
+            StrokeAlign::Outside => self.stroke_width,
+            StrokeAlign::Inside => 0.0,
+        }
     }
     /// The character fill as a fill layer, overprinting as the characters do.
     fn fill_layer(&self) -> FillLayer {
@@ -306,6 +381,37 @@ impl Composer {
     }
 }
 
+/// A paragraph's hyphenation options (Paragraph panel menu › Hyphenation…): which words automatic
+/// hyphenation may break, where, and on how many lines in a row. Saved only when they differ from
+/// the defaults: words longer than 5 letters, 3 letters on each side of the hyphen, no hyphen
+/// limit, no hyphenation zone, and capitalized words hyphenated.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HyphenationOptions {
+    /// Words Longer Than: only words with more letters than this are hyphenated.
+    pub words_longer_than: u32,
+    /// After First: the fewest letters a word keeps before the hyphen.
+    pub after_first: u32,
+    /// Before Last: the fewest letters a word keeps after the hyphen.
+    pub before_last: u32,
+    /// Hyphen Limit: the most consecutive lines that automatic hyphenation may end with a hyphen;
+    /// 0 sets no limit.
+    pub hyphen_limit: u32,
+    /// Hyphenation Zone (pt): with the Single-line Composer, a line whose text before the next
+    /// word already ends within this distance of its right edge breaks before that word instead
+    /// of hyphenating it. 0 allows every hyphenation.
+    pub zone: f64,
+    /// Hyphenate Capitalized Words: when it is off, words that start with a capital letter are not
+    /// hyphenated. Words in capitals only are never hyphenated.
+    pub capitalized: bool,
+}
+
+impl Default for HyphenationOptions {
+    fn default() -> Self {
+        Self { words_longer_than: 5, after_first: 3, before_last: 3, hyphen_limit: 0, zone: 0.0, capitalized: true }
+    }
+}
+
 /// Paragraph attributes (the Paragraph panel).
 ///
 /// Saved through [`ParaStyleFile`], which keeps files with text openable by builds from before
@@ -320,6 +426,8 @@ pub struct ParaStyle {
     pub space_before: f64,
     pub space_after: f64,
     pub hyphenate: bool,
+    /// The limits automatic hyphenation keeps to (Paragraph panel menu › Hyphenation…).
+    pub hyphenation: HyphenationOptions,
     /// Line breaking: Single-line or Every-line Composer.
     pub composer: Composer,
     /// Tab stops (Tabs panel), sorted by position.
@@ -341,6 +449,9 @@ pub struct ParaStyle {
     /// may stand outside the frame. New type takes [`Burasagari::Standard`]; documents from before
     /// it and imported text keep [`Burasagari::None`].
     pub burasagari: Burasagari,
+    /// Kinsoku (Paragraph panel › Kinsoku Set): which Japanese characters may not start or end a
+    /// line.
+    pub kinsoku: Kinsoku,
 }
 
 /// [`ParaStyle`] as saved. [`Justify::Auto`] is written as the alignment it has in the paragraph
@@ -364,6 +475,8 @@ struct ParaStyleFile {
     space_after: f64,
     #[serde(default)]
     hyphenate: bool,
+    #[serde(default, skip_serializing_if = "crate::skip::is_default")]
+    hyphenation: HyphenationOptions,
     #[serde(default, skip_serializing_if = "Composer::is_default")]
     composer: Composer,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -378,6 +491,8 @@ struct ParaStyleFile {
     leading_model: LeadingModel,
     #[serde(default, skip_serializing_if = "crate::skip::is_default")]
     burasagari: Burasagari,
+    #[serde(default, skip_serializing_if = "crate::skip::is_default")]
+    kinsoku: Kinsoku,
 }
 
 impl From<ParaStyle> for ParaStyleFile {
@@ -395,6 +510,7 @@ impl From<ParaStyle> for ParaStyleFile {
             space_before,
             space_after,
             hyphenate,
+            hyphenation,
             composer,
             tabs,
             style_name,
@@ -402,6 +518,7 @@ impl From<ParaStyle> for ParaStyleFile {
             direction,
             leading_model,
             burasagari,
+            kinsoku,
             ..
         } = p;
         Self {
@@ -413,6 +530,7 @@ impl From<ParaStyle> for ParaStyleFile {
             space_before,
             space_after,
             hyphenate,
+            hyphenation,
             composer,
             tabs,
             style_name,
@@ -420,6 +538,7 @@ impl From<ParaStyle> for ParaStyleFile {
             direction,
             leading_model,
             burasagari,
+            kinsoku,
         }
     }
 }
@@ -434,6 +553,7 @@ impl From<ParaStyleFile> for ParaStyle {
             space_before,
             space_after,
             hyphenate,
+            hyphenation,
             composer,
             tabs,
             style_name,
@@ -441,6 +561,7 @@ impl From<ParaStyleFile> for ParaStyle {
             direction,
             leading_model,
             burasagari,
+            kinsoku,
             ..
         } = f;
         Self {
@@ -451,6 +572,7 @@ impl From<ParaStyleFile> for ParaStyle {
             space_before,
             space_after,
             hyphenate,
+            hyphenation,
             composer,
             tabs,
             style_name,
@@ -458,6 +580,7 @@ impl From<ParaStyleFile> for ParaStyle {
             direction,
             leading_model,
             burasagari,
+            kinsoku,
         }
     }
 }
@@ -502,6 +625,21 @@ impl Mojikumi {
     pub fn is_none(&self) -> bool {
         *self == Mojikumi::None
     }
+}
+
+/// Which Japanese characters may not start or end a line (kinsoku shori).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Kinsoku {
+    /// No kinsoku: a line may break between any two characters that allow a break.
+    None,
+    /// Closing brackets, commas, full stops, iteration marks, the prolonged sound mark, small
+    /// kana and the like don't start a line; opening brackets don't end one.
+    #[default]
+    Hard,
+    /// As Hard, except that 々, the prolonged sound mark ー and small kana may start a line
+    /// (JLREQ's level 3 line-breaking rules, Appendix C.3).
+    Soft,
 }
 
 /// Hanging punctuation (burasagari): an East Asian comma or full stop ending a line (、。，．､｡)
@@ -656,7 +794,9 @@ impl PathAlign {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AreaOptions {
+    #[serde(deserialize_with = "de_rows_or_columns")]
     pub rows: usize,
+    #[serde(deserialize_with = "de_rows_or_columns")]
     pub columns: usize,
     /// Gutter between rows/columns in points.
     pub gutter: f64,
@@ -685,6 +825,18 @@ impl Default for AreaOptions {
             fit: AreaFit::None,
         }
     }
+}
+
+impl AreaOptions {
+    /// The most rows, and the most columns, area type can have.
+    pub const MAX_ROWS_COLUMNS: usize = 100;
+}
+
+/// [`AreaOptions::rows`] or [`AreaOptions::columns`], read as a `u64` and clamped to
+/// 1..=[`AreaOptions::MAX_ROWS_COLUMNS`].
+fn de_rows_or_columns<'de, D: serde::Deserializer<'de>>(d: D) -> Result<usize, D::Error> {
+    let n = usize::try_from(u64::deserialize(d)?).unwrap_or(usize::MAX);
+    Ok(n.clamp(1, AreaOptions::MAX_ROWS_COLUMNS))
 }
 
 /// How area type and its frame fit each other. Serialized as `"none"`, `"autoHeight"` or
@@ -924,7 +1076,49 @@ pub struct TextObject {
     pub cached_baselines: Vec<(Point, Point)>,
 }
 
+/// Conversion from stored character attributes to document-space type controls.
+/// Point size follows the transformed em-height axis; horizontal scale is the ratio of
+/// the two transformed em axes. Rotation, reflection and shear remain in the affine.
+#[derive(Clone, Copy, Debug)]
+pub struct TextStyleScale {
+    pub points: f64,
+    pub horizontal: f64,
+}
+
 impl TextObject {
+    /// None for collapsed or unrepresentable transforms, whose type dimensions cannot
+    /// be edited by compensating the stored attributes.
+    pub fn style_scale(&self) -> Option<TextStyleScale> {
+        let [a, b, c, d, e, f] = self.xf.as_coeffs();
+        if ![a, b, c, d, e, f].iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let (sx, sy) = (a.hypot(b), c.hypot(d));
+        let determinant = (a / sx) * (d / sy) - (b / sx) * (c / sy);
+        let horizontal = sx / sy;
+        if !sy.is_finite() || sy <= 0.0 || !horizontal.is_finite() || horizontal <= 0.0 || !determinant.is_finite() || determinant.abs() <= 1e-12 {
+            return None;
+        }
+        // Avoid a pure rotation turning otherwise identical fields into mixed values.
+        let unit = |v: f64| if (v - 1.0).abs() <= 1e-12 { 1.0 } else { v };
+        Some(TextStyleScale { points: unit(sy), horizontal: unit(horizontal) })
+    }
+
+    /// Character attributes as presented by controls (stored runs stay local for layout
+    /// and rich-text clipboard operations). Explicit vertical character scale stays separate.
+    pub fn effective_char_style(&self, style: &CharStyle) -> Option<CharStyle> {
+        let scale = self.style_scale()?;
+        let mut style = style.clone();
+        style.size *= scale.points;
+        style.leading = style.leading.map(|v| v * scale.points);
+        style.baseline_shift *= scale.points;
+        style.h_scale *= scale.horizontal;
+        if ![style.size, style.leading.unwrap_or(0.0), style.baseline_shift, style.h_scale].iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        Some(style)
+    }
+
     pub fn point(origin: Point, text: &str, style: CharStyle) -> Self {
         Self {
             vertical: false,
@@ -1159,6 +1353,42 @@ impl TextObject {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Digits map every digit of the three sets into the chosen one, leave the rest alone, and
+    /// are saved only when set.
+    #[test]
+    fn digits_map_between_the_numeral_systems() {
+        let map = |d: Digits, s: &str| -> String { s.chars().map(|c| d.map(c)).collect() };
+        for s in ["0123456789", "٠١٢٣٤٥٦٧٨٩", "۰۱۲۳۴۵۶۷۸۹"] {
+            assert_eq!(map(Digits::Default, s), s);
+            assert_eq!(map(Digits::Arabic, s), "0123456789");
+            assert_eq!(map(Digits::Hindi, s), "٠١٢٣٤٥٦٧٨٩");
+            assert_eq!(map(Digits::Farsi, s), "۰۱۲۳۴۵۶۷۸۹");
+        }
+        // Letters, punctuation and other scripts' digits (Devanagari ३) are not digits of these sets.
+        assert_eq!(map(Digits::Hindi, "a-Z ३ ٪ ۔"), "a-Z ३ ٪ ۔");
+        let st = CharStyle::default();
+        assert!(serde_json::to_value(&st).unwrap().get("digits").is_none());
+        let farsi = CharStyle { digits: Digits::Farsi, ..CharStyle::default() };
+        assert_eq!(serde_json::to_value(&farsi).unwrap()["digits"], "farsi");
+        // Styles written before the attribute existed (no `digits` key) read as Default.
+        let old = serde_json::to_value(&st).unwrap();
+        assert_eq!(serde_json::from_value::<CharStyle>(old).unwrap().digits, Digits::Default);
+        assert_eq!(serde_json::from_value::<CharStyle>(serde_json::to_value(&farsi).unwrap()).unwrap(), farsi);
+    }
+
+    #[test]
+    fn character_controls_reject_collapsed_and_nonfinite_transforms() {
+        let mut t = TextObject::point(Point::ZERO, "Text", CharStyle::default());
+        for matrix in [[0.0; 6], [1.0, 1.0, 2.0, 2.0, 0.0, 0.0], [f64::INFINITY, 0.0, 0.0, 1.0, 0.0, 0.0], [1.0, 0.0, 0.0, 1.0, f64::NAN, 0.0]] {
+            t.xf = Affine::new(matrix);
+            assert!(t.effective_char_style(&t.first_style()).is_none());
+        }
+        t.xf = Affine::rotate(0.83);
+        assert_eq!(t.effective_char_style(&t.first_style()).unwrap().size, 12.0);
+        t.xf = Affine::scale(1e308);
+        assert!(t.effective_char_style(&t.first_style()).is_none(), "overflowing point size");
+    }
 
     #[test]
     fn point_text_basics() {

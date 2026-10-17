@@ -1,16 +1,18 @@
 //! PDF → Document (hayro-interpret device that builds a VectorCraft node tree).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use hayro_interpret::font::Glyph;
-use hayro_interpret::hayro_cmap::BfString;
-use hayro_interpret::pattern::{Pattern, TilingPattern};
-use hayro_interpret::{
+use craft_pdf::interpret::font::Glyph;
+use craft_pdf::interpret::hayro_cmap::BfString;
+use craft_pdf::interpret::pattern::{Pattern, TilingPattern};
+use craft_pdf::interpret::{
     CacheKey, ClipPath, Context, Device, GlyphDrawMode, Image, ImageData, InterpreterCache, InterpreterSettings, InterpreterWarning, LumaData,
-    MaskType, PathDrawMode, SoftMask, StrokeProps, interpret_page,
+    MaskType, PathDrawMode, SoftMask, StrokeProps,
 };
-use hayro_syntax::object::Name;
+use craft_pdf::syntax::object::Name;
+use craft_pdf::syntax::page::Page;
 use kurbo::{Affine, BezPath, PathEl, Rect, Shape};
 use vectorcraft_color::{BlendMode, Color, Paint, Swatch};
 use vectorcraft_doc::{
@@ -21,13 +23,20 @@ use vectorcraft_geom::{FillRule, PathData};
 
 use crate::import_color::{Colors, Native};
 use crate::import_mask::{MaskSpec, contains, is_rectangle, luminance, mask_spec, white_cover};
-use crate::import_scan::{MAX_NESTING, Ocgs, Scan, all_on, hides_forms, scan_page, tag_key};
-use crate::import_shading::{clipped, extend_clip, fold_stop_opacity, mesh_shading, shading_gradient};
+use crate::import_scan::{FontNames, MAX_NESTING, Ocgs, Scan, TextOverprint, Walked, all_on, hides_forms, scan_page, tag_key};
+use crate::import_shading::{clipped, extend_clip, fold_stop_opacity, gradient_shape, mesh_shading, shading_gradient};
 use crate::import_text::{Families, LineFacts, Look, Placement, TextLine, Upright};
 use crate::{CropTo, ImportOptions, ImportReport, PdfError, TextAs};
 
+/// Mixed into an image's cache key when it is read white inside an alpha soft mask.
+const WHITE_KEY: u128 = 0x7717_e000_a1fa;
 /// The name of the paths text imports as.
 const TEXT_OUTLINES: &str = "<Text Outlines>";
+/// A page whose overprint (ISO 32000-1 §8.6.7) is left out rather than given to the wrong objects.
+const OVERPRINT_UNREAD: &str = "the overprint of a page's objects couldn't be read: they knock out";
+/// The document overprints as overprint mode 1 does.
+const OVERPRINT_ZERO_MODE: &str =
+    "overprint in the mode where a process colour's zero tints knock out (/OPM 0) is imported as overprint, where they don't";
 /// The deepest soft masks, patterns and type 3 glyphs are read within each other.
 const MAX_NESTED: u32 = 8;
 /// A tiling pattern read this many times with the same art is taken to always draw it.
@@ -132,22 +141,50 @@ fn group_layer(
 
 /// The note on a file carrying an editor's private data (#472): its PDF part, the one read, holds
 /// only the art on its artboards (art on the pasteboard is in the private data alone).
-pub(crate) const OFF_ARTBOARD_NOTE: &str =
+pub const OFF_ARTBOARD_NOTE: &str =
     "only the PDF-compatible part of this file was read: art outside its artboards is kept in the editor's private data alone, so it doesn't open";
+
+/// Warning: art reaching past the page box was clipped to it.
+pub const PAST_PAGE_NOTE: &str = "art reaching past the page was clipped to it, as PDF viewers show it";
 
 /// Import a PDF, returning the document plus warnings about content that was approximated or skipped.
 pub fn import_with_report(bytes: &[u8], opts: &ImportOptions) -> Result<ImportReport, PdfError> {
-    let original = crate::pages::open(bytes, opts.password.as_deref())?;
+    // The interpreter draws forms, patterns, glyphs and masks inside one another by recursion, in
+    // large stack frames: it caps that (50 deep), and gets room for the cap whatever thread asks.
+    vectorcraft_doc::depth::with_deep_stack(|| read(bytes, opts))
+}
+
+/// [`import_with_report`] on the thread that asks.
+pub(crate) fn read(bytes: &[u8], opts: &ImportOptions) -> Result<ImportReport, PdfError> {
+    read_with_reader_options(bytes, opts, &crate::pages::open_options())
+}
+
+#[cfg(test)]
+pub(crate) fn import_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_pdf::OpenOptions) -> Result<ImportReport, PdfError> {
+    vectorcraft_doc::depth::with_deep_stack(|| read_with_reader_options(bytes, opts, reader))
+}
+
+fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_pdf::OpenOptions) -> Result<ImportReport, PdfError> {
+    let original = crate::pages::open_with_options(bytes, opts.password.as_deref(), reader)?;
     let picked = crate::pages::picked(opts, original.pages().len())?;
     let mut ocgs = Ocgs::read(&original);
     let route = opts.layers && !ocgs.list.is_empty();
     // Content that is off imports as hidden layers: an update of the file turns every group on
     // (unless a form is hidden by its own group: its art couldn't be told apart).
     let hide = route && ocgs.skips_any();
-    let turned_on = (hide && !picked.iter().filter_map(|&n| original.pages().get(n)).any(|p| hides_forms(p, &mut ocgs)))
+    let mut hidden_form = false;
+    if hide {
+        for page in picked.iter().filter_map(|&n| original.pages().get(n)) {
+            hidden_form |= hides_forms(page, &mut ocgs, original.decode_limits().max_decoded_stream())?;
+            if hidden_form {
+                break;
+            }
+        }
+    }
+    let turned_on = (hide && !hidden_form)
         .then(|| all_on(bytes, &original))
         .flatten()
-        .and_then(|b| crate::pages::open(&b, opts.password.as_deref()).ok())
+        .and_then(|b| crate::pages::open_with_options(&b, opts.password.as_deref(), reader).ok())
         .filter(|p| Ocgs::read(p).list.is_empty());
     let mut notes = vec![];
     if hide && turned_on.is_none() {
@@ -159,11 +196,18 @@ pub fn import_with_report(bytes: &[u8], opts: &ImportOptions) -> Result<ImportRe
 
     let sink: Arc<Mutex<Vec<String>>> = Arc::default();
     let sink2 = sink.clone();
+    let incomplete = Arc::new(AtomicBool::new(false));
+    let incomplete_sink = incomplete.clone();
     let settings = InterpreterSettings {
+        preserve_path_geometry: true,
         warning_sink: Arc::new(move |w| {
             let msg = match w {
                 InterpreterWarning::UnsupportedFont => "a font could not be read; its text was skipped",
                 InterpreterWarning::ImageDecodeFailure => "an image could not be decoded and was skipped",
+                InterpreterWarning::ContentTruncated => {
+                    incomplete_sink.store(true, Ordering::Relaxed);
+                    return;
+                }
             };
             if let Ok(mut v) = sink2.lock()
                 && !v.iter().any(|x| x == msg)
@@ -186,10 +230,14 @@ pub fn import_with_report(bytes: &[u8], opts: &ImportOptions) -> Result<ImportRe
     b.unsure = route && ocgs.list.iter().any(|g| (all_on && !g.on) || !g.print);
     b.taken = taken;
     b.warnings = notes;
+    b.colors.uncalibrated_rgb = opts.uncalibrated_rgb && picked.iter().filter_map(|&n| pages.get(n)).any(crate::pages::has_private_data);
     let cache = InterpreterCache::new();
     let mut x = 0.0;
-    // Every page only a placeholder (text) over private data: the file's art isn't in its PDF part.
-    let mut placeholder = true;
+    // Where the next page's art may begin (a `.ai` page's art reaches past its artboard).
+    let mut clear = f64::NEG_INFINITY;
+    // Every page only text over private data: a file saved without its PDF part shows a notice
+    // there, not its art. A page that states where its art is isn't that notice.
+    let (mut only_text, mut art_boxes) = (true, false);
     let mut slots: Vec<Slot> = vec![];
     let mut group_art: HashMap<usize, Vec<Arc<Node>>> = HashMap::new();
     let mut nesting = Nesting::new();
@@ -197,20 +245,39 @@ pub fn import_with_report(bytes: &[u8], opts: &ImportOptions) -> Result<ImportRe
     let (mut order, mut known) = (vec![], HashSet::new());
     for (i, &number) in picked.iter().enumerate() {
         let Some(page) = pages.get(number) else { continue };
+        // Artboards on the trim boxes have the bleed boxes round them as the document's bleed
+        // (the widest of the pages' on each side), so the art there shows and prints as bleed.
+        if opts.crop == CropTo::Trim {
+            for (side, b) in doc.setup.bleed.iter_mut().zip(crate::pages::bleed(page)) {
+                *side = side.max(b);
+            }
+        }
         // The chosen box sits at (x, 0); the page draws round it.
         let (init, frame) = crate::pages::frame(page, opts.crop);
         let mut ab = Rect::new(x, 0.0, x + frame.width(), frame.height());
         let xf = Affine::translate((x - frame.x0, -frame.y0)) * init;
         let mut ctx = Context::new(xf, ab, &cache, pdf.xref(), settings.clone());
         b.page = ab;
-        let scan = scan_page(page, &mut ocgs, all_on, &mut b.fonts);
+        // The first id of this page's art.
+        let first_id = b.next;
+        let mut scan = scan_page(page, &mut ocgs, all_on, &mut b.fonts, pdf.decode_limits().max_decoded_stream())?;
+        // The walk's ink names pick between spaces of inks that look the same to the interpreter. A
+        // page keeps them only when it uses such an ink and the interpreter draws as many paths
+        // there as the walk counts.
+        let tied = scan.inks.iter().any(|n| b.colors.tied(n));
+        if !(tied && drawn_paths(page, Context::new(xf, ab, &cache, pdf.xref(), settings.clone())) == Some(scan.paints.len())) {
+            scan.inks.clear();
+        }
         if route {
             let mut seen = HashSet::new();
             let marked: Vec<usize> = scan.tags.iter().filter_map(|(_, g)| g.map(|g| top_group(g, &ocgs))).filter(|g| seen.insert(*g)).collect();
             merge_order(&mut order, &mut known, &marked);
         }
         b.begin_page(scan);
-        interpret_page(page, &mut ctx, &mut b);
+        craft_pdf::interpret_page(page, &mut ctx, &mut b).map_err(|e| PdfError::Parse(e.to_string()))?;
+        if incomplete.load(Ordering::Relaxed) {
+            return Err(crate::import_scan::incomplete_content());
+        }
         let mut parts = b.end_page();
         // A PDF-compatible `.ai` (the editor's private data next to the PDF art).
         let ai = crate::pages::has_private_data(page);
@@ -227,8 +294,55 @@ pub fn import_with_report(bytes: &[u8], opts: &ImportOptions) -> Result<ImportRe
             }
             parts.retain(|(_, art)| !art.is_empty());
         }
+        // Viewers show a page through its crop box, so art reaching past it (a mock-up backdrop
+        // around the page, say) never showed. A clip to the page box that the file states is
+        // dropped as redundant (by hayro and by `push_clip_path`), so restore the box here:
+        // each object reaching past it keeps its own clip, which Fit to Artwork Bounds and
+        // `CropTo::Bounding` then respect.
+        // Supacolour print policy: the CropBox is what prints, even for PDF-compatible
+        // `.ai` files and whichever box the artboard takes. Keep the visible page boundary.
+        let shown = xf.transform_rect_bbox(crate::pages::page_box(page, CropTo::Crop));
+        let page_box = shown.inflate(0.01, 0.01);
+        let mut clipped = false;
+        for (_, art) in &mut parts {
+            for n in art.iter_mut() {
+                if n.visual_bounds().is_some_and(|r| !contains(page_box, r)) {
+                    let clip = Arc::new(b.clip_node(&shown.to_path(0.1), FillRule::NonZero));
+                    *n = Arc::new(Node::new(b.id(), NodeKind::Group { children: vec![clip, n.clone()], clip: true }));
+                    clipped = true;
+                }
+            }
+        }
+        if clipped {
+            b.warn(PAST_PAGE_NOTE);
+        }
+        // Keep the defensive page-spacing calculation for unusual page boxes. With the print
+        // crop applied above, ordinary `.ai` pages already fit and do not move right.
+        let mut art_right = f64::NEG_INFINITY;
+        if ai && let Some(art) = parts.iter().flat_map(|(_, v)| v.iter()).filter_map(|n| n.visual_bounds()).reduce(|a, b| a.union(b)) {
+            // Art at a coordinate that isn't a number (a damaged file) moves nothing.
+            let dx = Some((clear - art.x0).max(0.0)).filter(|dx| dx.is_finite()).unwrap_or(0.0);
+            if dx > 0.0 {
+                let shift = Affine::translate((dx, 0.0));
+                for (_, v) in &mut parts {
+                    for n in v.iter_mut() {
+                        Arc::make_mut(n).transform(shift, false);
+                    }
+                }
+                // What the page's lines of type were is told where their glyphs are (the outlines
+                // stroked on them are looked for there), so that moves with them.
+                for facts in b.lines.iter_mut().filter(|(id, _)| id.0 >= first_id).map(|(_, facts)| facts) {
+                    for ink in &mut facts.ink {
+                        *ink = *ink + kurbo::Vec2::new(dx, 0.0);
+                    }
+                }
+                ab = Rect::new(ab.x0 + dx, ab.y0, ab.x1 + dx, ab.y1);
+            }
+            art_right = art.x1 + dx;
+        }
         let children: Vec<Arc<Node>> = parts.iter().flat_map(|(_, v)| v.iter().cloned()).collect();
-        placeholder &= ai && only_text(&children);
+        only_text &= ai && is_only_text(&children);
+        art_boxes |= crate::pages::states_art(page);
         let mut right = ab.x1;
         if opts.crop == CropTo::Bounding
             && let Some(art) = vectorcraft_doc::live::nodes_bounds(&children)
@@ -237,6 +351,7 @@ pub fn import_with_report(bytes: &[u8], opts: &ImportOptions) -> Result<ImportRe
             ab = art;
         }
         x = right + opts.artboard_gap;
+        clear = right.max(art_right) + opts.artboard_gap;
         doc.artboards.push(Artboard {
             id: i as u32 + 1,
             name: format!("Artboard {}", i + 1),
@@ -270,7 +385,7 @@ pub fn import_with_report(bytes: &[u8], opts: &ImportOptions) -> Result<ImportRe
             }
         }
     }
-    if placeholder {
+    if only_text && !art_boxes {
         return Err(PdfError::PlaceholderOnly);
     }
     // A group the pages mark but draw nothing in is an empty layer, as the editor had it.
@@ -310,7 +425,8 @@ pub fn import_with_report(bytes: &[u8], opts: &ImportOptions) -> Result<ImportRe
     // A file painted mostly in CMYK opens as a CMYK document (with CMYK default swatches).
     if b.colors.cmyk_document() {
         doc.color_mode = ColorMode::Cmyk;
-        (doc.swatches, doc.swatch_groups) = vectorcraft_color::default_swatches(ColorMode::Cmyk.model());
+        let (swatches, groups) = vectorcraft_color::default_swatches(ColorMode::Cmyk.model());
+        (doc.swatches, doc.swatch_groups) = (swatches.into(), groups.into());
     }
     doc.swatches.extend(b.colors.swatches());
     // Tiling patterns are pattern swatches.
@@ -330,6 +446,7 @@ pub fn import_with_report(bytes: &[u8], opts: &ImportOptions) -> Result<ImportRe
         let list = b.missing_fonts.join(", ");
         b.warn(&format!("fonts that aren't available show in the fallback font until they are: {list}"));
     }
+    crate::preserve::capture(&mut doc, &pdf, &picked, opts.crop, &mut b.warnings);
     doc.fix_next_id();
     doc.reserve_ids(b.next);
 
@@ -341,7 +458,39 @@ pub fn import_with_report(bytes: &[u8], opts: &ImportOptions) -> Result<ImportRe
             }
         }
     }
-    Ok(ImportReport { document: doc, warnings, native: crate::editing::editing_in(&pdf) })
+    if opts.reject_depth_loss && doc.too_deep(None) {
+        return Err(PdfError::Unsupported(format!(
+            "this PDF exceeds the editable nesting limit ({} levels); opening it would discard clipping or mask information",
+            vectorcraft_doc::depth::MAX_DEPTH
+        )));
+    }
+    doc.limit_depth_noting(&mut warnings);
+    let user_unit = picked.first().and_then(|&n| pages.get(n)).map_or(1.0, |page| f64::from(page.user_unit()));
+    Ok(ImportReport { document: doc, warnings, native: crate::editing::editing_in(&pdf), only_text, user_unit })
+}
+
+/// How many paths the interpreter draws on `page` (each fill and each stroke), leaving out those
+/// of soft masks, pattern cells and type 3 glyphs, which [`Builder`] reads nested. `None` when the
+/// interpreter fails.
+fn drawn_paths<'a>(page: &'a Page<'a>, mut ctx: Context<'a>) -> Option<usize> {
+    struct Count(usize);
+    impl<'a> Device<'a> for Count {
+        fn set_soft_mask(&mut self, _: Option<SoftMask<'a>>) {}
+        fn set_blend_mode(&mut self, _: craft_pdf::interpret::BlendMode) {}
+        // As `Builder::draw_path` takes them: each fill and each stroke.
+        fn draw_path(&mut self, _: &BezPath, _: Affine, _: &craft_pdf::interpret::Paint<'a>, _: &PathDrawMode) {
+            self.0 += 1;
+        }
+        fn push_clip_path(&mut self, _: &ClipPath) {}
+        fn push_transparency_group(&mut self, _: f32, _: Option<SoftMask<'a>>, _: craft_pdf::interpret::BlendMode) {}
+        fn draw_glyph(&mut self, _: &Glyph<'a>, _: Affine, _: Affine, _: &craft_pdf::interpret::Paint<'a>, _: &GlyphDrawMode) {}
+        fn draw_image(&mut self, _: Image<'a, '_>, _: Affine) {}
+        fn pop_clip_path(&mut self) {}
+        fn pop_transparency_group(&mut self) {}
+    }
+    let mut count = Count(0);
+    craft_pdf::interpret_page(page, &mut ctx, &mut count).ok()?;
+    Some(count.0)
 }
 
 /// The characters of a CID-keyed CFF font embedded without a ToUnicode map (as macOS writes
@@ -350,7 +499,7 @@ pub fn import_with_report(bytes: &[u8], opts: &ImportOptions) -> Result<ImportRe
 pub(crate) struct CidText {
     /// CID of each glyph.
     cids: Vec<u16>,
-    table: hayro_interpret::hayro_cmap::CMap,
+    table: craft_pdf::interpret::hayro_cmap::CMap,
 }
 
 impl CidText {
@@ -359,7 +508,7 @@ impl CidText {
         if data.len() > 64 << 20 {
             return None;
         }
-        use hayro_interpret::hayro_cmap::{CMap, CMapName, load_embedded};
+        use craft_pdf::interpret::hayro_cmap::{CMap, CMapName, load_embedded};
         use skrifa::raw::ps::cff::{CffFontRef, dict, v1::Cff};
         use skrifa::raw::{FontData, FontRead};
         let cff = Cff::read(FontData::new(data)).ok()?;
@@ -381,10 +530,37 @@ impl CidText {
         Some(Self { cids, table })
     }
 
-    fn unicode(&self, glyph: u32) -> Option<hayro_interpret::hayro_cmap::BfString> {
+    fn unicode(&self, glyph: u32) -> Option<craft_pdf::interpret::hayro_cmap::BfString> {
         let cid = *self.cids.get(glyph as usize)?;
         self.table.lookup_bf_string(u32::from(cid))
     }
+}
+
+/// A ToUnicode value that names no character: U+FFFD alone (#708).
+fn replacement(u: &craft_pdf::interpret::hayro_cmap::BfString) -> bool {
+    use craft_pdf::interpret::hayro_cmap::BfString;
+    match u {
+        BfString::Char(c) => *c == char::REPLACEMENT_CHARACTER,
+        BfString::String(s) => !s.is_empty() && s.chars().all(|c| c == char::REPLACEMENT_CHARACTER),
+    }
+}
+
+/// The character of each glyph of an embedded TrueType or OpenType font program, from its own
+/// `cmap` (the first character mapped to each glyph); `None` for a bare CFF or a font without one.
+pub(crate) fn font_chars(data: &[u8]) -> Option<HashMap<u32, char>> {
+    use skrifa::MetadataProvider;
+    // As for CidText: whole fonts are some megabytes.
+    if data.len() > 64 << 20 {
+        return None;
+    }
+    let font = skrifa::FontRef::new(data).ok()?;
+    let mut chars = HashMap::new();
+    for (c, g) in font.charmap().mappings() {
+        if let Some(c) = char::from_u32(c).filter(|c| !c.is_control()) {
+            chars.entry(g.to_u32()).or_insert(c);
+        }
+    }
+    (!chars.is_empty()).then_some(chars)
 }
 
 /// The ideographs of the Kangxi radicals U+2F00–U+2FD5 (their NFKC forms): the CID → Unicode
@@ -395,7 +571,7 @@ const KANGXI: &str = "一丨丶丿乙亅二亠人儿入八冂冖冫几凵刀力�
 /// largest difference between their boxes, in thousandths of an em. `None` when they are clearly
 /// different glyphs (or the face lacks the character); `Some(0)` when there is nothing to compare
 /// (several characters, a vertical form, no ink in either).
-fn glyph_deviation(face: &vectorcraft_text::FontFace, text: &str, o: &hayro_interpret::font::OutlineGlyph, vertical: bool) -> Option<f64> {
+fn glyph_deviation(face: &vectorcraft_text::FontFace, text: &str, o: &craft_pdf::interpret::font::OutlineGlyph, vertical: bool) -> Option<f64> {
     let Some(c) = comparable(text, vertical) else { return Some(0.0) };
     let gid = face.glyph_for(c);
     if gid == 0 {
@@ -425,7 +601,7 @@ fn glyph_deviation(face: &vectorcraft_text::FontFace, text: &str, o: &hayro_inte
 fn matching_face(
     face: &Arc<vectorcraft_text::FontFace>,
     text: &str,
-    o: &hayro_interpret::font::OutlineGlyph,
+    o: &craft_pdf::interpret::font::OutlineGlyph,
     vertical: bool,
 ) -> Option<Arc<vectorcraft_text::FontFace>> {
     let own = glyph_deviation(face, text, o, vertical);
@@ -433,8 +609,12 @@ fn matching_face(
         return Some(face.clone());
     }
     let db = vectorcraft_text::FontDb::global();
-    let others =
+    // Other installed versions of its family and style (a font library keeps old ones), then the
+    // family's other styles.
+    let versions = db.versions(face).into_iter().skip(1).take(16);
+    let styles =
         db.styles(&face.family).into_iter().filter(|s| !s.eq_ignore_ascii_case(&face.style)).take(64).filter_map(|s| db.face(&face.family, &s));
+    let others = versions.chain(styles);
     let mut best = own.map(|d| (d, face.clone()));
     for f in others {
         if let Some(d) = glyph_deviation(&f, text, o, vertical)
@@ -444,6 +624,46 @@ fn matching_face(
         }
     }
     best.map(|(_, f)| f)
+}
+
+/// The characters a glyph no mapping names is looked for among (#811): those single-byte fonts
+/// encode (ASCII, Latin-1, Latin Extended-A, general punctuation, the euro and trade mark signs,
+/// the fi and fl ligatures).
+const IDENTIFIABLE: [std::ops::RangeInclusive<u32>; 6] =
+    [0x21..=0x7E, 0xA1..=0x17F, 0x2010..=0x2044, 0x20AC..=0x20AC, 0x2122..=0x2122, 0xFB01..=0xFB02];
+
+/// The character whose glyph in installed `face` draws `embedded` (a glyph outline in thousandths
+/// of an em, y up): the first of [`IDENTIFIABLE`] with the same outline, point for point. A subset
+/// font embedded without a character map still carries the font's own outlines, so a glyph whose
+/// subset code names nothing is found this way. `None` when no glyph matches (another version of
+/// the font, or a glyph that is no character), and for empty glyphs, which every space draws.
+pub(crate) fn identify_glyph(face: &vectorcraft_text::FontFace, embedded: &BezPath) -> Option<char> {
+    if embedded.elements().is_empty() {
+        return None;
+    }
+    let k = 1000.0 / face.units_per_em();
+    // Installed outlines are y-down in font units.
+    let to_pdf = Affine::new([k, 0.0, 0.0, -k, 0.0, 0.0]);
+    let db = vectorcraft_text::FontDb::global();
+    IDENTIFIABLE.iter().cloned().flatten().filter_map(char::from_u32).find(|c| {
+        let gid = face.glyph_for(*c);
+        gid != 0 && same_shape(embedded, &(to_pdf * db.outline(face, gid).as_ref().clone()))
+    })
+}
+
+/// Do outlines `a` and `b` draw the same segments, every point within 2/1000 em (closing
+/// commands aside)?
+fn same_shape(a: &BezPath, b: &BezPath) -> bool {
+    let drawn = |p: &BezPath| p.elements().iter().filter(|e| !matches!(e, PathEl::ClosePath)).copied().collect::<Vec<_>>();
+    let (a, b) = (drawn(a), drawn(b));
+    let near = |p: kurbo::Point, q: kurbo::Point| (p - q).hypot() <= 2.0;
+    a.len() == b.len()
+        && a.iter().zip(&b).all(|(x, y)| match (x, y) {
+            (PathEl::MoveTo(p), PathEl::MoveTo(q)) | (PathEl::LineTo(p), PathEl::LineTo(q)) => near(*p, *q),
+            (PathEl::QuadTo(p1, p2), PathEl::QuadTo(q1, q2)) => near(*p1, *q1) && near(*p2, *q2),
+            (PathEl::CurveTo(p1, p2, p3), PathEl::CurveTo(q1, q2, q3)) => near(*p1, *q1) && near(*p2, *q2) && near(*p3, *q3),
+            _ => false,
+        })
 }
 
 /// The character of glyph `text` when its outline can be compared with an installed font's: a
@@ -494,7 +714,7 @@ fn drop_page_fill(parts: &mut Vec<(Option<usize>, Vec<Arc<Node>>)>, page: Rect) 
 }
 
 /// Is this art text and nothing else (in groups and clips), with some text?
-fn only_text(nodes: &[Arc<Node>]) -> bool {
+fn is_only_text(nodes: &[Arc<Node>]) -> bool {
     fn walk(nodes: &[Arc<Node>], text: &mut bool) -> bool {
         nodes.iter().all(|n| match &n.kind {
             NodeKind::Path { clipping: true, .. } => true,
@@ -561,6 +781,7 @@ struct GlyphRun {
     opacity: f32,
     stroke: Option<StrokeProps>,
     scale: f64,
+    overprint: bool,
 }
 
 /// How often a tiling pattern was read, and the art (as its paints) each reading drew with the
@@ -592,18 +813,30 @@ struct Builder<'p> {
     image_keys: HashMap<u128, (String, u32, u32)>,
     /// The images kept with their CMYK samples ([`crate::import_image`]).
     cmyk_keys: HashSet<u128>,
+    /// Mask keys of CMYK images whose mask turned out to hide nothing.
+    opaque: HashSet<u128>,
     warnings: Vec<String>,
-    /// Fonts by cache key → base font name (from [`scan_page`]).
-    fonts: HashMap<u128, String>,
+    /// Fonts by cache key → base font name and whether the file carries its glyphs (from
+    /// [`scan_page`]).
+    fonts: FontNames,
     font_names: HashMap<u128, FontInfo>,
     families: Option<Families>,
     missing_fonts: Vec<String>,
     /// Font (cache key) → its characters by glyph, for CID-keyed fonts embedded without a
     /// ToUnicode map.
     cid_text: HashMap<u128, Option<Arc<CidText>>>,
+    /// Font (cache key) → the character of each glyph its embedded font program maps
+    /// ([`font_chars`]), for glyphs the file's ToUnicode map doesn't name (#708).
+    font_chars: HashMap<u128, Option<Arc<HashMap<u32, char>>>>,
     /// Font (cache key) → the installed face that draws its glyphs, decided from its first glyph
     /// that can be compared ([`matching_face`]); `None`: its glyphs differ, so it stays outlines.
     matched: HashMap<u128, Option<Arc<vectorcraft_text::FontFace>>>,
+    /// (Font, glyph) → the character its outline matches in the installed face, for glyphs no
+    /// mapping names ([`Builder::identified_char`]).
+    identified: HashMap<(u128, u32), Option<char>>,
+    /// Per font: the installed version its type names, when it isn't the one its family and style
+    /// resolve to (see `CharStyle::font_version`).
+    versions: HashMap<u128, Option<String>>,
     /// The soft mask of the graphics state, the art drawn through it so far, and the masks read.
     mask: Option<Arc<MaskSpec>>,
     masked: Vec<Arc<Node>>,
@@ -617,6 +850,8 @@ struct Builder<'p> {
     scan: Scan,
     tag_at: usize,
     group_at: usize,
+    /// The fills and strokes of paths drawn so far ([`Scan::paints`]).
+    paint_at: usize,
     aligned: bool,
     /// Whether optional content groups become layers.
     route: bool,
@@ -628,14 +863,18 @@ struct Builder<'p> {
     /// A transparency group was just pushed: a form's (whose flags come next) or an image's.
     pending: bool,
     nested: u32,
+    /// Reading an alpha soft mask's art: images are read white with their own alpha, so the
+    /// mask's luminance is their alpha, as whitened vector art's is (cairo, and so Inkscape,
+    /// rasterizes masks into such images).
+    white_images: bool,
     /// The last filled path: its node and its outline (a stroke of the same outline joins it).
     last_fill: Option<(NodeId, BezPath)>,
     /// What each line of type made tells beyond its text object ([`crate::import_lines`]).
     lines: HashMap<NodeId, LineFacts>,
 }
 
-fn blend(b: hayro_interpret::BlendMode) -> BlendMode {
-    use hayro_interpret::BlendMode as H;
+fn blend(b: craft_pdf::interpret::BlendMode) -> BlendMode {
+    use craft_pdf::interpret::BlendMode as H;
     match b {
         H::Normal => BlendMode::Normal,
         H::Multiply => BlendMode::Multiply,
@@ -656,15 +895,15 @@ fn blend(b: hayro_interpret::BlendMode) -> BlendMode {
     }
 }
 
-fn fill_rule(r: hayro_interpret::FillRule) -> FillRule {
+fn fill_rule(r: craft_pdf::interpret::FillRule) -> FillRule {
     match r {
-        hayro_interpret::FillRule::NonZero => FillRule::NonZero,
-        hayro_interpret::FillRule::EvenOdd => FillRule::EvenOdd,
+        craft_pdf::interpret::FillRule::NonZero => FillRule::NonZero,
+        craft_pdf::interpret::FillRule::EvenOdd => FillRule::EvenOdd,
     }
 }
 
 /// `p` with every subpath closed: how a fill reads it.
-fn closed_subpaths(p: &BezPath) -> BezPath {
+pub(crate) fn closed_subpaths(p: &BezPath) -> BezPath {
     let mut out = BezPath::new();
     let mut open = false;
     for el in p.elements() {
@@ -743,13 +982,17 @@ impl<'p> Builder<'p> {
             images: HashMap::new(),
             image_keys: HashMap::new(),
             cmyk_keys: HashSet::new(),
+            opaque: HashSet::new(),
             warnings: vec![],
             fonts: HashMap::new(),
             font_names: HashMap::new(),
             families: None,
             missing_fonts: vec![],
             cid_text: HashMap::new(),
+            font_chars: HashMap::new(),
             matched: HashMap::new(),
+            identified: HashMap::new(),
+            versions: HashMap::new(),
             mask: None,
             masked: vec![],
             masks: HashMap::new(),
@@ -759,12 +1002,14 @@ impl<'p> Builder<'p> {
             scan: Scan::default(),
             tag_at: 0,
             group_at: 0,
+            paint_at: 0,
             aligned: true,
             route,
             unsure: false,
             marked: vec![],
             pending: false,
             nested: 0,
+            white_images: false,
             last_fill: None,
             lines: HashMap::new(),
         }
@@ -809,12 +1054,52 @@ impl<'p> Builder<'p> {
         self.masked.clear();
         self.marked.clear();
         self.pending = false;
-        (self.scan, self.tag_at, self.group_at, self.aligned) = (scan, 0, 0, true);
+        (self.scan, self.tag_at, self.group_at, self.aligned, self.paint_at) = (scan, 0, 0, true, 0);
+    }
+
+    /// Whether the path the interpreter draws now (a fill or a stroke, each counted) overprints. It
+    /// takes the path's turn in the page's walk.
+    fn path_overprint(&mut self) -> bool {
+        if self.nested > 0 {
+            return false;
+        }
+        self.paint_at += 1;
+        self.scan.overprints && self.scan.paints.get(self.paint_at - 1).copied().unwrap_or(false)
+    }
+
+    /// What the interpreter draws now, as the page's walk counts it: the path whose turn comes
+    /// next, or the `text` before it. `None` in a nested reading, which the walk doesn't follow.
+    fn walked(&self, text: bool) -> Option<Walked> {
+        (self.nested == 0).then_some(if text { Walked::Text(self.paint_at) } else { Walked::Path(self.paint_at) })
+    }
+
+    /// Whether the glyph the interpreter draws now (its fill, or its `stroke`) overprints.
+    fn glyph_overprint(&mut self, stroke: bool) -> bool {
+        if self.scan.overprints && self.scan.zero_mode {
+            self.warn(OVERPRINT_ZERO_MODE);
+        }
+        if self.nested > 0 || !self.scan.overprints {
+            return false;
+        }
+        match self.scan.texts.get(self.paint_at) {
+            Some(TextOverprint::All { fill, stroke: s }) => *if stroke { s } else { fill },
+            Some(TextOverprint::Mixed) => {
+                self.warn("some text is set to overprint in a way that can't be read: it knocks out");
+                false
+            }
+            _ => false,
+        }
     }
 
     /// The page's art, split by optional content group (in the order they first paint).
     fn end_page(&mut self) -> Vec<(Option<usize>, Vec<Arc<Node>>)> {
-        let children = self.close_frames();
+        let mut children = self.close_frames();
+        // The interpreter drew another number of paths than the file was read to paint: which
+        // of them overprint can't be trusted.
+        if self.scan.overprints && self.paint_at != self.scan.paints.len() {
+            children.iter_mut().for_each(vectorcraft_doc::overprint::clear_overprints);
+            self.warn(OVERPRINT_UNREAD);
+        }
         let groups = std::mem::take(&mut self.root_groups);
         let mut parts: Vec<(Option<usize>, Vec<Arc<Node>>)> = vec![];
         // Thousands of groups: find each one's part by index.
@@ -902,17 +1187,17 @@ impl<'p> Builder<'p> {
             MaskSpec::Mask(m) => {
                 let m = self.fresh_mask(m.clone());
                 let node = match <[Arc<Node>; 1]>::try_from(art) {
-                    Ok([one]) if one.mask.is_none() => {
-                        fold_stop_opacity(&one, &m).unwrap_or_else(|| Node { mask: Some(Box::new(m)), ..Arc::unwrap_or_clone(one) })
+                    Ok([one]) if one.extras().mask.is_none() => {
+                        fold_stop_opacity(&one, &m).unwrap_or_else(|| Arc::unwrap_or_clone(one).with_mask(Some(Box::new(m))))
                     }
                     Ok([one]) => {
                         let mut g = Node::group(self.id(), vec![one]);
-                        g.mask = Some(Box::new(m));
+                        g.extras_mut().mask = Some(Box::new(m));
                         g
                     }
                     Err(all) => {
                         let mut g = Node::group(self.id(), all);
-                        g.mask = Some(Box::new(m));
+                        g.extras_mut().mask = Some(Box::new(m));
                         g
                     }
                 };
@@ -948,6 +1233,9 @@ impl<'p> Builder<'p> {
                     // A rectangle around all of its art (a form's box) clips nothing.
                     grouped(f.children, f.child_groups, group).for_each(|(c, g)| self.emit(c, g));
                     None
+                } else if let Some(shape) = gradient_shape(&clip, &f.children) {
+                    // One path, so tools such as the Shape Builder see the shape, not its box (#1304).
+                    Some(shape)
                 } else {
                     let mut ch = vec![Arc::new(*clip)];
                     ch.extend(f.children);
@@ -975,7 +1263,7 @@ impl<'p> Builder<'p> {
                     && !only.is_container()
                     && !isolate
                     && !knockout
-                    && (mask.is_none() || only.mask.is_none())
+                    && (mask.is_none() || only.extras().mask.is_none())
                 {
                     // A single object in a group: fold opacity, blend and mask into the object.
                     let mut only = (**only).clone();
@@ -985,7 +1273,7 @@ impl<'p> Builder<'p> {
                     }
                     if let Some(m) = mask {
                         let m = self.fresh_mask(m);
-                        only = fold_stop_opacity(&only, &m).unwrap_or(Node { mask: Some(Box::new(m)), ..only });
+                        only = fold_stop_opacity(&only, &m).unwrap_or_else(|| only.with_mask(Some(Box::new(m))));
                     }
                     Some(only)
                 } else {
@@ -994,7 +1282,7 @@ impl<'p> Builder<'p> {
                     if knockout {
                         g.knockout = Knockout::On;
                     }
-                    g.mask = mask.map(|m| Box::new(self.fresh_mask(m)));
+                    g.extras_mut().mask = mask.map(|m| Box::new(self.fresh_mask(m)));
                     Some(g)
                 }
             }
@@ -1013,10 +1301,14 @@ impl<'p> Builder<'p> {
         match &run.stroke {
             None => {
                 let mut f = FillLayer::new(run.paint);
-                f.opacity = run.opacity;
+                (f.opacity, f.overprint) = (run.opacity, run.overprint);
                 ap.items.push(AppearanceItem::Fill(f));
             }
-            Some(p) => ap.items.push(AppearanceItem::Stroke(stroke_layer(run.paint, run.opacity, p, run.scale))),
+            Some(p) => {
+                let mut st = stroke_layer(run.paint, run.opacity, p, run.scale);
+                st.overprint = run.overprint;
+                ap.items.push(AppearanceItem::Stroke(st));
+            }
         }
         let id = self.id();
         let mut n = Node::path(id, PathData::from_bezpath(&run.path), ap);
@@ -1025,23 +1317,72 @@ impl<'p> Builder<'p> {
     }
 
     fn flush_text(&mut self) {
-        let Some((t, opacity, facts)) = self.text.take().and_then(TextLine::finish) else { return };
-        let mut n = Node::new(self.id(), NodeKind::Text(Box::new(t)));
-        n.opacity = opacity;
-        self.lines.insert(n.id, facts);
-        self.push_node(n);
+        let Some(mut line) = self.text.take() else { return };
+        let held = std::mem::take(&mut line.held);
+        if let Some((t, opacity, facts)) = line.finish() {
+            let mut n = Node::new(self.id(), NodeKind::Text(Box::new(t)));
+            n.opacity = opacity;
+            self.lines.insert(n.id, facts);
+            self.push_node(n);
+        }
+        // The strokes of its glyphs' outlines, right after it ([`import_lines`] makes them its stroke).
+        for n in held {
+            self.push_node(n);
+        }
     }
 
-    /// Convert a hayro paint to a VectorCraft paint and opacity (`stroke`: for a stroke).
-    fn paint(&mut self, p: &hayro_interpret::Paint<'_>, stroke: bool) -> (Paint, f32) {
+    /// A stroke of the outline of the glyph just drawn, in the glyph's own paint, while every glyph
+    /// before it on the open line was stroked so too, is held with the line instead of ending it
+    /// (an editor writes type on a path glyph by glyph, each followed by the stroke added to the
+    /// type). `false`: it isn't one. `walked`: the path in the page's walk.
+    fn hold_glyph_stroke(
+        &mut self,
+        path: &BezPath,
+        transform: Affine,
+        paint: &craft_pdf::interpret::Paint<'_>,
+        draw_mode: &PathDrawMode,
+        walked: Option<Walked>,
+    ) -> bool {
+        let PathDrawMode::Stroke(props) = draw_mode else { return false };
+        if self.mask.is_some() || self.blend != BlendMode::Normal || matches!(paint, craft_pdf::interpret::Paint::Pattern(_)) {
+            return false;
+        }
+        let (p, opacity) = self.paint(paint, true, walked);
+        let Some(line) = &self.text else { return false };
+        let Some(ink) = line.ink.last() else { return false };
+        if line.held.len() + 1 != line.ink.len() || opacity < 0.999 || !line.last_fill().is_some_and(|f| *f == p) {
+            return false;
+        }
+        let mut bp = path.clone();
+        bp.apply_affine(transform);
+        let b = bp.bounding_box();
+        let tol = 0.01 * (ink.width() + ink.height()) + 0.01;
+        if ![(b.x0, ink.x0), (b.y0, ink.y0), (b.x1, ink.x1), (b.y1, ink.y1)].iter().all(|(a, c)| (a - c).abs() <= tol) {
+            return false;
+        }
+        let mut st = stroke_layer(p, opacity, props, mean_scale(transform));
+        // Every painted path takes its turn in the scan's overprint list, a held one too.
+        st.overprint = self.path_overprint();
+        let n = Node::path(self.id(), PathData::from_bezpath(&bp), Appearance { items: vec![AppearanceItem::Stroke(st)], ..Default::default() });
+        if let Some(line) = &mut self.text {
+            line.held.push(n);
+        }
+        true
+    }
+
+    /// Convert a hayro paint to a VectorCraft paint and opacity (`stroke`: for a stroke; `walked`:
+    /// what it paints in the page's walk, which names its ink).
+    fn paint(&mut self, p: &craft_pdf::interpret::Paint<'_>, stroke: bool, walked: Option<Walked>) -> (Paint, f32) {
+        let pattern = matches!(p, craft_pdf::interpret::Paint::Pattern(_));
+        let inks = walked.and_then(|w| self.scan.ink(w, stroke, pattern));
         match p {
-            hayro_interpret::Paint::Color(c) => {
+            craft_pdf::interpret::Paint::Color(c) => {
                 let [r, g, b, a] = c.to_rgba().components();
-                let paint = self.colors.solid(c).map_or_else(|| Paint::solid(Color::rgb(round3(r), round3(g), round3(b))), Native::paint);
+                let paint = self.colors.solid(c, inks).map_or_else(|| Paint::solid(Color::rgb(round3(r), round3(g), round3(b))), Native::paint);
                 (paint, a)
             }
-            hayro_interpret::Paint::Pattern(pat) => match pat.as_ref() {
-                Pattern::Shading(sp) => match shading_gradient(sp, &mut self.colors) {
+            craft_pdf::interpret::Paint::Pattern(pat) => match pat.as_ref() {
+                Pattern::Shading(sp) => match shading_gradient(sp, &mut self.colors, inks) {
                     Some((g, _)) => (Paint::Gradient(Box::new(g)), sp.opacity),
                     None => {
                         self.warn("function-based shadings (and very large meshes) are imported as a flat colour");
@@ -1090,11 +1431,18 @@ impl<'p> Builder<'p> {
             return s.clone();
         }
         let page = self.page;
-        let spec = match self.nested(page, |b| m.interpret(b)) {
+        let saved = std::mem::replace(&mut self.white_images, m.mask_type() == MaskType::Alpha);
+        let art = self.nested(page, |b| m.interpret(b));
+        self.white_images = saved;
+        let spec = match art {
             Some(art) => {
                 let [r, g, b, _] = m.background_color().to_rgba().components();
                 let backdrop = luminance(&Color::rgb(r, g, b));
-                let inverted = m.transfer_function().is_some_and(|tf| tf.apply(0.0) > tf.apply(1.0));
+                let inverted = m.transfer_function().is_some_and(|tf| {
+                    let mut ends = [0, 255];
+                    tf.apply_to(&mut ends);
+                    ends[0] > ends[1]
+                });
                 let id = self.id();
                 mask_spec(art, m.mask_type() == MaskType::Alpha, backdrop, inverted, page, |all| Node::group(id, all))
             }
@@ -1121,10 +1469,15 @@ impl<'p> Builder<'p> {
         {
             return Some(Paint::Pattern { pattern: name.clone(), xf });
         }
+        // A swatch is shared with uses outside an alpha mask, and pattern paints keep their
+        // colours there: its images are read as they are.
+        let white = std::mem::take(&mut self.white_images);
         let art = self.nested(Rect::ZERO, |b| {
             // A cell whose content can't be decoded is empty.
             let _ = t.interpret(b, Affine::IDENTITY, stroke);
-        })?;
+        });
+        self.white_images = white;
+        let art = art?;
         let sig = paints(&art);
         let entry = self.pattern_keys.entry(key).or_default();
         entry.0 += 1;
@@ -1146,6 +1499,43 @@ impl<'p> Builder<'p> {
     }
 
     fn add_image(&mut self, key: u128, make: impl FnOnce() -> Option<(ImageBlob, u32, u32)>, xf: Affine) {
+        self.add_image_masked(key, make, xf, None);
+    }
+
+    /// An image's alpha (its soft mask, stencil mask or colour key, at its own resolution) as a
+    /// greyscale image over the image's `w` × `h` pixels (`transform`): its opacity mask. `None`
+    /// when it masks nothing.
+    fn alpha_mask(&mut self, key: u128, r: &craft_pdf::interpret::RasterImage<'_>, w: u32, h: u32, transform: Affine) -> Option<OpacityMask> {
+        let mkey = key ^ 0x5_3a5c;
+        if self.opaque.contains(&mkey) {
+            return None;
+        }
+        let (k, mw, mh) = if let Some(v) = self.image_keys.get(&mkey).cloned() {
+            v
+        } else {
+            let mut alpha = None;
+            r.with_rgba(|_, a| alpha = a, None);
+            let Some(a) = alpha.filter(|a| a.data.iter().any(|v| *v < 255)) else {
+                self.opaque.insert(mkey);
+                return None;
+            };
+            let mut png = Vec::new();
+            image::GrayImage::from_raw(a.width, a.height, a.data)?.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).ok()?;
+            let blob = ImageBlob::new("image/png", png);
+            let k = blob.content_key();
+            self.images.insert(k.clone(), blob);
+            self.image_keys.insert(mkey, (k.clone(), a.width, a.height));
+            (k, a.width, a.height)
+        };
+        let xf = transform * Affine::scale_non_uniform(f64::from(w) / f64::from(mw.max(1)), f64::from(h) / f64::from(mh.max(1)));
+        let art = Node::new(
+            self.id(),
+            NodeKind::Image(Box::new(ImageObject { key: k, width: mw, height: mh, xf, link: None, placement: Default::default() })),
+        );
+        Some(OpacityMask::new(art, true))
+    }
+
+    fn add_image_masked(&mut self, key: u128, make: impl FnOnce() -> Option<(ImageBlob, u32, u32)>, xf: Affine, mask: Option<OpacityMask>) {
         let (k, w, h) = if let Some(v) = self.image_keys.get(&key).cloned() {
             v
         } else {
@@ -1160,7 +1550,10 @@ impl<'p> Builder<'p> {
             (k, w, h)
         };
         let id = self.id();
-        self.push_node(Node::new(id, NodeKind::Image(ImageObject { key: k, width: w, height: h, xf, link: None, placement: Default::default() })));
+        let mut n =
+            Node::new(id, NodeKind::Image(Box::new(ImageObject { key: k, width: w, height: h, xf, link: None, placement: Default::default() })));
+        n.extras_mut().mask = mask.map(Box::new);
+        self.push_node(n);
     }
 
     /// Mesh shadings filling `region` (document space): gradient meshes, clipped to the region
@@ -1182,12 +1575,23 @@ impl<'p> Builder<'p> {
 
     /// The family and style of font `key` (drawing glyph `o`): the installed face of its PostScript
     /// name, else the available family its name reads as; whether it is available.
-    fn font_name(&mut self, key: u128, o: &hayro_interpret::font::OutlineGlyph) -> FontInfo {
+    /// The character of glyph `glyph` of font `key` that no mapping names, found by its outline in
+    /// the installed face of the font's name ([`identify_glyph`]); cached per glyph.
+    fn identified_char(&mut self, key: u128, glyph: u32, o: &craft_pdf::interpret::font::OutlineGlyph) -> Option<char> {
+        if let Some(c) = self.identified.get(&(key, glyph)) {
+            return *c;
+        }
+        let c = self.font_name(key, o).face.and_then(|f| identify_glyph(&f, &o.outline()));
+        self.identified.insert((key, glyph), c);
+        c
+    }
+
+    fn font_name(&mut self, key: u128, o: &craft_pdf::interpret::font::OutlineGlyph) -> FontInfo {
         if let Some(n) = self.font_names.get(&key) {
             return n.clone();
         }
         let data = o.font_data();
-        let name = self.fonts.get(&key).cloned().or_else(|| data.as_ref().and_then(|d| d.postscript_name.clone()));
+        let name = self.fonts.get(&key).map(|(n, _)| n.clone()).or_else(|| data.as_ref().and_then(|d| d.postscript_name.clone()));
         let (weight, italic) = data.as_ref().map_or((None, false), |d| (d.weight, d.is_italic));
         // A subset's six-letter tag.
         let ps = name.as_deref().map(|n| match n.split_once('+') {
@@ -1218,27 +1622,47 @@ impl<'p> Builder<'p> {
     /// its outline (no Unicode text, mirrored, or not type mode).
     fn type_glyph(
         &mut self,
-        o: &hayro_interpret::font::OutlineGlyph,
+        o: &craft_pdf::interpret::font::OutlineGlyph,
         m: Affine,
         scale: f64,
-        paint: &hayro_interpret::Paint<'_>,
+        paint: &craft_pdf::interpret::Paint<'_>,
         stroke: Option<&StrokeProps>,
+        overprint: bool,
     ) -> bool {
         if self.text_as != TextAs::Text || self.nested > 0 {
             return false;
         }
         let key = o.font_cache_key();
-        let (unicode, from_cid) = match o.as_unicode() {
+        let glyph = o.glyph_id().to_u32();
+        let (unicode, from_cid) = match o.as_unicode().filter(|u| !replacement(u)) {
             Some(u) => (Some(u), false),
+            // No mapping, or one to U+FFFD (#708): the font program may still name the character.
             None => {
                 let cid = self.cid_text.entry(key).or_insert_with(|| o.font_data().and_then(|d| CidText::of(d.data.as_ref().as_ref())).map(Arc::new));
-                (cid.as_ref().and_then(|c| c.unicode(o.glyph_id().to_u32())), true)
+                match cid.as_ref().and_then(|c| c.unicode(glyph)) {
+                    Some(u) => (Some(u), true),
+                    None => {
+                        let chars = self
+                            .font_chars
+                            .entry(key)
+                            .or_insert_with(|| o.font_data().and_then(|d| font_chars(d.data.as_ref().as_ref())).map(Arc::new));
+                        let named = chars.as_ref().and_then(|m| m.get(&glyph)).copied();
+                        // Still unnamed: the installed font may draw the same outline (#811).
+                        (named.or_else(|| self.identified_char(key, glyph, o)).map(BfString::Char), false)
+                    }
+                }
             }
         };
         let text: String = match unicode {
             Some(BfString::Char(c)) => c.to_string(),
             Some(BfString::String(s)) => s,
-            None => return false,
+            None => {
+                if o.as_unicode().is_some_and(|u| replacement(&u)) {
+                    let name = self.font_name(key, o).family;
+                    self.warn(&format!("text in {name} whose characters the file doesn't name (U+FFFD) was kept as outlines"));
+                }
+                return false;
+            }
         };
         // Adobe's CID tables map some ideographs to their look-alike Kangxi radicals.
         let text: String = if from_cid { text.chars().map(unify_radical).collect() } else { text };
@@ -1251,7 +1675,12 @@ impl<'p> Builder<'p> {
         let upright = width.is_some_and(|w| w.abs() <= 1.0);
         let top = m * kurbo::Point::new(f64::from(width.filter(|w| *w > 1.0).unwrap_or(1000.0)) * 0.5, 880.0);
         let mut info = self.font_name(key, o);
-        if let Some(face) = &info.face {
+        // A font the file doesn't carry is drawn with a stand-in: its glyphs can't tell which
+        // style of the installed family it is, so the name decides.
+        let embedded = self.fonts.get(&key).is_none_or(|(_, e)| *e);
+        if let Some(face) = &info.face
+            && embedded
+        {
             let decided = match self.matched.get(&key) {
                 Some(m) => m.clone(),
                 // A glyph that can't be compared (several characters, a vertical form) decides
@@ -1269,14 +1698,29 @@ impl<'p> Builder<'p> {
             };
             info = FontInfo { family: f.family.clone(), style: f.style.clone(), face: Some(f) };
         }
-        let (paint, opacity) = self.paint(paint, stroke.is_some());
+        // A version of the family and style that the two alone don't resolve to: the type names it.
+        // Kept per font once its face is decided (until then each glyph asks).
+        let named = |f: &Option<Arc<vectorcraft_text::FontFace>>| {
+            let f = f.as_ref()?;
+            let default = vectorcraft_text::FontDb::global().face(&f.family, &f.style)?;
+            (default.version != f.version).then(|| f.version.clone())
+        };
+        let version = match self.versions.get(&key) {
+            Some(v) => v.clone(),
+            None if self.matched.contains_key(&key) => self.versions.entry(key).or_insert_with(|| named(&info.face)).clone(),
+            None => named(&info.face),
+        };
+        let (paint, opacity) = self.paint(paint, stroke.is_some(), self.walked(true));
         let stroke = stroke.map(|p| (paint.clone(), p.line_width as f64 * scale));
         let look = Look {
             font: key,
             family: info.family,
             style: info.style,
+            version,
             size: at.size,
             h_scale: at.h_scale,
+            overprint_fill: stroke.is_none() && overprint,
+            overprint_stroke: stroke.is_some() && overprint,
             fill: stroke.is_none().then_some(paint),
             stroke,
         };
@@ -1288,7 +1732,7 @@ impl<'p> Builder<'p> {
         // A stroke over the glyph just filled (fill and stroke rendering).
         if let (Some(s), Some(line)) = (&look.stroke, &mut self.text)
             && look.fill.is_none()
-            && line.stroke_last(key, at, s.clone())
+            && line.stroke_last(key, at, s.clone(), overprint)
         {
             return true;
         }
@@ -1341,7 +1785,7 @@ impl<'a> Device<'a> for Builder<'_> {
         }
     }
 
-    fn set_blend_mode(&mut self, blend_mode: hayro_interpret::BlendMode) {
+    fn set_blend_mode(&mut self, blend_mode: craft_pdf::interpret::BlendMode) {
         let b = blend(blend_mode);
         if b != self.blend {
             self.flush_glyphs();
@@ -1350,32 +1794,39 @@ impl<'a> Device<'a> for Builder<'_> {
         }
     }
 
-    fn draw_path(&mut self, path: &BezPath, transform: Affine, paint: &hayro_interpret::Paint<'a>, draw_mode: &PathDrawMode) {
+    fn draw_path(&mut self, path: &BezPath, transform: Affine, paint: &craft_pdf::interpret::Paint<'a>, draw_mode: &PathDrawMode) {
         self.flush_glyphs();
+        let walked = self.walked(false);
+        if self.hold_glyph_stroke(path, transform, paint, draw_mode, walked) {
+            self.pending = false;
+            return;
+        }
         self.flush_text();
         self.pending = false;
+        let overprint = self.path_overprint();
+        let overprint_zero = self.nested == 0 && self.paint_at.checked_sub(1).and_then(|i| self.scan.paint_zero.get(i)).copied().unwrap_or(false);
         let mut bp = path.clone();
         bp.apply_affine(transform);
         if bp.elements().is_empty() {
             return;
         }
         let shading = match paint {
-            hayro_interpret::Paint::Pattern(p) => match p.as_ref() {
+            craft_pdf::interpret::Paint::Pattern(p) => match p.as_ref() {
                 Pattern::Shading(sp) => Some(sp),
                 Pattern::Tiling(_) => None,
             },
-            hayro_interpret::Paint::Color(_) => None,
+            craft_pdf::interpret::Paint::Color(_) => None,
         };
         // Patch and triangle meshes are gradient meshes.
         if let (PathDrawMode::Fill(_), Some(sp)) = (draw_mode, shading)
-            && let Some(meshes) = mesh_shading(sp, &mut self.colors)
+            && let Some(meshes) = mesh_shading(sp, &mut self.colors, walked.and_then(|w| self.scan.ink(w, false, true)))
         {
             self.draw_meshes(meshes, &bp, sp.opacity);
             return;
         }
         let pd = PathData::from_bezpath(&bp);
         let stroke = matches!(draw_mode, PathDrawMode::Stroke(_));
-        let (paint, opacity) = self.paint(paint, stroke);
+        let (paint, opacity) = self.paint(paint, stroke, walked);
         // A gradient that doesn't extend past its ends paints only between them.
         let width = match draw_mode {
             PathDrawMode::Stroke(p) => p.line_width as f64 * mean_scale(transform),
@@ -1393,7 +1844,8 @@ impl<'a> Device<'a> for Builder<'_> {
         match draw_mode {
             PathDrawMode::Fill(rule) => {
                 let mut f = FillLayer::new(paint);
-                f.opacity = opacity;
+                (f.opacity, f.overprint) = (opacity, overprint);
+                f.overprint_zero = overprint_zero;
                 let mut n = Node::path(self.id(), pd, Appearance { items: vec![AppearanceItem::Fill(f)], ..Default::default() });
                 if let NodeKind::Path { rule: r, .. } = &mut n.kind {
                     *r = fill_rule(*rule);
@@ -1403,10 +1855,11 @@ impl<'a> Device<'a> for Builder<'_> {
                 self.push_node(n);
             }
             PathDrawMode::Stroke(props) => {
-                let st = stroke_layer(paint, opacity, props, mean_scale(transform));
-                // Fill-then-stroke of the same path (the `B` operator, or a fill and a stroke of
-                // the outline as Illustrator writes an object) becomes one object: a path with a
-                // fill and a live stroke.
+                let mut st = stroke_layer(paint, opacity, props, mean_scale(transform));
+                st.overprint = overprint;
+                st.overprint_zero = overprint_zero;
+                // Fill-then-stroke of the same path (the `B` operator, or a fill and then a stroke
+                // of the same outline) becomes one object: a path with a fill and a live stroke.
                 let blend = self.blend;
                 let fill = self.last_fill.take();
                 let last = match self.mask {
@@ -1418,6 +1871,10 @@ impl<'a> Device<'a> for Builder<'_> {
                     && let Some((id, outline)) = fill
                     && last.id == id
                     && last.blend == blend
+                    // Opacity or a mask of its own came from a transparency group the fill was
+                    // drawn in and this stroke wasn't.
+                    && last.opacity == 1.0
+                    && last.extras().mask.is_none()
                     && last.appearance.stroke().is_none()
                     && same_outline(&outline, &bp)
                 {
@@ -1449,19 +1906,17 @@ impl<'a> Device<'a> for Builder<'_> {
                 (*isolate, *knockout) = (i, k);
             }
         }
-        let bb = clip_path.path.bounding_box();
-        // Clips that contain the whole page do nothing visible; don't create groups for them.
+        // Clips that contain the whole page do nothing visible; don't create groups for them. Only
+        // a polygon that really covers it counts: a diamond touching the page edges has the page
+        // as its bounding box but cuts its corners away (#1542).
         let redundant = clip_path.path.elements().len() <= 6
-            && bb.x0 <= self.page.x0 + 0.01
-            && bb.y0 <= self.page.y0 + 0.01
-            && bb.x1 >= self.page.x1 - 0.01
-            && bb.y1 >= self.page.y1 - 0.01
-            && self.page.area() > 0.0;
+            && self.page.area() > 0.0
+            && vectorcraft_geom::hit::polygon_covers_rect(&clip_path.path, self.page, 0.01);
         let kind = if redundant { FrameKind::Skip } else { FrameKind::Clip(Box::new(self.clip_node(&clip_path.path, fill_rule(clip_path.fill)))) };
         self.stack.push(Frame::new(kind));
     }
 
-    fn push_transparency_group(&mut self, opacity: f32, mask: Option<SoftMask<'a>>, blend_mode: hayro_interpret::BlendMode) {
+    fn push_transparency_group(&mut self, opacity: f32, mask: Option<SoftMask<'a>>, blend_mode: craft_pdf::interpret::BlendMode) {
         self.flush();
         let mask = mask.map(|m| self.soft_mask(&m));
         self.stack.push(Frame::new(FrameKind::Group { opacity, blend: blend(blend_mode), mask, isolate: false, knockout: false }));
@@ -1475,7 +1930,7 @@ impl<'a> Device<'a> for Builder<'_> {
         glyph: &Glyph<'a>,
         transform: Affine,
         glyph_transform: Affine,
-        paint: &hayro_interpret::Paint<'a>,
+        paint: &craft_pdf::interpret::Paint<'a>,
         draw_mode: &GlyphDrawMode,
     ) {
         self.pending = false;
@@ -1487,22 +1942,24 @@ impl<'a> Device<'a> for Builder<'_> {
         match glyph {
             Glyph::Outline(o) => {
                 let scale = mean_scale(transform);
-                if self.type_glyph(o, transform * glyph_transform, scale, paint, stroke.as_ref()) {
+                let overprint = self.glyph_overprint(stroke.is_some());
+                if self.type_glyph(o, transform * glyph_transform, scale, paint, stroke.as_ref(), overprint) {
                     return;
                 }
                 self.flush_text();
                 let mut bp = o.outline();
                 bp.apply_affine(transform * glyph_transform);
-                let (paint, opacity) = self.paint(paint, stroke.is_some());
+                let (paint, opacity) = self.paint(paint, stroke.is_some(), self.walked(true));
                 let same = self.glyphs.as_ref().is_some_and(|r| {
                     r.paint == paint
                         && r.opacity == opacity
+                        && r.overprint == overprint
                         && r.stroke.as_ref().map(|s| s.line_width) == stroke.as_ref().map(|s| s.line_width)
                         && (r.scale - scale).abs() < 1e-9
                 });
                 if !same {
                     self.flush_glyphs();
-                    self.glyphs = Some(GlyphRun { path: BezPath::new(), paint, opacity, stroke, scale });
+                    self.glyphs = Some(GlyphRun { path: BezPath::new(), paint, opacity, stroke, scale, overprint });
                 }
                 if let Some(r) = &mut self.glyphs {
                     r.path.extend(bp.iter());
@@ -1527,12 +1984,14 @@ impl<'a> Device<'a> for Builder<'_> {
         self.pending = false;
         match image {
             Image::Raster(r) => {
-                let key = hayro_interpret::CacheKey::cache_key(&r);
+                let white = self.white_images;
+                // Inside an alpha mask the same image is read again, white (its own cache key).
+                let key = craft_pdf::interpret::CacheKey::cache_key(&r) ^ if white { WHITE_KEY } else { 0 };
                 let st = r.stream();
                 let (w, h) = (r.width(), r.height());
                 // CMYK images keep their samples (read once per image).
-                let known = self.cmyk_keys.contains(&key);
-                let cmyk = if known {
+                let known = !white && self.cmyk_keys.contains(&key);
+                let cmyk = if known || white {
                     None
                 } else {
                     crate::import_image::cmyk(st, w, h).unwrap_or_else(|why| {
@@ -1542,14 +2001,18 @@ impl<'a> Device<'a> for Builder<'_> {
                 };
                 if known || cmyk.is_some() {
                     self.cmyk_keys.insert(key);
-                    return self.add_image(key, || cmyk.map(|blob| (blob, w, h)), transform);
+                    // Its mask (read by the interpreter, whatever its kind) becomes an opacity
+                    // mask, so the inks stay as they are.
+                    let mask = if crate::import_image::has_mask(st) { self.alpha_mask(key, &r, w, h, transform) } else { None };
+                    return self.add_image_masked(key, || cmyk.map(|blob| (blob, w, h)), transform, mask);
                 }
                 // JPEG passthrough for plain DeviceRGB/DeviceGray DCT images.
                 let dict = st.dict();
                 let filters = st.filters();
                 let cs_ok = dict.get::<Name<'_>>(b"ColorSpace").is_some_and(|n| matches!(n.as_ref(), b"DeviceRGB" | b"DeviceGray"));
-                let jpeg = filters.len() == 1
-                    && matches!(filters[0], hayro_syntax::Filter::DctDecode)
+                let jpeg = !white
+                    && filters.len() == 1
+                    && matches!(filters[0], craft_pdf::syntax::Filter::DctDecode)
                     && cs_ok
                     && !dict.contains_key(b"SMask")
                     && !dict.contains_key(b"Mask")
@@ -1565,6 +2028,7 @@ impl<'a> Device<'a> for Builder<'_> {
                         let (w, h, sf) = (img.width(), img.height(), img.scale_factors());
                         let a = alpha.map(|a| resize_alpha(&a, w, h)).unwrap_or_else(|| vec![255; (w * h) as usize]);
                         let rgba: Vec<u8> = match img {
+                            _ if white => a.into_iter().flat_map(|a| [255, 255, 255, a]).collect(),
                             ImageData::Rgb(d) => d.data.as_chunks::<3>().0.iter().zip(a).flat_map(|(c, a)| [c[0], c[1], c[2], a]).collect(),
                             ImageData::Luma(d) => d.data.iter().zip(a).flat_map(|(g, a)| [*g, *g, *g, a]).collect(),
                         };
@@ -1580,12 +2044,14 @@ impl<'a> Device<'a> for Builder<'_> {
                 self.add_image(key, || rgba_png(rgba, w, h).map(|png| (ImageBlob::new("image/png", png), w, h)), xf);
             }
             Image::Stencil(s) => {
-                let key = hayro_interpret::CacheKey::cache_key(&s);
+                let white = self.white_images;
+                let key = craft_pdf::interpret::CacheKey::cache_key(&s) ^ if white { WHITE_KEY } else { 0 };
                 let mut decoded: Option<Decoded> = None;
                 s.with_stencil(
                     |luma, paint| {
                         let rgb = match paint {
-                            hayro_interpret::Paint::Color(c) => c.to_rgba().to_rgba8(),
+                            _ if white => [255, 255, 255, 255],
+                            craft_pdf::interpret::Paint::Color(c) => c.to_rgba().to_rgba8(),
                             _ => [0, 0, 0, 255],
                         };
                         let rgba = luma.data.iter().flat_map(|a| [rgb[0], rgb[1], rgb[2], *a]).collect();
@@ -1623,9 +2089,8 @@ impl<'a> Device<'a> for Builder<'_> {
             _ => {
                 if self.route && self.aligned {
                     self.aligned = false;
-                    let why = if self.scan.cut { "a page draws more than can be read for its layers: " } else { "" };
                     let went = if self.unsure { "a hidden, non-printing layer of its page" } else { "its page's layer" };
-                    self.warn(&format!("{why}some art couldn't be told apart by layer and went to {went}"));
+                    self.warn(&format!("some art couldn't be told apart by layer and went to {went}"));
                 }
                 self.unsure.then_some(UNSORTED)
             }

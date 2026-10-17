@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 
+use craft_pdf::write::backend as krilla;
 use krilla::geom::PathBuilder;
 use krilla::graphic::Graphic;
 use krilla::surface::Surface;
@@ -26,7 +27,7 @@ pub(crate) enum Mark {
     /// The art of layer `i` of [`pdf_layers`].
     Layer(usize),
     /// A fill or stroke that overprints.
-    Overprint,
+    Overprint(bool),
 }
 
 /// A layer written as a PDF layer (an optional content group).
@@ -63,7 +64,7 @@ impl Mark {
         match self {
             // Exact in `f32` up to 2^24 layers.
             Self::Layer(i) => (LAYER_X as f32, i as f32),
-            Self::Overprint => (OVERPRINT_X as f32, 0.0),
+            Self::Overprint(zero) => (OVERPRINT_X as f32, if zero { 1.0 } else { 0.0 }),
         }
     }
 }
@@ -147,7 +148,7 @@ impl Object<'_> {
         let (Some(b"q"), Some(x), Some(y), Some(b"m")) = (word(), word().and_then(int), word().and_then(int), word()) else { return None };
         match x {
             _ if x == i64::from(LAYER_X) => usize::try_from(y).ok().map(Mark::Layer),
-            _ if x == i64::from(OVERPRINT_X) && y == 0 => Some(Mark::Overprint),
+            _ if x == i64::from(OVERPRINT_X) && matches!(y, 0 | 1) => Some(Mark::Overprint(y == 1)),
             _ => None,
         }
     }
@@ -239,9 +240,11 @@ pub(crate) fn finish(pdf: Vec<u8>, doc: &Document, set: &PdfSettings, layers: bo
     let marks: HashMap<u32, Mark> = objects.iter().filter_map(|(n, o)| Some((*n, o.mark(&pdf)?))).collect();
     let mut patch = Patch::new(&xref);
     if overprint {
-        let opm = u8::from(set.standard != Standard::PdfA2b);
-        let gs = patch.add_object(format!("<</Type/ExtGState/OP true/op true/OPM {opm}>>").into_bytes());
-        for (n, _) in marks.iter().filter(|(_, m)| **m == Mark::Overprint) {
+        let mut states = HashMap::new();
+        for (n, mark) in marks.iter().filter(|(_, m)| matches!(m, Mark::Overprint(_))) {
+            let zero = matches!(mark, Mark::Overprint(true)) || set.standard == Standard::PdfA2b;
+            let mode = u8::from(!zero);
+            let gs = *states.entry(mode).or_insert_with(|| patch.add_object(format!("<</Type/ExtGState/OP true/op true/OPM {mode}>>").into_bytes()));
             let Some(o) = objects.get(n) else { continue };
             let (Some(content), Some(res)) = (o.data(&pdf, u64::MAX), resources(&objects, o)) else {
                 return Err(bad("an overprinting form can't be read"));

@@ -174,3 +174,73 @@ pub fn vertical_font(vorg: bool) -> Option<Vec<u8>> {
     }
     Some(builder.build())
 }
+
+/// The family of [`vertical_punctuation_font`].
+pub const VERTICAL_PUNCTUATION_FAMILY: &str = "Punctuationtest Sans";
+
+/// A test-only cmap over bundled Source Sans 3: fullwidth !/? use the ASCII glyphs,
+/// 「 uses L and ー uses a hyphen. Optionally `vert` substitutes I/J for !/?, so tests
+/// exercise both nominal fallbacks and actual vertical substitutions without OS fonts.
+pub fn vertical_punctuation_font(alternates: bool) -> Option<Vec<u8>> {
+    use write_fonts::tables::cmap::Cmap;
+    use write_fonts::tables::gsub::{Gsub, SingleSubstFormat2, SubstitutionLookup, SubstitutionLookupList};
+    use write_fonts::tables::layout::{CoverageFormat1, Feature, FeatureList, FeatureRecord, LangSys, Lookup, Script, ScriptList, ScriptRecord};
+    use write_fonts::types::GlyphId16;
+
+    const BASE: &[u8] = include_bytes!("../../../assets/fonts/SourceSans3-Regular.ttf");
+    let font = skrifa::FontRef::new(BASE).ok()?;
+    let charmap = font.charmap();
+    let mapping = [('！', '!'), ('？', '?'), ('「', 'L'), ('ー', '-'), ('!', '!'), ('?', '?'), ('I', 'I'), ('J', 'J'), ('L', 'L'), ('-', '-')];
+    let mappings = mapping.into_iter().map(|(c, source)| Some((c, write_fonts::types::GlyphId::new(charmap.map(source)?.to_u32()))));
+    let cmap = Cmap::from_mappings(mappings.collect::<Option<Vec<_>>>()?).ok()?;
+    let family = VERTICAL_PUNCTUATION_FAMILY;
+    let name = name_table(&[(1, family), (2, "Regular"), (4, "Punctuationtest Sans Regular"), (6, "PunctuationtestSans-Regular")])?;
+    let mut builder = FontBuilder::new();
+    builder.add_table(&cmap).ok()?;
+    builder.add_raw(Tag::new(b"name"), name);
+    if alternates {
+        let gid = |c| Some(GlyphId16::new(u16::try_from(charmap.map(c)?.to_u32()).ok()?));
+        let mut pairs = [(gid('!')?, gid('I')?), (gid('?')?, gid('J')?)];
+        pairs.sort_by_key(|p| p.0);
+        let coverage = CoverageFormat1::new(pairs.iter().map(|p| p.0).collect());
+        let subst = SingleSubstFormat2::new(coverage.into(), pairs.iter().map(|p| p.1).collect());
+        let scripts = ScriptList::new(vec![ScriptRecord::new(Tag::new(b"DFLT"), Script::new(Some(LangSys::new(vec![0])), vec![]))]);
+        let features = FeatureList::new(vec![FeatureRecord::new(Tag::new(b"vert"), Feature::new(None, vec![0]))]);
+        let lookups = SubstitutionLookupList::new(vec![SubstitutionLookup::Single(Lookup::new(Default::default(), vec![subst.into()]))]);
+        builder.add_table(&Gsub::new(scripts, features, lookups)).ok()?;
+    }
+    for r in font.table_directory.table_records() {
+        let tag = Tag::new(&r.tag().to_be_bytes());
+        if tag != Tag::new(b"GSUB") && !builder.contains(tag) {
+            builder.add_raw(tag, font.table_data(r.tag())?.as_bytes());
+        }
+    }
+    Some(builder.build())
+}
+
+/// The family of [`twin_font`]: two versions of one family and style.
+pub const TWIN_FAMILY: &str = "Twintest Sans";
+
+/// The version strings of [`twin_font`]'s older and newer face.
+pub const TWIN_VERSIONS: [&str; 2] = ["Version 1.000", "Version 2.000"];
+
+/// A face of family [`TWIN_FAMILY`], style Regular, in version [`TWIN_VERSIONS`]`[0]` (the bundled
+/// Source Sans 3 Regular) or, `newer`, `[1]` (the bundled Inter Regular): one name, two sets of
+/// glyphs, as a font library that keeps an old version beside a new one has. `None` when it can't
+/// be built.
+pub fn twin_font(newer: bool) -> Option<Vec<u8>> {
+    const OLDER: &[u8] = include_bytes!("../../../assets/fonts/SourceSans3-Regular.ttf");
+    const NEWER: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
+    let font = skrifa::FontRef::new(if newer { NEWER } else { OLDER }).ok()?;
+    let version = TWIN_VERSIONS[usize::from(newer)];
+    let name = name_table(&[(1, TWIN_FAMILY), (2, "Regular"), (4, "Twintest Sans Regular"), (5, version), (6, "TwintestSans-Regular")])?;
+    let mut builder = FontBuilder::new();
+    builder.add_raw(Tag::new(b"name"), name);
+    for r in font.table_directory.table_records() {
+        let tag = Tag::new(&r.tag().to_be_bytes());
+        if !builder.contains(tag) {
+            builder.add_raw(tag, font.table_data(r.tag())?.as_bytes());
+        }
+    }
+    Some(builder.build())
+}

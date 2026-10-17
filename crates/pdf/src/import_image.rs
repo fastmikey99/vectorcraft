@@ -1,17 +1,18 @@
 //! CMYK images keep their samples, as CMYK colours do: DeviceCMYK images and ICC-based ones with
-//! four components. A JPEG whose Decode array inverts its samples (Adobe's CMYK JPEGs, the
+//! four components, plus Separation/DeviceN images containing only named process inks. A JPEG whose Decode array inverts its samples (Adobe's CMYK JPEGs, the
 //! convention JPEG readers and the PDF writer take a CMYK JPEG to follow) is kept as it is; any
 //! other is decoded, its Decode array applied, and stored as a CMYK TIFF
-//! ([`ImageBlob::cmyk_tiff`]). Every other image is read as RGB by the interpreter.
+//! ([`ImageBlob::cmyk_tiff`]). A mask (`/SMask`, `/Mask`) doesn't change that: the importer
+//! carries it as the image's opacity mask ([`has_mask`]). Every other image is read as RGB by the
+//! interpreter.
 
-use hayro_syntax::Filter;
-use hayro_syntax::object::stream::ImageDecodeParams;
-use hayro_syntax::object::{Array, Dict, Name, Stream};
+use craft_pdf::syntax::Filter;
+use craft_pdf::syntax::object::stream::ImageDecodeParams;
+use craft_pdf::syntax::object::{Array, Dict, Name, Object, Stream};
 use vectorcraft_doc::ImageBlob;
 use vectorcraft_doc::cmyk::{Inks, MAX_CMYK_PIXELS, jpeg_components};
 
 /// A CMYK image read as RGB: why.
-pub(crate) const MASKED: &str = "CMYK images with a mask were imported in RGB";
 pub(crate) const UNREAD: &str = "CMYK images whose samples couldn't be read in CMYK were imported in RGB";
 
 /// The Decode array of a JPEG kept as it is.
@@ -22,47 +23,66 @@ fn key<'k>(d: &Dict<'_>, key: &'k [u8], short: &'k [u8]) -> &'k [u8] {
     if d.contains_key(key) { key } else { short }
 }
 
-/// Are the image's colours CMYK (DeviceCMYK, CalCMYK, or ICC-based with four components)?
-fn cmyk_space(d: &Dict<'_>) -> bool {
+/// Map each stored sample to its process-ink channel. Named process inks are real
+/// plates; their alternate-space tint transform is only a fallback preview.
+fn channels(d: &Dict<'_>) -> Option<Vec<usize>> {
     let cs = key(d, b"ColorSpace", b"CS");
     if let Some(n) = d.get::<Name<'_>>(cs) {
-        return matches!(n.as_ref(), b"DeviceCMYK" | b"CMYK");
+        return matches!(n.as_ref(), b"DeviceCMYK" | b"CMYK").then(|| vec![0, 1, 2, 3]);
     }
-    let Some(a) = d.get::<Array<'_>>(cs) else { return false };
+    let a = d.get::<Array<'_>>(cs)?;
     let mut it = a.flex_iter();
-    match it.next::<Name<'_>>() {
-        Some(n) if n.as_ref() == b"CalCMYK" => true,
-        Some(n) if n.as_ref() == b"ICCBased" => it.next::<Stream<'_>>().and_then(|s| s.dict().get::<u8>(b"N")) == Some(4),
-        _ => false,
+    let kind = it.next::<Name<'_>>()?;
+    match kind.as_ref() {
+        b"CalCMYK" => Some(vec![0, 1, 2, 3]),
+        b"ICCBased" => (it.next::<Stream<'_>>()?.dict().get::<u8>(b"N") == Some(4)).then(|| vec![0, 1, 2, 3]),
+        b"Separation" => process_channel(it.next::<Name<'_>>()?.as_ref()).map(|c| vec![c]),
+        b"DeviceN" => {
+            let names = it.next::<Array<'_>>()?;
+            let mut mapped = Vec::new();
+            for name in names.iter::<Name<'_>>() {
+                let channel = process_channel(name.as_ref())?;
+                if mapped.len() == 4 || mapped.contains(&channel) {
+                    return None;
+                }
+                mapped.push(channel);
+            }
+            (!mapped.is_empty() && mapped.len() == names.iter::<Object<'_>>().count()).then_some(mapped)
+        }
+        _ => None,
     }
 }
 
-/// Each component's Decode range (`[0 1]` each when the array is missing or malformed).
-fn decode_ranges(d: &Dict<'_>) -> [(f32, f32); 4] {
-    let mut out = [(0.0, 1.0); 4];
-    let Some(a) = d.get::<Array<'_>>(key(d, b"Decode", b"D")) else { return out };
-    let v: Vec<f32> = a.iter::<f32>().collect();
-    if v.len() == 8 && v.iter().all(|x| x.is_finite()) {
-        for (o, p) in out.iter_mut().zip(v.as_chunks::<2>().0) {
-            *o = (p[0], p[1]);
-        }
+fn process_channel(name: &[u8]) -> Option<usize> {
+    match name {
+        b"Cyan" => Some(0),
+        b"Magenta" => Some(1),
+        b"Yellow" => Some(2),
+        b"Black" => Some(3),
+        _ => None,
     }
-    out
+}
+
+/// Each stored sample's Decode range. Omitted channels always remain zero ink.
+fn decode_ranges(d: &Dict<'_>, count: usize) -> Vec<(f32, f32)> {
+    let fallback = vec![(0.0, 1.0); count];
+    let Some(a) = d.get::<Array<'_>>(key(d, b"Decode", b"D")) else { return fallback };
+    let v: Vec<f32> = a.iter::<f32>().collect();
+    if v.len() != count * 2 || v.iter().any(|x| !x.is_finite()) {
+        return fallback;
+    }
+    v.as_chunks::<2>().0.iter().map(|&[start, end]| (start, end)).collect()
 }
 
 /// The image `st` (`width` × `height` pixels) in CMYK: `Ok(None)` when it isn't a CMYK image,
 /// `Err` (a warning) when it is one that is read as RGB.
 pub(crate) fn cmyk(st: &Stream<'_>, width: u32, height: u32) -> Result<Option<ImageBlob>, &'static str> {
     let d = st.dict();
-    if !cmyk_space(d) {
-        return Ok(None);
-    }
-    if d.contains_key(b"SMask") || d.contains_key(b"Mask") {
-        return Err(MASKED);
-    }
-    let ranges = decode_ranges(d);
+    let Some(channels) = channels(d) else { return Ok(None) };
+    let count = channels.len();
+    let ranges = decode_ranges(d, count);
     let filters = st.filters();
-    if ranges == INVERTED && matches!(filters.as_slice(), [Filter::DctDecode]) {
+    if channels == [0, 1, 2, 3] && ranges == INVERTED && matches!(filters.as_slice(), [Filter::DctDecode]) {
         let raw = st.raw_data();
         if jpeg_components(&raw) == Some(4) {
             return Ok(Some(ImageBlob::new("image/jpeg", raw.into_owned())));
@@ -77,17 +97,48 @@ pub(crate) fn cmyk(st: &Stream<'_>, width: u32, height: u32) -> Result<Option<Im
         return Err(UNREAD);
     }
     let size = usize::from(bpc / 8);
-    let params = ImageDecodeParams { is_indexed: false, bpc: Some(bpc), num_components: Some(4), target_dimension: None, width, height };
+    let params = ImageDecodeParams { is_indexed: false, bpc: Some(bpc), num_components: Some(count as u8), target_dimension: None, width, height };
     let Ok(decoded) = st.decoded_image(&params) else { return Err(UNREAD) };
-    let Some(raw) = decoded.data.get(..n as usize * 4 * size) else { return Err(UNREAD) };
+    let Some(raw) = decoded.data.get(..n as usize * count * size) else { return Err(UNREAD) };
     let value = |s: &[u8]| match *s {
         [hi, lo] => u16::from_be_bytes([hi, lo]) as f32 / 65535.0,
         [v] => v as f32 / 255.0,
         _ => 0.0,
     };
     let inks = raw
-        .chunks_exact(size * 4)
-        .flat_map(|px| px.chunks_exact(size).zip(ranges).map(|(s, (lo, hi))| ((lo + value(s) * (hi - lo)).clamp(0.0, 1.0) * 255.0).round() as u8))
+        .chunks_exact(size * count)
+        .flat_map(|px| {
+            let mut ink = [0u8; 4];
+            for ((sample, &(lo, hi)), &channel) in px.chunks_exact(size).zip(&ranges).zip(&channels) {
+                if let Some(out) = ink.get_mut(channel) {
+                    *out = ((lo + value(sample) * (hi - lo)).clamp(0.0, 1.0) * 255.0).round() as u8;
+                }
+            }
+            ink
+        })
         .collect();
-    Inks::new(width, height, inks).and_then(|i| ImageBlob::cmyk_tiff(&i)).map(Some).ok_or(UNREAD)
+    let mut blob = Inks::new(width, height, inks).and_then(|i| ImageBlob::cmyk_tiff(&i)).ok_or(UNREAD)?;
+    // Preserve only unambiguous DeviceCMYK JPEGs. Other colour spaces and decode transforms
+    // keep their normalized, lossless working samples instead.
+    if bpc == 8
+        && channels == [0, 1, 2, 3]
+        && ranges == [(0.0, 1.0); 4]
+        && matches!(filters.as_slice(), [Filter::DctDecode])
+        && d.get::<Name<'_>>(key(d, b"ColorSpace", b"CS")).is_some_and(|n| matches!(n.as_ref(), b"DeviceCMYK" | b"CMYK"))
+        && !d.contains_key(b"DecodeParms")
+        && !d.contains_key(b"DP")
+    {
+        let raw = st.raw_data();
+        if jpeg_components(&raw) == Some(4) {
+            blob.source_jpeg =
+                Some(vectorcraft_doc::PreservedJpeg { bytes: std::sync::Arc::new(raw.into_owned()), decoded_key: blob.content_key(), invert: false });
+        }
+    }
+    Ok(Some(blob))
+}
+
+/// Does the image carry its own transparency (a soft mask, a stencil mask or a colour key)?
+pub(crate) fn has_mask(st: &Stream<'_>) -> bool {
+    let d = st.dict();
+    d.contains_key(b"SMask") || d.contains_key(b"Mask") || d.get::<u8>(b"SMaskInData").is_some_and(|v| v != 0)
 }

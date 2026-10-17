@@ -8,6 +8,12 @@ description = "VectorCraft engine: sessions, history, selection, the command reg
 [lints]
 workspace = true
 
+[features]
+default = ["bundled-fonts"]
+# The fonts vectorcraft-text bundles (see its `bundled-fonts`). Embedders that supply every font at
+# run time (`vectorcraft_text::FontDb::add_font`) build with `default-features = false`.
+bundled-fonts = ["vectorcraft-text/bundled-fonts"]
+
 [dependencies]
 vectorcraft-geom = { workspace = true }
 vectorcraft-color = { workspace = true }
@@ -25,6 +31,8 @@ vectorcraft-cad = { workspace = true }
 vectorcraft-eps = { workspace = true }
 vectorcraft-metafile = { workspace = true }
 vectorcraft-plugins = { workspace = true }
+vectorcraft-affinity = { workspace = true }
+vectorcraft-scriptcheck = { workspace = true }
 image = { workspace = true }
 flate2 = { workspace = true }
 kurbo = { workspace = true }
@@ -34,6 +42,11 @@ thiserror = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
+jpeg-encoder = { workspace = true }
+vectorcraft-affinity = { workspace = true, features = ["synth"] }
+crc32fast = { workspace = true }
 vectorcraft-testkit = { workspace = true }
 proptest = { workspace = true }
 wat = { workspace = true }
+# Zstandard streams for the Illustrator editing data fuzz tests.
+ruzstd = { workspace = true }

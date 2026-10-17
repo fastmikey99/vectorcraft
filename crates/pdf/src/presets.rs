@@ -61,6 +61,11 @@ pub fn builtin_presets() -> Vec<PdfPreset> {
             "Keeps the document editable: VectorCraft reopens the PDF with nothing lost. For files you'll edit again.",
             PdfSettings { preserve_editing: true, ..Default::default() },
         ),
+        preset(
+            "Separation Roundtrip",
+            "Retains imported print boxes, layers, inks and original JPEGs; no downsampling, conversion or image smoothing.",
+            PdfSettings { compatibility: Compatibility::Pdf16, create_layers: true, disable_image_interpolation: true, ..Default::default() },
+        ),
         preset("High Quality Print", "For desktop printers and proofs: images stay at print resolution.", print(ImageCodec::Auto, false)),
         preset(
             "Press Quality",

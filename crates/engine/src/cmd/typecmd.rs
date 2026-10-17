@@ -39,7 +39,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Set Text",
             [],
             None,
-            "{id?|ids?, text} replace the contents of text objects (keeps the first run's style)",
+            "{id?|ids?, text} replace the contents of text objects (keeps the first run's style) → {ids, overflow?: [id…] (area type and type on a path whose text no longer fits; left out when all fits)}",
             has_doc,
             set_text
         ),
@@ -48,7 +48,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Area Type Options…",
             ["Type"],
             None,
-            "{ids?, width?: pt, height?: pt, rows?, columns?, gutter?: pt, inset?: pt, firstBaseline?: ascent|capHeight|xHeight|leading|fixed, firstBaselineMin?: pt, verticalAlign?: top|center|bottom|justify, fit?: none|autoHeight|shrinkText, fitMinPercent?: 10..100} set the selected area type's options; width and height size the type area from its top-left corner, along the type's own axes, and the text reflows at its size (with fit autoHeight, Auto Size, the frame's height follows the text after every edit and height is ignored; setting the height by hand turns it off); fit shrinkText scales overflowing text down (size, leading, baseline shift) by the largest factor down to fitMinPercent % (default 50) that makes it fit (none given: query) → the first object's options, plus overflow (the text doesn't fit its frame) and fitScale (Shrink Text's factor, 1 unshrunk)",
+            "{ids?|id?, width?: pt, height?: pt, rows?, columns?, gutter?: pt, inset?: pt, firstBaseline?: ascent|capHeight|xHeight|leading|fixed, firstBaselineMin?: pt, verticalAlign?: top|center|bottom|justify, fit?: none|autoHeight|shrinkText, fitMinPercent?: 10..100, …the keys of its own reply (it can be passed back; the values it only reports are ignored)} set the selected area type's options; width and height size the type area from its top-left corner, along the type's own axes, and the text reflows at its size (with fit autoHeight, Auto Size, the frame's height follows the text after every edit and height is ignored; setting the height by hand turns it off); fit shrinkText scales overflowing text down (size, leading, baseline shift) by the largest factor down to fitMinPercent % (default 50) that makes it fit (none given: query) → the first object's options, plus overflow (the text doesn't fit its frame) and fitScale (Shrink Text's factor, 1 unshrunk)",
             has_selection,
             area_options
         ),
@@ -66,7 +66,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Fit Headline",
             ["Type"],
             None,
-            "{ids?} track the first line of area type so it fills the frame width → {tracking}",
+            "{ids?|id?} track the first line of area type so it fills the frame width → {tracking}",
             has_selection,
             fit_headline
         ),
@@ -75,7 +75,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Character",
             [],
             None,
-            "{ids?|id?, font?, style?, size?: pt, leading?: pt|\"auto\", tracking?: 1/1000 em, justify?: \"auto\" (the start of each paragraph's direction)|\"left\"|\"center\"|\"right\"|\"justifyAll\", fill?: colour, features?: [\"dlig\", \"-liga\", …] OpenType, start?: byte, end?: byte} (with a range: the character attributes style that range and justify the paragraphs it touches; without: all the text)",
+            "{ids?|id?, font?, style?, size?: pt, leading?: pt|\"auto\", tracking?: 1/1000 em, justify?: \"auto\" (the start of each paragraph's direction)|\"left\"|\"center\"|\"right\"|\"justifyAll\", fill?: colour, features?: [\"dlig\", \"-liga\", …] OpenType, start?: byte, end?: byte} (size/leading are document points after object scaling; with a range: the character attributes style that range and justify the paragraphs it touches; without: all the text) → {ids, overflow?: [id…] (area type and type on a path whose text no longer fits; left out when all fits)}",
             has_doc,
             set_style
         ),
@@ -124,6 +124,15 @@ fn auto_height_frame(t: &TextObject) -> Option<vectorcraft_geom::Rect> {
     (finite && b.height() > 1e-6 && b.width() > 1e-6 && (area - b.area()).abs() <= b.area() * 1e-6).then_some(b)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests: how many times [`auto_height`] laid out text in its columns on this thread.
+    pub(crate) static COLUMN_LAYOUTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Tests: when set, [`auto_height`] lays out the columns at every step of its bisection on
+    /// this thread.
+    pub(crate) static FULL_SEARCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Auto Size: move the bottom of a rectangular area type frame to just below its last line (plus
 /// the inset), so the frame's height follows the text. Text in several columns gets the least
 /// height (to 0.01 pt) at which it fits. True when the frame changed.
@@ -158,21 +167,30 @@ fn auto_height(t: &mut TextObject) -> bool {
         // The least height (to 0.01 pt) at which the columns hold the text.
         probe.area.columns = cols;
         let fits = |probe: &mut TextObject, h: f64| {
+            #[cfg(test)]
+            COLUMN_LAYOUTS.with(|c| c.set(c.get() + 1));
             with_size(probe, b.width(), h);
             !vectorcraft_text::layout(db, probe).overflow
         };
-        if !fits(&mut probe, h) {
-            return false;
-        }
-        let (mut lo, mut hi) = (1.0, h);
-        for _ in 0..24 {
-            if hi - lo <= 0.01 {
-                break;
+        // The bisection runs on the one column's lines as `columns_hold` places them in the columns.
+        // The columns are then laid out at the upper height it ends on and, when they hold the text
+        // there, at the lower one, unless that is the 1 pt it starts from. When the one column
+        // overflows, when text wraps around other objects, or when the columns don't hold the text
+        // at the upper height or do hold it at the lower one, the columns are laid out at every step
+        // of the bisection.
+        let quick = !lay.overflow && t.wrap.is_empty();
+        #[cfg(test)]
+        let quick = quick && !FULL_SEARCH.with(std::cell::Cell::get);
+        let ends = quick.then(|| least_height(1.0, h, |x| columns_hold(&lay.lines, cols, b.y0, inset, x)));
+        h = match ends {
+            Some((lo, hi)) if fits(&mut probe, hi) && (lo <= 1.0 || !fits(&mut probe, lo)) => hi,
+            _ => {
+                if !fits(&mut probe, h) {
+                    return false;
+                }
+                least_height(1.0, h, |x| fits(&mut probe, x)).1
             }
-            let mid = (lo + hi) * 0.5;
-            if fits(&mut probe, mid) { hi = mid } else { lo = mid }
-        }
-        h = hi;
+        };
     }
     if (h - b.height()).abs() <= 1e-6 {
         return false;
@@ -189,6 +207,38 @@ fn auto_height(t: &mut TextObject) -> bool {
     true
 }
 
+/// The bisection [`auto_height`] runs for text in columns, from `lo` (taken not to fit) and `hi`
+/// (where it fits): at most 24 halvings, until they are at most 0.01 pt apart → (lo, hi).
+fn least_height(mut lo: f64, mut hi: f64, mut fits: impl FnMut(f64) -> bool) -> (f64, f64) {
+    for _ in 0..24 {
+        if hi - lo <= 0.01 {
+            break;
+        }
+        let mid = (lo + hi) * 0.5;
+        if fits(mid) { hi = mid } else { lo = mid }
+    }
+    (lo, hi)
+}
+
+/// Do `cols` columns of a frame `h` tall (its top at `y0`, the text `inset` inside it) hold
+/// `lines`, the text's lines laid out in one column as wide as each of them from the same top?
+/// Each column takes the next lines while they end within its bottom, as layout tests them
+/// (`baseline + descent <= bottom + 0.01`). A column's first line sits its
+/// [`first_baseline`](vectorcraft_text::LineInfo::first_baseline) below `y0 + inset`, and the
+/// lines after it keep their distances from it. A last line with no characters (after a return
+/// that ends the text) may be left out, as layout leaves it out without overflowing.
+fn columns_hold(lines: &[vectorcraft_text::LineInfo], cols: usize, y0: f64, inset: f64, h: f64) -> bool {
+    let Some(first) = lines.first() else { return true };
+    let bottom = y0 + h - inset + 0.01;
+    let mut next = 0;
+    for _ in 0..cols {
+        let Some(start) = lines.get(next) else { break };
+        let up = (start.baseline - start.first_baseline) - (first.baseline - first.first_baseline);
+        next += lines.iter().skip(next).take_while(|l| l.baseline + l.descent - up <= bottom).count();
+    }
+    next >= lines.len() || (next + 1 == lines.len() && lines.last().is_some_and(|l| l.start == l.end))
+}
+
 /// Recompute the layout bounds cache for the text among `ids` (and their descendants) that lacks
 /// it. Pasted or imported type arrives without the cache (not serialized), so selection boxes, the
 /// Transform panel and hit testing would fall back to [`TextObject::estimate_bounds`] (a rough
@@ -200,6 +250,39 @@ pub(crate) fn refresh_bounds_of(d: &mut Document, ids: &[NodeId]) {
         {
             refresh_bounds(t);
         }
+    }
+}
+
+/// `result` with `overflow: [id…]`: the area type and type on a path among `ids` whose text
+/// doesn't fit (the red overflow "+"; its lines past the frame aren't drawn). Left out when all of
+/// it fits. The commands that make type or change what it holds answer with it, so the call that
+/// pushed text out of its frame says so itself.
+pub(crate) fn with_overflow(s: &Session, ids: &[NodeId], mut result: Value) -> Value {
+    let Ok(st) = s.doc() else { return result };
+    let db = vectorcraft_text::FontDb::global();
+    let fits = |t: &TextObject| matches!(t.kind, vectorcraft_doc::TextKind::Point) || !vectorcraft_text::layout(db, t).overflow;
+    let over = |id: &&NodeId| matches!(st.doc.node(**id).map(|n| &n.kind), Some(NodeKind::Text(t)) if !fits(t));
+    let over: Vec<u64> = ids.iter().filter(over).map(|i| i.0).collect();
+    if !over.is_empty() {
+        result["overflow"] = json!(over);
+    }
+    result
+}
+
+/// The warning that Print gives for `ids`, area type and type on a path whose text doesn't fit
+/// (as [`with_overflow`] finds it): the text past the end of their frames doesn't print. It names
+/// the first 20 ids and counts the rest; `None` when `ids` is empty.
+pub(crate) fn overflow_warning(ids: &[NodeId]) -> Option<String> {
+    const NAMED: usize = 20;
+    let (named, rest) = ids.split_at(ids.len().min(NAMED));
+    let mut list = named.iter().map(|i| i.0.to_string()).collect::<Vec<_>>().join(", ");
+    if !rest.is_empty() {
+        list = format!("{list} and {} more", rest.len());
+    }
+    match ids {
+        [] => None,
+        [_] => Some(format!("1 text object doesn't fit its frame: the text past the end of the frame doesn't print (id {list})")),
+        _ => Some(format!("{} text objects don't fit their frames: the text past the end of each frame doesn't print (ids {list})", ids.len())),
     }
 }
 
@@ -248,7 +331,14 @@ fn create_outlines(s: &mut Session, _: &Value) -> Result<Value> {
                 }
                 let st = t.runs.get(g.run).map(|r| r.style.clone()).unwrap_or_else(|| t.first_style());
                 let mut node = shape_node(d, path, None);
-                node.appearance = st.appearance();
+                node.appearance = st.appearance().into();
+                children.push(Arc::new(node));
+            }
+            // Underline and strikethrough bars become paths of their run's paint too (#847).
+            for (run, bar) in vectorcraft_text::decorations(&lay, vectorcraft_text::FontDb::global(), t) {
+                let st = t.runs.get(run).map(|r| r.style.clone()).unwrap_or_else(|| t.first_style());
+                let mut node = shape_node(d, PathData::from_bezpath(&bar).transformed(t.xf), None);
+                node.appearance = st.appearance().into();
                 children.push(Arc::new(node));
             }
             let (par, idx, _) = d.position(tid).ok_or(EngineError::NoNode(tid))?;
@@ -280,6 +370,22 @@ pub(crate) fn text_targets(s: &Session, p: &Value, cmd: &str) -> Result<Vec<Node
         return Err(bad(cmd, "no text objects selected"));
     }
     Ok(t)
+}
+
+/// Clamp in the units shown to the user, then compensate the text's affine. Clamping
+/// the local result would make small sizes impossible after enlarging an object.
+pub(crate) fn local_type_value(t: &TextObject, value: f64, limits: (f64, f64), horizontal: bool, cmd: &str) -> Result<f64> {
+    if !value.is_finite() {
+        return Err(bad(cmd, "type dimension must be finite"));
+    }
+    let scale = t.style_scale().ok_or_else(|| bad(cmd, "text transform is collapsed or unrepresentable"))?;
+    let local = value.clamp(limits.0, limits.1) / if horizontal { scale.horizontal } else { scale.points };
+    // Bound local dimensions too: an extreme inverse scale can produce a finite size
+    // whose leading, glyph advances or layout bounds overflow before the edit's geometry check.
+    if !local.is_finite() || local.abs() > crate::MAX_COORD || (value != 0.0 && local == 0.0) {
+        return Err(bad(cmd, "type dimension cannot be represented with this text transform"));
+    }
+    Ok(local)
 }
 
 /// Optional `start`/`end` byte offsets of a text command: the character range it styles and the
@@ -350,10 +456,10 @@ fn set_text(s: &mut Session, p: &Value) -> Result<Value> {
         }
         Ok(())
     })?;
-    Ok(json!({ "ids": ids.iter().map(|i| i.0).collect::<Vec<_>>() }))
+    Ok(with_overflow(s, &ids, json!({ "ids": ids.iter().map(|i| i.0).collect::<Vec<_>>() })))
 }
 
-fn justify_param(v: &str) -> Option<Justify> {
+pub(crate) fn justify_param(v: &str) -> Option<Justify> {
     Some(match v.to_ascii_lowercase().as_str() {
         "auto" => Justify::Auto,
         "left" => Justify::Left,
@@ -408,6 +514,8 @@ fn set_style(s: &mut Session, p: &Value) -> Result<Value> {
     s.edit("Character", |d, _| {
         for id in &ids {
             let Some(NodeKind::Text(t)) = d.node_mut(*id).map(|n| &mut n.kind) else { continue };
+            let size = size.map(|v| local_type_value(t, v, (0.1, 1296.0), false, C)).transpose()?;
+            let leading = leading.map(|v| v.map(|v| local_type_value(t, v, (0.1, 5000.0), false, C)).transpose()).transpose()?;
             let before = protect.then(|| t.runs.clone());
             style_chars(t, range, |st| {
                 if let Some(f) = &font {
@@ -416,8 +524,12 @@ fn set_style(s: &mut Session, p: &Value) -> Result<Value> {
                 if let Some(f) = &style {
                     st.font_style = f.clone();
                 }
+                // Another font: none of the old one's versions.
+                if font.is_some() || style.is_some() {
+                    st.font_version = None;
+                }
                 if let Some(v) = size {
-                    st.size = v.clamp(0.1, 1296.0);
+                    st.size = v;
                 }
                 if let Some(l) = leading {
                     st.leading = l;
@@ -441,9 +553,38 @@ fn set_style(s: &mut Session, p: &Value) -> Result<Value> {
             }
             refresh_bounds(t);
         }
+        // Graph labels keep a change made to all of their text through the graph being drawn again (sizes as given,
+        // not in a scaled label's own units).
+        if range.is_none() {
+            super::graph::capture_label_styles(d, &ids, &|st| {
+                if let Some(f) = &font {
+                    st.font_family = f.clone();
+                    st.font_version = None;
+                }
+                if let Some(f) = &style {
+                    st.font_style = f.clone();
+                    st.font_version = None;
+                }
+                if let Some(v) = size {
+                    st.size = v.clamp(0.1, 1296.0);
+                }
+                if let Some(l) = leading {
+                    st.leading = l;
+                }
+                if let Some(v) = tracking {
+                    st.tracking = v.clamp(-1000.0, 10000.0);
+                }
+                if let Some(f) = &fill {
+                    st.fill = f.clone();
+                }
+                if let Some(f) = &features {
+                    st.features = f.clone();
+                }
+            });
+        }
         Ok(())
     })?;
-    Ok(json!({ "ids": ids.iter().map(|i| i.0).collect::<Vec<_>>() }))
+    Ok(with_overflow(s, &ids, json!({ "ids": ids.iter().map(|i| i.0).collect::<Vec<_>>() })))
 }
 
 /// Reshape area type's frame with `f` ([`TextObject::transform_area`],
@@ -588,8 +729,8 @@ fn area_options(s: &mut Session, p: &Value) -> Result<Value> {
         return options(s);
     }
     let mut opts: vectorcraft_doc::AreaOptions = serde_json::from_value(v).map_err(|e| bad(C, e.to_string()))?;
-    opts.rows = opts.rows.clamp(1, 100);
-    opts.columns = opts.columns.clamp(1, 100);
+    opts.rows = opts.rows.clamp(1, vectorcraft_doc::AreaOptions::MAX_ROWS_COLUMNS);
+    opts.columns = opts.columns.clamp(1, vectorcraft_doc::AreaOptions::MAX_ROWS_COLUMNS);
     let finite = |x: f64| if x.is_finite() { x } else { 0.0 };
     opts.gutter = finite(opts.gutter).clamp(0.0, 10_000.0);
     opts.inset = finite(opts.inset).clamp(0.0, 10_000.0);
@@ -617,7 +758,7 @@ fn area_options(s: &mut Session, p: &Value) -> Result<Value> {
 fn reshape_area(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "text.reshapeArea";
     let id = id_param(p, "id").ok_or_else(|| bad(C, "missing id"))?;
-    let mut refs = super::select::parse_refs(p.get("anchors"));
+    let mut refs = super::select::checked_refs(p.get("anchors"), C)?;
     refs.sort_unstable();
     refs.dedup();
     if refs.is_empty() {
@@ -625,7 +766,7 @@ fn reshape_area(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let d = Vec2::new(f64_req(p, "dx", C)?, f64_req(p, "dy", C)?);
     let node = s.doc()?.doc.node(id);
-    if area_text(node).is_none() || node.is_some_and(|n| n.perspective.is_some()) {
+    if area_text(node).is_none() || node.is_some_and(|n| n.extras().perspective.is_some()) {
         return Err(bad(C, "not area type (text in a frame) outside perspective"));
     }
     s.edit("Reshape Type Area", |doc, _| {
@@ -641,6 +782,81 @@ fn reshape_area(s: &mut Session, p: &Value) -> Result<Value> {
 #[cfg(test)]
 mod area_tests {
     use super::*;
+
+    /// #1748: `text.create` takes `justify`; point type then lines up on its point (centred on
+    /// it, or ending there), and `text.setStyle` moves it the same way afterwards.
+    #[test]
+    fn text_create_justify_anchors_point_type_on_its_point() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({"width": 600, "height": 400})).unwrap();
+        let bounds = |s: &Session, id: &Value| {
+            let id = NodeId(id.as_u64().unwrap());
+            let st = s.doc().unwrap();
+            st.doc.bounds_of(&[id], false).unwrap()
+        };
+        let make = |s: &mut Session, extra: Value| {
+            let mut p = json!({"x": 300, "y": 100, "text": "Centred title", "size": 24});
+            for (k, v) in extra.as_object().unwrap() {
+                p[k] = v.clone();
+            }
+            s.execute("text.create", &p).unwrap()["id"].clone()
+        };
+        let id = make(&mut s, json!({}));
+        let left = bounds(&s, &id);
+        assert!(left.width() > 10.0, "{left:?}");
+        assert!((left.x0 - 300.0).abs() < 1.0, "left (the default) starts at x: {left:?}");
+        let id = make(&mut s, json!({"justify": "center"}));
+        let centre = bounds(&s, &id);
+        assert!((centre.center().x - 300.0).abs() < 0.5, "centred on x: {centre:?}");
+        assert!((centre.width() - left.width()).abs() < 0.5);
+        let right = make(&mut s, json!({"justify": "right"}));
+        let r = bounds(&s, &right);
+        assert!((r.x1 - 300.0).abs() < 1.0, "ends at x: {r:?}");
+        let got = |s: &Session, id: &Value| match &s.doc().unwrap().doc.node(NodeId(id.as_u64().unwrap())).unwrap().kind {
+            NodeKind::Text(t) => t.para.justify,
+            _ => panic!("not text"),
+        };
+        assert_eq!(got(&s, &right), Justify::Right);
+        // Changed afterwards, it moves to the same place as made centred.
+        s.execute("text.setStyle", &json!({"id": right, "justify": "center"})).unwrap();
+        let moved = bounds(&s, &right);
+        assert!((moved.center().x - 300.0).abs() < 0.5, "{moved:?}");
+        assert!(s.execute("text.create", &json!({"x": 0, "y": 0, "text": "a", "justify": "middle"})).is_err());
+        // Type in or on a path takes it too.
+        let path = s.execute("path.create", &json!({"d": "M50 300 L550 300"})).unwrap()["id"].clone();
+        let on = s.execute("text.createInPath", &json!({"path": path, "mode": "onPath", "text": "On a path", "justify": "center"})).unwrap();
+        assert_eq!(got(&s, &on["id"]), Justify::Center);
+    }
+
+    #[test]
+    fn kinsoku_set_is_set_per_paragraph_and_saved_only_when_not_hard() {
+        use vectorcraft_doc::Kinsoku;
+        let mut s = Session::new();
+        s.execute("file.new", &json!({"width": 400, "height": 400})).unwrap();
+        let id = s.execute("text.create", &json!({"x": 10, "y": 10, "text": "あカッ", "area": {"width": 40, "height": 100}})).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let para = |s: &Session| match &s.doc().unwrap().doc.node(NodeId(id)).unwrap().kind {
+            NodeKind::Text(t) => t.para.clone(),
+            _ => panic!("text"),
+        };
+        // New type: Hard, today's set.
+        assert_eq!(para(&s).kinsoku, Kinsoku::Hard);
+        assert!(serde_json::to_value(para(&s)).unwrap().get("kinsoku").is_none());
+        s.execute("select.set", &json!({"ids": [id]})).unwrap();
+        assert!(s.execute("text.setFormat", &json!({"kinsoku": "strict"})).is_err());
+        s.execute("text.setFormat", &json!({"kinsoku": "soft"})).unwrap();
+        assert_eq!(para(&s).kinsoku, Kinsoku::Soft);
+        assert_eq!(serde_json::to_value(para(&s)).unwrap()["kinsoku"], "soft");
+        s.execute("text.setFormat", &json!({"kinsoku": "none"})).unwrap();
+        assert_eq!(para(&s).kinsoku, Kinsoku::None);
+        s.execute("edit.undo", &json!({})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(para(&s).kinsoku, Kinsoku::Hard);
+        // Documents from before it read as Hard.
+        let old: vectorcraft_doc::ParaStyle = serde_json::from_value(json!({"justify": "Left"})).unwrap();
+        assert_eq!(old.kinsoku, Kinsoku::Hard);
+    }
 
     #[test]
     fn burasagari_is_set_per_paragraph_and_saved_only_when_on() {
@@ -670,6 +886,48 @@ mod area_tests {
         assert_eq!(para(&s).burasagari, Burasagari::Standard);
         let old: vectorcraft_doc::ParaStyle = serde_json::from_value(json!({"justify": "Left"})).unwrap();
         assert_eq!(old.burasagari, Burasagari::None);
+    }
+
+    /// Paragraph panel menu › Hyphenation…: `text.setFormat` sets each paragraph's hyphenation
+    /// options, rounded and clamped, in one undo step; they are saved only when not the defaults,
+    /// and paragraph styles carry them.
+    #[test]
+    fn hyphenation_options_are_set_per_paragraph_and_saved_only_when_not_default() {
+        use vectorcraft_doc::HyphenationOptions;
+        let mut s = Session::new();
+        s.execute("file.new", &json!({"width": 400, "height": 400})).unwrap();
+        let id = s.execute("text.create", &json!({"x": 10, "y": 10, "text": "One\nTwo", "area": {"width": 200, "height": 100}})).unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let paras = |s: &Session| match &s.doc().unwrap().doc.node(NodeId(id)).unwrap().kind {
+            NodeKind::Text(t) => (t.para_at(0).clone(), t.para_at(1).clone()),
+            _ => panic!("text"),
+        };
+        assert_eq!(paras(&s).0.hyphenation, HyphenationOptions::default());
+        assert!(serde_json::to_value(paras(&s).0).unwrap().get("hyphenation").is_none());
+        s.execute("select.set", &json!({"ids": [id]})).unwrap();
+        s.execute(
+            "text.setFormat",
+            &json!({"wordsLongerThan": 7.6, "afterFirst": 0, "beforeLast": 40, "hyphenLimit": 2, "hyphenationZone": 18, "hyphenateCapitalized": false, "start": 5, "end": 5}),
+        )
+        .unwrap();
+        let want = HyphenationOptions { words_longer_than: 8, after_first: 1, before_last: 15, hyphen_limit: 2, zone: 18.0, capitalized: false };
+        let (first, second) = paras(&s);
+        assert_eq!((first.hyphenation, &second.hyphenation), (HyphenationOptions::default(), &want), "only the paragraph the caret is in");
+        assert_eq!(serde_json::to_value(&second).unwrap()["hyphenation"]["hyphen_limit"], 2);
+        let back: vectorcraft_doc::ParaStyle = serde_json::from_value(serde_json::to_value(&second).unwrap()).unwrap();
+        assert_eq!(back.hyphenation, want);
+        s.execute("text.setFormat", &json!({"hyphenLimit": -3, "hyphenationZone": 5000})).unwrap();
+        assert_eq!((paras(&s).0.hyphenation.hyphen_limit, paras(&s).1.hyphenation.zone), (0, 1296.0));
+        s.execute("edit.undo", &json!({})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(paras(&s).1.hyphenation, HyphenationOptions::default());
+        // A paragraph style carries them; an older file's paragraph reads the defaults.
+        s.execute("paraStyle.new", &json!({"name": "Loose", "attrs": {"hyphenation": {"words_longer_than": 9}}})).unwrap();
+        s.execute("paraStyle.apply", &json!({"name": "Loose", "id": id})).unwrap();
+        assert_eq!(paras(&s).0.hyphenation, HyphenationOptions { words_longer_than: 9, ..HyphenationOptions::default() });
+        let old: vectorcraft_doc::ParaStyle = serde_json::from_value(json!({"justify": "Left", "hyphenate": true})).unwrap();
+        assert_eq!(old.hyphenation, HyphenationOptions::default());
     }
 
     /// #432: while the interface is in Japanese, new type (text.create, text.createInPath) starts
@@ -744,7 +1002,8 @@ mod area_tests {
         use vectorcraft_doc::LeadingModel;
         let mut s = Session::new();
         s.execute("file.new", &json!({"width": 400, "height": 400})).unwrap();
-        let id = s.execute("text.create", &json!({"x": 10, "y": 10, "text": "一\n二", "area": {"width": 200, "height": 100}})).unwrap()["id"]
+        // Exercise ink bounds with bundled glyphs; Japanese outlines require optional craft-fonts.
+        let id = s.execute("text.create", &json!({"x": 10, "y": 10, "text": "A\nB", "area": {"width": 200, "height": 100}})).unwrap()["id"]
             .as_u64()
             .unwrap();
         let text = |s: &Session| match &s.doc().unwrap().doc.node(NodeId(id)).unwrap().kind {
@@ -797,6 +1056,68 @@ mod area_tests {
             assert!(runs(&s).iter().all(|r| r.style.char_align == want));
             assert_eq!(serde_json::to_value(&runs(&s)[0].style).unwrap()["charAlign"], key);
         }
+    }
+
+    /// Proportional Metrics (#966): a character attribute, saved only when on.
+    #[test]
+    fn proportional_metrics_is_a_character_attribute_saved_only_when_on() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({"width": 400, "height": 400})).unwrap();
+        let id = s.execute("text.create", &json!({"x": 10, "y": 50, "text": "雅楽"})).unwrap()["id"].as_u64().unwrap();
+        let runs = |s: &Session| match &s.doc().unwrap().doc.node(NodeId(id)).unwrap().kind {
+            NodeKind::Text(t) => t.runs.clone(),
+            _ => panic!("text"),
+        };
+        assert!(!runs(&s)[0].style.proportional_metrics);
+        assert!(serde_json::to_value(&runs(&s)[0].style).unwrap().get("proportionalMetrics").is_none());
+        s.execute("select.set", &json!({"ids": [id]})).unwrap();
+        s.execute("text.setFormat", &json!({"proportionalMetrics": true})).unwrap();
+        assert!(runs(&s).iter().all(|r| r.style.proportional_metrics));
+        assert_eq!(serde_json::to_value(&runs(&s)[0].style).unwrap()["proportionalMetrics"], true);
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert!(!runs(&s)[0].style.proportional_metrics);
+        // Characters selected with the Type tool: only the range takes it (雅 is 3 bytes).
+        s.execute("text.setRangeStyle", &json!({"id": id, "start": 3, "end": 6, "proportionalMetrics": true})).unwrap();
+        let on: Vec<_> = runs(&s).iter().map(|r| (r.text.clone(), r.style.proportional_metrics)).collect();
+        assert_eq!(on, [("雅".to_string(), false), ("楽".to_string(), true)]);
+        // Styles written without it (documents from before it) read as off.
+        let old = serde_json::to_value(&runs(&s)[0].style).unwrap();
+        assert!(old.get("proportionalMetrics").is_none());
+        assert!(!serde_json::from_value::<vectorcraft_doc::CharStyle>(old).unwrap().proportional_metrics);
+    }
+
+    /// Digits (Character panel menu, Middle Eastern options): a character attribute, saved only
+    /// when set; the text keeps the digits that were typed.
+    #[test]
+    fn digits_are_a_character_attribute_saved_only_when_set() {
+        use vectorcraft_doc::Digits;
+        let mut s = Session::new();
+        s.execute("file.new", &json!({"width": 400, "height": 400})).unwrap();
+        let id = s.execute("text.create", &json!({"x": 10, "y": 50, "text": "صفحة 12"})).unwrap()["id"].as_u64().unwrap();
+        let runs = |s: &Session| match &s.doc().unwrap().doc.node(NodeId(id)).unwrap().kind {
+            NodeKind::Text(t) => t.runs.clone(),
+            _ => panic!("text"),
+        };
+        assert_eq!(runs(&s)[0].style.digits, Digits::Default);
+        assert!(serde_json::to_value(&runs(&s)[0].style).unwrap().get("digits").is_none());
+        s.execute("select.set", &json!({"ids": [id]})).unwrap();
+        for (key, want) in [("hindi", Digits::Hindi), ("farsi", Digits::Farsi), ("arabic", Digits::Arabic), ("default", Digits::Default)] {
+            s.execute("text.setFormat", &json!({"digits": key})).unwrap();
+            assert!(runs(&s).iter().all(|r| r.style.digits == want));
+            let saved = serde_json::to_value(&runs(&s)[0].style).unwrap();
+            assert_eq!(saved.get("digits").and_then(|v| v.as_str()), (want != Digits::Default).then_some(key));
+            // The text is as typed: only the glyphs change.
+            assert_eq!(runs(&s).iter().map(|r| r.text.as_str()).collect::<String>(), "صفحة 12");
+        }
+        s.execute("text.setFormat", &json!({"digits": "hindi"})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(runs(&s)[0].style.digits, Digits::Default);
+        let err = s.execute("text.setFormat", &json!({"digits": "roman"})).unwrap_err().to_string();
+        assert!(err.contains("`digits` must be"), "{err}");
+        // Characters selected with the Type tool: only the range takes it (صفحة is 8 bytes).
+        s.execute("text.setRangeStyle", &json!({"id": id, "start": 9, "end": 11, "digits": "farsi"})).unwrap();
+        let set: Vec<_> = runs(&s).iter().map(|r| (r.text.clone(), r.style.digits)).collect();
+        assert_eq!(set, [("صفحة ".to_string(), Digits::Default), ("12".to_string(), Digits::Farsi)]);
     }
 
     #[test]
@@ -871,6 +1192,7 @@ mod area_tests {
 }
 
 /// Width of the first line and of the space it can fill, with `tracking` on the first paragraph.
+/// The third value is where the first line ends in the plain text.
 fn headline_fit(t: &TextObject, tracking: f64) -> Option<(f64, f64, usize)> {
     let mut probe = t.clone();
     let para_end = probe.plain_text().find('\n').unwrap_or(usize::MAX);
@@ -880,7 +1202,7 @@ fn headline_fit(t: &TextObject, tracking: f64) -> Option<(f64, f64, usize)> {
     let line = lay.lines.first()?;
     let para = t.para_at(0);
     let avail = cell.width() - 2.0 * t.area.inset - para.left_indent - para.right_indent;
-    Some((line.x1 - line.x0, avail, lay.lines.iter().filter(|l| l.start < para_end).count()))
+    Some((line.x1 - line.x0, avail, line.end))
 }
 
 fn fit_headline(s: &mut Session, p: &Value) -> Result<Value> {
@@ -893,8 +1215,11 @@ fn fit_headline(s: &mut Session, p: &Value) -> Result<Value> {
         if !matches!(t.kind, vectorcraft_doc::TextKind::Area { .. }) {
             continue;
         }
-        // Largest tracking that keeps the first paragraph on one line (bisection).
-        let one_line = |tr: f64| headline_fit(t, tr).is_some_and(|(_, _, lines)| lines == 1);
+        // Largest tracking that keeps the first paragraph on one line (bisection). The layout
+        // drops lines that overflow the frame, so a frame one line tall hides the wrapped rest:
+        // "one line" means the first line reaches the end of the first paragraph.
+        let para_end = t.plain_text().find('\n').unwrap_or(t.plain_text().len());
+        let one_line = |tr: f64| headline_fit(t, tr).is_some_and(|(_, _, end)| end >= para_end);
         let (mut lo, mut hi) = (-200.0, 2000.0);
         if !one_line(lo) {
             continue;
@@ -936,9 +1261,27 @@ mod headline_tests {
         let tr = s.execute("text.fitHeadline", &json!({})).unwrap()["tracking"].as_f64().unwrap();
         assert!(tr > 100.0, "a short word spreads out: {tr}");
         let NodeKind::Text(t) = &s.doc().unwrap().doc.node(NodeId(id)).unwrap().kind else { panic!() };
-        let (w, avail, lines) = headline_fit(t, tr).unwrap();
-        assert_eq!(lines, 1);
+        let (w, avail, end) = headline_fit(t, tr).unwrap();
+        assert_eq!(end, 8);
         assert!(avail - w < 30.0, "{w} of {avail}");
         assert_eq!(t.runs.last().unwrap().style.tracking, 0.0, "the body keeps its tracking");
+    }
+
+    #[test]
+    fn fit_headline_fills_even_when_the_frame_holds_one_line() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({"width": 400, "height": 400})).unwrap();
+        let id = s
+            .execute("text.create", &json!({"x": 10, "y": 10, "text": "NEON DRIVE", "size": 36, "area": {"width": 240, "height": 50}}))
+            .unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        s.execute("select.set", &json!({"ids": [id]})).unwrap();
+        let tr = s.execute("text.fitHeadline", &json!({})).unwrap()["tracking"].as_f64().unwrap();
+        assert!(tr < 1500.0, "a frame one line tall must not push the tracking to the ceiling: {tr}");
+        let NodeKind::Text(t) = &s.doc().unwrap().doc.node(NodeId(id)).unwrap().kind else { panic!() };
+        let (w, avail, end) = headline_fit(t, tr).unwrap();
+        assert_eq!(end, 10);
+        assert!(avail - w < 5.0, "{w} of {avail}");
     }
 }

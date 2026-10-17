@@ -166,6 +166,26 @@ fn a_postscript_ai_file_says_it_cannot_be_opened_yet() {
     assert!(s.active().is_none());
 }
 
+/// PostScript given where a PDF is read (`document.pdfInfo`, `clipboard.importPdf`) is refused
+/// with an error that names File › Open and File › Place, and both of those read the file.
+#[test]
+fn postscript_read_as_a_pdf_names_open_and_place() {
+    let ps = b"%!PS-3.0\n%%BoundingBox: 0 0 100 100\n%%EndComments\n1 0 0 setrgbcolor 10 10 50 50 rectfill\nshowpage\n%%EOF\n";
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    for cmd in ["document.pdfInfo", "clipboard.importPdf"] {
+        let e = s.execute(cmd, &json!({"dataBase64": b64(ps)})).unwrap_err().to_string();
+        assert!(e.contains("PostScript") && e.contains("not a PDF: File › Open and File › Place read it as EPS"), "{cmd}: {e}");
+        assert!(!e.contains("can't be opened"), "{cmd}: {e}");
+    }
+    for name in ["legacy.ai", "art.eps"] {
+        let r = s.execute("document.open", &json!({"name": name, "dataBase64": b64(ps)})).unwrap();
+        assert_eq!(r["warnings"], json!([]), "{name}: {r}");
+        let r = s.execute("file.place", &json!({"name": name, "dataBase64": b64(ps)})).unwrap();
+        assert_eq!(r["ids"].as_array().map(Vec::len), Some(1), "{name}: {r}");
+    }
+}
+
 /// A page showing only text, with an editor's private data when `private`.
 fn text_page(private: bool, also: &str) -> PdfPage {
     PdfPage {
@@ -188,4 +208,32 @@ fn a_placeholder_only_pdf_part_is_detected() {
     let two = pdf(&[text_page(true, ""), text_page(true, "0 g 0 0 10 10 re f")], None);
     assert!(open(&mut s, &two, json!({"pages": "1"})).is_err());
     open(&mut s, &two, json!({})).unwrap();
+}
+
+#[test]
+fn print_production_reads_all_public_pages_without_private_editing_data() {
+    let o = LoadOptions::from_params("document.open", &json!({"printProduction":true})).unwrap();
+    assert!(!o.editing_data && !o.trust_editing_data && o.layers);
+    assert_eq!(o.crop, vectorcraft_pdf::CropTo::Media);
+    assert!(!o.is_partial());
+    let mut session = Session::new();
+    open(&mut session, &three_pages(), json!({"printProduction":true})).unwrap();
+    assert_eq!(sizes(&session), [(100.0, 100.0), (200.0, 400.0), (300.0, 100.0)]);
+    assert!(session.active().unwrap().doc.unknown.contains_key("pdf.printSettings.v1"));
+    for key in ["editingData", "colorMode", "cropTo", "crop", "layers", "pages", "page"] {
+        assert!(LoadOptions::from_params("document.open", &json!({"printProduction":true, key:false})).is_err());
+    }
+}
+
+#[test]
+fn refused_production_depth_keeps_the_open_document() {
+    let mut session = Session::new();
+    open(&mut session, &three_pages(), json!({"printProduction": true})).unwrap();
+    let before = session.active().unwrap().doc.clone();
+    let levels = vectorcraft_doc::depth::MAX_DEPTH + 4;
+    let content = format!("{}1 0 0 rg 0 0 100 100 re f{}", "q 50 0 m 100 50 l 50 100 l 0 50 l h W n\n".repeat(levels), " Q".repeat(levels));
+    let bytes = pdf(&[PdfPage::new(100.0, 100.0, &content)], None);
+    let error = open(&mut session, &bytes, json!({"printProduction": true})).unwrap_err();
+    assert!(error.to_string().contains("clipping or mask information"));
+    assert!(std::sync::Arc::ptr_eq(&before, &session.active().unwrap().doc));
 }

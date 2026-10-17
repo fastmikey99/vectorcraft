@@ -272,11 +272,17 @@ pub(super) fn choice<T: Choice>(d: &Dialog, path: &str) -> Option<T> {
 /// A dropdown of the choices `T` (options for which `enabled` is false are greyed).
 pub(super) fn pick<T: Choice>(ui: &mut egui::Ui, d: &mut Dialog, path: &str, width: f32, enabled: impl Fn(T) -> bool) -> bool {
     let current = choice_index::<T>(d, path);
-    let label = current.and_then(|i| T::LABELS.get(i)).copied().unwrap_or_default();
-    let chosen = widgets::dropdown_with(ui, path, label, T::LABELS, width, |i| T::ALL.get(i).is_some_and(|c| enabled(*c)));
+    let labels: Vec<_> = T::LABELS.iter().map(|label| choice_label(crate::i18n::current(), path, label)).collect();
+    let label = current.and_then(|i| labels.get(i)).copied().unwrap_or_default();
+    let chosen = widgets::dropdown_with(ui, path, label, &labels, width, |i| T::ALL.get(i).is_some_and(|c| enabled(*c)));
     let Some(id) = chosen.and_then(|i| T::IDS.get(i)) else { return false };
     set(d, path, json!(id));
     true
+}
+
+/// Printer mark styles use adjectives, separately from interface language names.
+pub(super) fn choice_label<'a>(lang: crate::i18n::Lang, path: &str, label: &'a str) -> &'a str {
+    if path == "marks.kind" { crate::i18n::tr_ctx(lang, "mark-style", label) } else { crate::i18n::tr(lang, label) }
 }
 
 pub(super) fn number(ui: &mut egui::Ui, d: &mut Dialog, path: &str, suffix: &str, enabled: bool) {
@@ -371,7 +377,7 @@ pub(super) fn section_list(ui: &mut egui::Ui, d: &mut Dialog, sections: &[&str],
     for s in sections {
         let sel = *s == section;
         let label = egui::RichText::new(tl!(*s)).size(12.5).color(if sel { t.text_strong } else { t.text });
-        if ui.add(egui::Button::selectable(sel, label).frame_when_inactive(false).min_size(egui::vec2(LIST_WIDTH - 12.0, 24.0))).clicked() {
+        if ui.add(egui::Button::selectable(sel, label).min_size(egui::vec2(LIST_WIDTH - 12.0, 24.0))).clicked() {
             d.fields.insert("__section".into(), json!(s));
         }
     }
@@ -589,10 +595,16 @@ fn output(ui: &mut egui::Ui, d: &mut Dialog) {
     let standard = choice::<Standard>(d, "standard").unwrap_or_default();
     heading(ui, tl!("Color"));
     row(ui, tl!("Color conversion:"), |ui| {
-        pick::<ColorConversion>(ui, d, "output.conversion", 300.0, |_| true);
+        if pick::<ColorConversion>(ui, d, "output.conversion", 300.0, |_| true)
+            && choice::<ColorConversion>(d, "output.conversion") == Some(ColorConversion::PreserveSource)
+        {
+            set(d, "output.destination", json!(""));
+        }
     });
     // PDF/X-1a converts to CMYK even without a conversion.
-    let converting = get(d, "output.conversion") != ColorConversion::None.id() || standard.cmyk_only();
+    let converting =
+        !matches!(choice::<ColorConversion>(d, "output.conversion").unwrap_or_default(), ColorConversion::None | ColorConversion::PreserveSource)
+            || standard.cmyk_only();
     row(ui, tl!("Destination:"), |ui| profile_pick(ui, d, "output.destination", &names(DOCUMENT_PROFILE), 1, converting));
     row(ui, tl!("Profile inclusion:"), |ui| {
         // A standard decides whether colours are tagged.
@@ -785,6 +797,7 @@ pub(super) fn option_rows<'a>(ui: &mut egui::Ui, changed: impl IntoIterator<Item
     for c in changed {
         let value = match &c["value"] {
             Value::Bool(b) => if *b { tl!("On") } else { tl!("Off") }.to_string(),
+            Value::String(s) if c["option"] == "marks.kind" => choice_label(crate::i18n::current(), "marks.kind", s).to_string(),
             Value::String(s) => s.clone(),
             other => other.to_string(),
         };

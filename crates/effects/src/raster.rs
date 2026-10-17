@@ -4,7 +4,10 @@ use serde_json::Value;
 use vectorcraft_doc::Effect;
 use vectorcraft_doc::color::{BlendMode, Color};
 
+use vectorcraft_geom::Rect;
+
 use crate::merged_params;
+use crate::pixel::{self, PixelFx};
 use crate::util::*;
 
 /// A painted effect, in document units. `blur` is Illustrator's blur distance; the renderer uses
@@ -18,6 +21,9 @@ pub enum RasterFx {
         dy: f64,
         blur: f64,
         color: Color,
+        /// Darkness (0..1): the shadow is the object's own colors with this share of black added
+        /// instead of `color`; `None` when it is `color`.
+        darkness: Option<f32>,
     },
     OuterGlow {
         mode: BlendMode,
@@ -40,6 +46,8 @@ pub enum RasterFx {
     GaussianBlur {
         radius: f64,
     },
+    /// A Photoshop-style filter over the object's pixels (Radial Blur, Unsharp Mask…).
+    Pixel(PixelFx),
 }
 
 impl RasterFx {
@@ -47,13 +55,22 @@ impl RasterFx {
     pub fn is_below(&self) -> bool {
         matches!(self, RasterFx::DropShadow { .. } | RasterFx::OuterGlow { .. })
     }
-    /// How far this effect reaches beyond the geometry.
-    pub fn outset(&self) -> f64 {
+    /// The blend mode it paints with (shadows and glows).
+    pub fn mode(&self) -> Option<BlendMode> {
+        match self {
+            RasterFx::DropShadow { mode, .. } | RasterFx::OuterGlow { mode, .. } | RasterFx::InnerGlow { mode, .. } => Some(*mode),
+            _ => None,
+        }
+    }
+    /// How far this effect reaches beyond `bounds`, what it paints around (Radial Blur reaches
+    /// further around larger objects).
+    pub fn outset(&self, bounds: Rect) -> f64 {
         match self {
             RasterFx::DropShadow { dx, dy, blur, .. } => dx.abs().max(dy.abs()) + 1.5 * blur,
             RasterFx::OuterGlow { blur, .. } => 1.5 * blur,
             RasterFx::InnerGlow { .. } | RasterFx::Feather { .. } => 0.0,
             RasterFx::GaussianBlur { radius } => 1.5 * radius,
+            RasterFx::Pixel(p) => p.outset(bounds),
         }
     }
 }
@@ -97,6 +114,9 @@ pub fn raster_effects(effects: &[Effect]) -> Vec<RasterFx> {
                     dy: num(&p, "y", 7.0).clamp(-1e4, 1e4),
                     blur,
                     color: color_param(&p, Color::BLACK),
+                    darkness: text(&p, "shade", "color")
+                        .eq_ignore_ascii_case("darkness")
+                        .then(|| (num(&p, "darkness", 100.0) / 100.0).clamp(0.0, 1.0) as f32),
                 },
                 "stylize.outerGlow" => RasterFx::OuterGlow {
                     mode: blend_mode(text(&p, "mode", "screen")),
@@ -113,14 +133,14 @@ pub fn raster_effects(effects: &[Effect]) -> Vec<RasterFx> {
                 },
                 "stylize.feather" => RasterFx::Feather { radius: num(&p, "radius", 5.0).clamp(0.0, 1000.0) },
                 "blur.gaussian" => RasterFx::GaussianBlur { radius: num(&p, "radius", 5.0).clamp(0.0, 1000.0) },
-                _ => return None,
+                id => RasterFx::Pixel(pixel::parse(id, &p)?),
             })
         })
         .collect()
 }
 
-/// How far the visible raster effects of `effects` paint beyond the (effected) geometry, in
-/// document units. Geometry effects are accounted for by evaluating them.
-pub fn outset(effects: &[Effect]) -> f64 {
-    raster_effects(effects).iter().map(RasterFx::outset).fold(0.0, f64::max)
+/// How far the visible raster effects of `effects` paint beyond `bounds`, the (effected)
+/// geometry's, in document units. Geometry effects are accounted for by evaluating them.
+pub fn outset(effects: &[Effect], bounds: Rect) -> f64 {
+    raster_effects(effects).iter().map(|fx| fx.outset(bounds)).fold(0.0, f64::max)
 }

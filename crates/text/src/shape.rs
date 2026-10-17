@@ -49,10 +49,31 @@ pub(crate) struct SGlyph {
     /// Japanese composition: the space taken off before the glyph (an opening bracket after
     /// another, see [`crate::layout`]); the glyph is drawn that much earlier on the line.
     pub lead: f64,
+    /// Proportional Metrics changed the glyph's advance (`palt`): it has its proportional width,
+    /// and Japanese composition takes no more space off it (#966).
+    pub proportional: bool,
+    /// Vertical type with Proportional Metrics: what `vpal` does to the glyph when it stands
+    /// upright ([`crate::layout`] applies it).
+    pub vpal: Option<VAdjust>,
     /// Resolved Unicode bidi embedding level (logical source order).
     pub level: Level,
     /// An inline graphic ([`vectorcraft_doc::TextRun::inline`]) standing in for a glyph.
     pub inline: Option<InlineBox>,
+    /// A word of a script written without spaces (Thai, Lao, Khmer, Myanmar) ends after the
+    /// glyph's cluster, so a line may break there ([`mark_word_ends`]).
+    pub word_end: bool,
+}
+
+/// How `vpal` and the vertical kerning with it move an upright glyph in vertical type and change
+/// its length down the column, in points: `advance` down the column, `dx` and `dy` in glyph space
+/// (y down; `dy` is down the column once the glyph stands upright). `proportional`: `vpal` itself
+/// changed the advance.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct VAdjust {
+    pub advance: f64,
+    pub dx: f64,
+    pub dy: f64,
+    pub proportional: bool,
 }
 
 /// Placement of an inline graphic's art, glyph space being points with the pen at the origin on
@@ -86,7 +107,7 @@ impl SGlyph {
     }
     /// A line may break after this glyph.
     pub fn break_after(&self) -> bool {
-        self.is_space() || matches!(self.ch, '-' | '\u{2010}' | '\u{2013}' | '\u{2014}' | '/' | SOFT_HYPHEN) || is_cjk(self.ch)
+        self.is_space() || self.word_end || matches!(self.ch, '-' | '\u{2010}' | '\u{2013}' | '\u{2014}' | '/' | SOFT_HYPHEN) || is_cjk(self.ch)
     }
     /// A soft (discretionary) hyphen: invisible unless a line breaks after it.
     pub fn is_soft_hyphen(&self) -> bool {
@@ -117,6 +138,8 @@ pub(crate) fn hyphen_glyph(g: &SGlyph) -> SGlyph {
     h.len = 0;
     h.ch = '-';
     h.inline = None;
+    h.proportional = false;
+    h.vpal = None;
     h
 }
 
@@ -131,6 +154,41 @@ pub(crate) fn no_line_start(c: char) -> bool {
         | 'ぁ' | 'ぃ' | 'ぅ' | 'ぇ' | 'ぉ' | 'っ' | 'ゃ' | 'ゅ' | 'ょ' | 'ゎ' | 'ゕ' | 'ゖ'
         | 'ァ' | 'ィ' | 'ゥ' | 'ェ' | 'ォ' | 'ッ' | 'ャ' | 'ュ' | 'ョ' | 'ヮ' | 'ヵ' | 'ヶ' | 'ㇰ'..='ㇿ'
         | '！' | '）' | '，' | '．' | '：' | '；' | '？' | '］' | '｝' | '～' | '｡' | '｣' | '､' | '･' | 'ｰ' | 'ｧ'..='ｯ')
+}
+
+/// Soft kinsoku: a character of [`no_line_start`] that may start a line all the same: 々, the
+/// prolonged sound mark ー (JLREQ cl-10) and small kana (cl-11), as JLREQ's level 3 rules allow
+/// (Appendix C.3, https://www.w3.org/TR/jlreq/#addendum_a3).
+pub(crate) fn soft_line_start(c: char) -> bool {
+    matches!(
+        c,
+        '々' | 'ー'
+            | '\u{3041}'
+            | '\u{3043}'
+            | '\u{3045}'
+            | '\u{3047}'
+            | '\u{3049}'
+            | '\u{3063}'
+            | '\u{3083}'
+            | '\u{3085}'
+            | '\u{3087}'
+            | '\u{308E}'
+            | '\u{3095}'
+            | '\u{3096}'
+            | '\u{30A1}'
+            | '\u{30A3}'
+            | '\u{30A5}'
+            | '\u{30A7}'
+            | '\u{30A9}'
+            | '\u{30C3}'
+            | '\u{30E3}'
+            | '\u{30E5}'
+            | '\u{30E7}'
+            | '\u{30EE}'
+            | '\u{30F5}'
+            | '\u{30F6}'
+            | '\u{31F0}'..='\u{31FF}'
+    )
 }
 
 /// Kinsoku: a character that can't end a line (opening brackets).
@@ -179,6 +237,43 @@ pub(crate) fn punct(c: char) -> Option<Punct> {
     }
 }
 
+/// Is `c` of a script written without spaces between words, whose line breaks need a model of its
+/// words: Thai, Lao, Khmer or Myanmar (UAX #14's class SA)?
+pub(crate) fn is_unspaced_script(c: char) -> bool {
+    matches!(c.script(), Script::Thai | Script::Lao | Script::Khmer | Script::Myanmar)
+}
+
+/// The byte offsets of `text` where a word of Thai, Lao, Khmer or Myanmar starts or ends: where a
+/// line may break, and where the caret stops word by word, in text without spaces between words.
+/// They come from ICU4X's line segmenter (its dictionaries on the desktop, its far smaller LSTM
+/// models on the web); empty when `text` has none of those scripts. Offsets elsewhere (around
+/// other text) are UAX #14's breaks.
+pub(crate) fn unspaced_word_breaks(text: &str) -> Vec<usize> {
+    #[cfg(not(target_arch = "wasm32"))]
+    static SEGMENTER: std::sync::LazyLock<icu_segmenter::LineSegmenterBorrowed<'static>> =
+        std::sync::LazyLock::new(|| icu_segmenter::LineSegmenter::new_dictionary(Default::default()));
+    #[cfg(target_arch = "wasm32")]
+    static SEGMENTER: std::sync::LazyLock<icu_segmenter::LineSegmenterBorrowed<'static>> =
+        std::sync::LazyLock::new(|| icu_segmenter::LineSegmenter::new_auto(Default::default()));
+    if !text.chars().any(is_unspaced_script) {
+        return vec![];
+    }
+    SEGMENTER.segment_str(text).collect()
+}
+
+/// Mark the glyphs of `sg` (shaped from `text`, which starts at byte `start` of the text the
+/// glyphs index) after which a word of Thai, Lao, Khmer or Myanmar ends ([`unspaced_word_breaks`]);
+/// other text keeps its own breaks.
+pub(crate) fn mark_word_ends(text: &str, start: usize, sg: &mut [SGlyph]) {
+    let breaks: Vec<usize> = unspaced_word_breaks(text).into_iter().map(|b| b + start).collect();
+    if breaks.is_empty() {
+        return;
+    }
+    for g in sg.iter_mut().filter(|g| g.inline.is_none() && is_unspaced_script(g.ch)) {
+        g.word_end = breaks.binary_search(&(g.byte + g.len)).is_ok();
+    }
+}
+
 pub(crate) fn is_cjk(c: char) -> bool {
     matches!(c as u32, 0x2E80..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0xFF00..=0xFFEF | 0x20000..=0x2FFFF)
 }
@@ -186,7 +281,9 @@ pub(crate) fn is_cjk(c: char) -> bool {
 /// Vertical metrics (points) of a style's resolved face: (ascent, descent, leading).
 pub(crate) fn style_metrics(db: &FontDb, st: &CharStyle) -> (f64, f64, f64) {
     let vs = st.v_scale / 100.0;
-    let Some(face) = db.face(&st.font_family, &st.font_style) else { return (st.size * 0.8 * vs, st.size * 0.2 * vs, st.effective_leading()) };
+    let Some(face) = db.face_version(&st.font_family, &st.font_style, st.font_version.as_deref()) else {
+        return (st.size * 0.8 * vs, st.size * 0.2 * vs, st.effective_leading());
+    };
     let k = st.size / face.upem;
     (face.ascent * k * vs, face.descent * k * vs, st.effective_leading())
 }
@@ -194,7 +291,9 @@ pub(crate) fn style_metrics(db: &FontDb, st: &CharStyle) -> (f64, f64, f64) {
 /// Cap height and x height (points) of a style's resolved face.
 pub(crate) fn cap_x_heights(db: &FontDb, st: &CharStyle) -> (f64, f64) {
     let vs = st.v_scale / 100.0;
-    let Some(face) = db.face(&st.font_family, &st.font_style) else { return (st.size * 0.7 * vs, st.size * 0.5 * vs) };
+    let Some(face) = db.face_version(&st.font_family, &st.font_style, st.font_version.as_deref()) else {
+        return (st.size * 0.7 * vs, st.size * 0.5 * vs);
+    };
     let k = st.size / face.upem * vs;
     (face.cap_height * k, face.x_height * k)
 }
@@ -256,12 +355,12 @@ pub(crate) fn shape_range(
         let a = bytes.start;
         let b = bytes.end;
         if let Some(art) = art {
-            if let Some(face) = db.face(&st.font_family, &st.font_style).or_else(|| db.face_covering('a')) {
+            if let Some(face) = db.face_version(&st.font_family, &st.font_style, st.font_version.as_deref()).or_else(|| db.face_covering('a')) {
                 out.push(inline_glyph(&face, st, art, source_runs.start, a..b, text, level_at(a)));
             }
             continue;
         }
-        let Some(primary) = db.face(&st.font_family, &st.font_style) else { continue };
+        let Some(primary) = db.face_version(&st.font_family, &st.font_style, st.font_version.as_deref()) else { continue };
         let pmap = primary.skrifa().map(|f| f.charmap());
         // Synthesized Small Caps shape lowercase letters separately (as smaller capitals).
         let small_caps = st.small_caps.is_some() && !st.all_caps;
@@ -272,8 +371,13 @@ pub(crate) fn shape_range(
         let mut script = Script::Common;
         for (i, c) in text[a..b].char_indices() {
             let i = a + i;
+            // Digits are drawn in the style's numeral system: the font must cover that digit.
+            let c = st.digits.map(c);
             let level = level_at(i);
-            let covered = c.is_whitespace() || c.is_control() || pmap.as_ref().is_none_or(|m| m.map(c).is_some());
+            // Whitespace the primary font doesn't map goes to the fallback face like any other
+            // character (#1844): an ideographic space set at zero width would remove an indent.
+            // What the layout handles itself (tab, line and paragraph breaks) stays.
+            let covered = c.is_control() || pmap.as_ref().is_none_or(|m| m.map(c).is_some());
             let face = if covered {
                 primary.clone()
             } else if let Some((_, f)) = cache.iter().find(|(k, _)| *k == c) {
@@ -383,10 +487,13 @@ fn inline_glyph(face: &Arc<FontFace>, st: &CharStyle, art: &InlineArt, run: usiz
         ch: text.get(range.clone()).and_then(|s| s.chars().next()).unwrap_or(INLINE_CHAR),
         tcy: None,
         lead: 0.0,
+        proportional: false,
+        vpal: None,
         // U+FFFC is a bidi neutral (ON): its level, resolved from its neighbours, places it in
         // RTL text like any other glyph once the line is reordered.
         level,
         inline: Some(InlineBox { art: drawn, xf }),
+        word_end: false,
     }
 }
 
@@ -431,34 +538,79 @@ fn shape_segment(text: &str, context: &Range<usize>, seg: &Segment, feats: &OtFe
     let first_char = |byte: usize| text[byte..].chars().next().unwrap_or(' ');
 
     let mut raw: Vec<(u32, u32, i32, i32, i32)> = Vec::with_capacity(text_seg.len()); // gid, cluster, xadv, xoff, yoff
+    // Proportional Metrics: which glyphs `palt` gave another advance than their full width, and
+    // what `vpal` does to each in vertical type.
+    let mut proportional = vec![];
+    let mut vpal = vec![];
     let shaped = face.hb().map(|hb| {
         let shaper = face.shaper.shaper(&hb).instance(face.instance.as_ref()).build();
-        let mut buf = UnicodeBuffer::new();
-        for (i, c) in text_seg.char_indices() {
-            let cl = (range.start + i) as u32;
-            if upper {
-                for u in c.to_uppercase() {
-                    buf.add(u, cl);
+        // gid, cluster, x and y advance, x and y offset.
+        let shape = |feats: &[Feature], direction: Direction| {
+            let mut buf = UnicodeBuffer::new();
+            for (i, c) in text_seg.char_indices() {
+                let cl = (range.start + i) as u32;
+                let c = st.digits.map(c);
+                if upper {
+                    for u in c.to_uppercase() {
+                        buf.add(u, cl);
+                    }
+                } else {
+                    buf.add(c, cl);
                 }
-            } else {
-                buf.add(c, cl);
+            }
+            buf.set_direction(direction);
+            buf.guess_segment_properties();
+            // Harfrust keeps this Unicode context for joining/positional shaping, but does not emit
+            // glyphs for it. This retains context at real style/font segmentation boundaries without
+            // shaping across those boundaries or claiming cross-style ligatures/mark attachment.
+            if let Some(pre) = text.get(context.start..range.start) {
+                buf.set_pre_context(pre);
+            }
+            if let Some(post) = text.get(range.end..context.end) {
+                buf.set_post_context(post);
+            }
+            let gb = shaper.shape(buf, ShapeOptions::new().features(feats));
+            gb.glyph_infos()
+                .iter()
+                .zip(gb.glyph_positions())
+                .map(|(info, pos)| (info.glyph_id, info.cluster, pos.x_advance, pos.y_advance, pos.x_offset, pos.y_offset))
+                .collect::<Vec<_>>()
+        };
+        let along = if level.is_rtl() { Direction::RightToLeft } else { Direction::LeftToRight };
+        raw = shape(&feats.resolve(st), along).into_iter().map(|(g, c, xa, _, xo, yo)| (g, c, xa, xo, yo)).collect();
+        let same_glyphs = |v: &[(u32, u32, i32, i32, i32, i32)]| v.len() == raw.len() && v.iter().zip(&raw).all(|(a, b)| a.0 == b.0);
+        if feats.proportional(st) {
+            // `palt` is positioning only: the same glyphs set on their full widths tell which
+            // advances it changed (kerning and the rest change both alike).
+            let full = shape(&feats.resolve_fixed_width(st), along);
+            if same_glyphs(&full) {
+                proportional = full.iter().zip(&raw).map(|(a, b)| a.2 != b.2).collect();
             }
         }
-        buf.set_direction(if level.is_rtl() { Direction::RightToLeft } else { Direction::LeftToRight });
-        buf.guess_segment_properties();
-        // Harfrust keeps this Unicode context for joining/positional shaping, but does not emit
-        // glyphs for it. This retains context at real style/font segmentation boundaries without
-        // shaping across those boundaries or claiming cross-style ligatures/mark attachment.
-        if let Some(pre) = text.get(context.start..range.start) {
-            buf.set_pre_context(pre);
-        }
-        if let Some(post) = text.get(range.end..context.end) {
-            buf.set_post_context(post);
-        }
-        let feats: Vec<Feature> = feats.resolve(st);
-        let gb = shaper.shape(buf, ShapeOptions::new().features(&feats));
-        for (info, pos) in gb.glyph_infos().iter().zip(gb.glyph_positions()) {
-            raw.push((info.glyph_id, info.cluster, pos.x_advance, pos.x_offset, pos.y_offset));
+        if feats.proportional_vertical(st) {
+            // `vpal` adjusts heights, which only top-to-bottom shaping applies: the same glyphs set
+            // top to bottom with it (and the vertical kerning that goes with it, `vkrn` and `vapk`)
+            // and without either tell how it moves each and changes its advance down the column
+            // (y up, advances negative). Which advances `vpal` itself changed comes from setting
+            // them with it alone.
+            let ttb = |proportional, kerning| shape(&feats.resolve_vertical(st, proportional, kerning), Direction::TopToBottom);
+            let (with, without, alone) = (ttb(true, true), ttb(false, false), ttb(true, false));
+            if same_glyphs(&with) && same_glyphs(&without) && same_glyphs(&alone) {
+                vpal = with
+                    .iter()
+                    .zip(&without)
+                    .zip(&alone)
+                    .map(|((a, b), c)| {
+                        let adj = VAdjust {
+                            advance: f64::from(b.3 - a.3) * k * vs,
+                            dx: f64::from(a.4 - b.4) * k * hs,
+                            dy: -f64::from(a.5 - b.5) * k * vs,
+                            proportional: c.3 != b.3,
+                        };
+                        (adj != VAdjust::default()).then_some(adj)
+                    })
+                    .collect();
+            }
         }
     });
     if shaped.is_none() {
@@ -468,6 +620,7 @@ fn shape_segment(text: &str, context: &Range<usize>, seg: &Segment, feats: &OtFe
             let gm = f.glyph_metrics(Size::unscaled(), face.location());
             for (i, c) in text_seg.char_indices() {
                 let cl = (range.start + i) as u32;
+                let c = st.digits.map(c);
                 let chars: Vec<char> = if upper { c.to_uppercase().collect() } else { vec![c] };
                 for u in chars {
                     let g = cmap.map(u).unwrap_or_default();
@@ -514,8 +667,11 @@ fn shape_segment(text: &str, context: &Range<usize>, seg: &Segment, feats: &OtFe
             ch,
             tcy: None,
             lead: 0.0,
+            proportional: proportional.get(gi).copied().unwrap_or(false),
+            vpal: vpal.get(gi).copied().flatten(),
             level: *level,
             inline: None,
+            word_end: false,
         });
     }
 }

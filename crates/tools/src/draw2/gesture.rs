@@ -5,7 +5,9 @@
 //! and commit on release; Alt on release (or ending near the start) closes the path, and starting
 //! near an end of a selected open path continues it. The Pencil's new path starts and ends on
 //! Smart Guides ([`DrawSnap`]: an anchor, a path, in line with the art), hovering too; the points
-//! between follow the hand. The other tools collect the drag polyline (shown as an overlay) and run
+//! between follow the hand. The Paintbrush records the pen pressure of each point (a stroke a pen
+//! pressed less than fully on sends `[x, y, pressure]` points) for pressure-sensitive brushes. The
+//! other tools collect the drag polyline (shown as an overlay) and run
 //! one command on release.
 
 use serde_json::{Value, json};
@@ -19,6 +21,8 @@ use crate::{Action, Cursor, Mods, Overlay, PointerEvent, PointerKind, Tool, Tool
 pub struct GestureTool {
     id: &'static str,
     points: Vec<Point>,
+    /// The pen pressure of each of `points` (the Paintbrush only).
+    pressures: Vec<f32>,
     active: bool,
     began: bool,
     /// Pencil/Paintbrush continuing a selected open path: (path, continue from its start).
@@ -29,6 +33,11 @@ pub struct GestureTool {
     pub size: f64,
     /// Fill new pencil/brush strokes.
     pub fill: bool,
+    /// "Keep selected": select the path a Pencil, Paintbrush or Blob Brush stroke draws, continues
+    /// or merges into (on for the Pencil and Paintbrush, off for the Blob Brush).
+    pub keep_selected: bool,
+    /// "Merge only with selection": a Blob Brush stroke merges only with selected paths.
+    pub merge_only_selection: bool,
     /// "Edit selected paths within N pixels".
     pub edit_within: f64,
     /// "Close paths when ends are within N pixels".
@@ -53,12 +62,15 @@ impl GestureTool {
         Self {
             id,
             points: vec![],
+            pressures: vec![],
             active: false,
             began: false,
             extend: None,
             fidelity,
             size: 10.0,
             fill: false,
+            keep_selected: id != "blobBrush",
+            merge_only_selection: false,
             edit_within: 12.0,
             close_within: 15.0,
             snap: DrawSnap::default(),
@@ -72,6 +84,30 @@ impl GestureTool {
 
     fn draws_path(&self) -> bool {
         matches!(self.id, "pencil" | "paintbrush")
+    }
+
+    /// Add a stroke sample.
+    fn push(&mut self, p: Point, pressure: f32) {
+        self.points.push(p);
+        if self.id == "paintbrush" {
+            self.pressures.push(pressure);
+        }
+    }
+
+    /// Forget the stroke.
+    fn clear(&mut self) {
+        self.points.clear();
+        self.pressures.clear();
+    }
+
+    /// The stroke's points, each `[x, y, pressure]` when a pen pressed less than fully anywhere
+    /// along it (a mouse always presses fully).
+    fn stroke_json(&self) -> Value {
+        if self.pressures.len() == self.points.len() && self.pressures.iter().any(|p| *p < 1.0) {
+            Value::Array(self.points.iter().zip(&self.pressures).map(|(p, f)| json!([p.x, p.y, (f64::from(*f) * 1000.0).round() / 1000.0])).collect())
+        } else {
+            points_json(&self.points)
+        }
     }
 
     fn label(&self) -> &'static str {
@@ -110,11 +146,12 @@ impl GestureTool {
     /// Parameters of `path.freehand` for the current stroke.
     pub fn freehand_params(&self, closed: bool) -> Value {
         let mut v = json!({
-            "points": points_json(&self.points),
+            "points": self.stroke_json(),
             "fidelity": self.fidelity,
             "closed": closed,
             "style": if self.id == "paintbrush" { "brush" } else { "pencil" },
             "fill": self.fill,
+            "keepSelected": self.keep_selected,
         });
         if let Some((id, start)) = self.extend {
             v["extend"] = json!({"id": id.0, "end": if start { "start" } else { "end" }});
@@ -135,7 +172,15 @@ impl GestureTool {
                 let closed = m.alt || (self.extend.is_none() && near);
                 vec![Action::Preview("path.freehand".into(), self.freehand_params(closed)), Action::Commit]
             }
-            "blobBrush" => vec![Action::Exec("path.blob".into(), json!({"points": points_json(pts), "size": self.size}))],
+            "blobBrush" => vec![Action::Exec(
+                "path.blob".into(),
+                json!({
+                    "points": points_json(pts),
+                    "size": self.size,
+                    "keepSelected": self.keep_selected,
+                    "mergeOnlySelection": self.merge_only_selection
+                }),
+            )],
             "eraser" => vec![Action::Exec("path.eraseRegion".into(), json!({"points": points_json(pts), "size": self.size}))],
             "knife" if pts.len() >= 2 => vec![Action::Exec("path.knife".into(), json!({"points": points_json(pts)}))],
             "smooth" if has_sel && pts.len() >= 2 => {
@@ -168,7 +213,8 @@ impl Tool for GestureTool {
                 self.extend = if self.draws_path() { self.find_extend(cx, p) } else { None };
                 // A path continued starts at its end; a new one where it snaps.
                 let start = if self.snaps() && self.extend.is_none() { self.snap.press(cx, p, &[], None) } else { p };
-                self.points = vec![start];
+                self.clear();
+                self.push(start, ev.pressure);
                 vec![]
             }
             PointerKind::Drag => {
@@ -182,7 +228,7 @@ impl Tool for GestureTool {
                 if self.points.last().is_some_and(|l| l.distance(p) < cx.tol(1.0)) {
                     return vec![];
                 }
-                self.points.push(p);
+                self.push(p, ev.pressure);
                 if !self.draws_path() {
                     return vec![];
                 }
@@ -201,7 +247,7 @@ impl Tool for GestureTool {
                 let end = if self.snaps() { self.snap.drag(cx, p, None) } else { p };
                 self.snap.clear();
                 if self.points.last().is_some_and(|l| l.distance(p) >= cx.tol(1.0)) {
-                    self.points.push(end);
+                    self.push(end, ev.pressure);
                 } else if self.snaps()
                     && self.points.len() > 1
                     && let Some(last) = self.points.last_mut()
@@ -212,12 +258,16 @@ impl Tool for GestureTool {
                 let out = self.finish(cx, ev.mods);
                 self.active = false;
                 self.began = false;
-                self.points.clear();
+                self.clear();
                 self.extend = None;
                 out
             }
             _ => vec![],
         }
+    }
+    /// `[` and `]` are the Blob Brush's and the Eraser's: their size (#1661).
+    fn claims_key(&self, _cx: &ToolContext, key: ToolKey) -> bool {
+        matches!(key, ToolKey::BracketLeft | ToolKey::BracketRight) && matches!(self.id, "blobBrush" | "eraser")
     }
     fn key(&mut self, _cx: &ToolContext, key: ToolKey, _m: Mods) -> Vec<Action> {
         match key {
@@ -226,7 +276,7 @@ impl Tool for GestureTool {
                 self.snap.clear();
                 self.active = false;
                 self.began = false;
-                self.points.clear();
+                self.clear();
                 if began { vec![Action::Cancel] } else { vec![] }
             }
             ToolKey::BracketLeft if matches!(self.id, "blobBrush" | "eraser") => {
@@ -245,7 +295,7 @@ impl Tool for GestureTool {
         self.snap.clear();
         self.active = false;
         self.began = false;
-        self.points.clear();
+        self.clear();
         if began { vec![Action::Commit] } else { vec![] }
     }
     fn overlays(&self, cx: &ToolContext) -> Vec<Overlay> {
@@ -267,10 +317,17 @@ impl Tool for GestureTool {
     fn options(&self) -> Value {
         match self.id {
             "pencil" | "paintbrush" => {
-                json!({"fidelity": self.fidelity, "fill": self.fill, "editWithin": self.edit_within, "closeWithin": self.close_within})
+                json!({
+                    "fidelity": self.fidelity,
+                    "fill": self.fill,
+                    "keepSelected": self.keep_selected,
+                    "editWithin": self.edit_within,
+                    "closeWithin": self.close_within
+                })
             }
             "smooth" => json!({"fidelity": self.fidelity}),
-            "blobBrush" | "eraser" => json!({"size": self.size}),
+            "blobBrush" => json!({"size": self.size, "keepSelected": self.keep_selected, "mergeOnlySelection": self.merge_only_selection}),
+            "eraser" => json!({"size": self.size}),
             _ => Value::Null,
         }
     }
@@ -279,6 +336,8 @@ impl Tool for GestureTool {
             "fidelity" => self.fidelity = v.as_f64().unwrap_or(self.fidelity).clamp(0.05, 100.0),
             "size" => self.size = v.as_f64().unwrap_or(self.size).clamp(0.1, 1000.0),
             "fill" => self.fill = v.as_bool().unwrap_or(self.fill),
+            "keepSelected" => self.keep_selected = v.as_bool().unwrap_or(self.keep_selected),
+            "mergeOnlySelection" => self.merge_only_selection = v.as_bool().unwrap_or(self.merge_only_selection),
             "editWithin" => self.edit_within = v.as_f64().unwrap_or(self.edit_within).clamp(0.0, 100.0),
             "closeWithin" => self.close_within = v.as_f64().unwrap_or(self.close_within).clamp(0.0, 100.0),
             _ => {}
@@ -321,6 +380,29 @@ mod tests {
         assert_eq!(v["points"][0], json!([102.0, 98.0]));
     }
 
+    /// #852: the Paintbrush sends each point's pen pressure; a mouse (always fully pressed) and
+    /// the Pencil send plain points.
+    #[test]
+    fn paintbrush_sends_pen_pressure() {
+        let (d, _) = doc_with_rect();
+        let s = Selection::default();
+        let p = paint();
+        let cx = cx(&d, &s, &p);
+        let stroke = |id: &str, pressures: [f32; 3]| {
+            let mut t = GestureTool::new(id);
+            let kinds = [PointerKind::Down, PointerKind::Drag, PointerKind::Up];
+            let mut last = vec![];
+            for ((k, x), f) in kinds.into_iter().zip([0.0, 40.0, 80.0]).zip(pressures) {
+                last = t.pointer(&cx, &PointerEvent { pressure: f, ..PointerEvent::new(k, x, 0.0) });
+            }
+            let Some(Action::Preview(_, v)) = last.first() else { panic!("{last:?}") };
+            v["points"].clone()
+        };
+        assert_eq!(stroke("paintbrush", [0.25, 0.5, 1.0]), json!([[0.0, 0.0, 0.25], [40.0, 0.0, 0.5], [80.0, 0.0, 1.0]]));
+        assert_eq!(stroke("paintbrush", [1.0; 3]), json!([[0.0, 0.0], [40.0, 0.0], [80.0, 0.0]]));
+        assert_eq!(stroke("pencil", [0.25, 0.5, 1.0]), json!([[0.0, 0.0], [40.0, 0.0], [80.0, 0.0]]));
+    }
+
     #[test]
     fn pencil_previews_and_commits() {
         let (d, _) = doc_with_rect();
@@ -336,6 +418,49 @@ mod tests {
         assert!(matches!(&last[0], Action::Preview(_, v) if v["closed"] == false && v["style"] == "pencil"));
         assert_eq!(last[1], Action::Commit);
         assert!(!t.busy());
+    }
+
+    /// Keep selected is on by default, and every Pencil and Paintbrush preview sends it.
+    #[test]
+    fn pencil_and_paintbrush_send_keep_selected() {
+        let (d, _) = doc_with_rect();
+        let s = Selection::default();
+        let p = paint();
+        let cx = cx(&d, &s, &p);
+        for id in ["pencil", "paintbrush"] {
+            let mut t = GestureTool::new(id);
+            assert_eq!(t.options()["keepSelected"], json!(true), "{id}");
+            for keep in [true, false] {
+                t.set_option("keepSelected", &json!(keep));
+                assert_eq!(t.options()["keepSelected"], json!(keep), "{id}");
+                let acts = drag(&mut t, &cx, &[(0.0, 0.0), (10.0, 5.0), (20.0, 0.0)], Mods::default());
+                assert!(acts[1..].iter().all(|a| a.iter().all(|a| !matches!(a, Action::Preview(_, v) if v["keepSelected"] != keep))), "{id}");
+                assert!(matches!(&acts.last().unwrap()[0], Action::Preview(_, v) if v["keepSelected"] == keep), "{id}");
+            }
+        }
+    }
+
+    /// The Blob Brush has Keep selected and Merge only with selection, both off by default, and its
+    /// stroke sends both.
+    #[test]
+    fn blob_brush_sends_keep_selected_and_merge_only_with_selection() {
+        let (d, _) = doc_with_rect();
+        let s = Selection::default();
+        let p = paint();
+        let cx = cx(&d, &s, &p);
+        let mut t = GestureTool::new("blobBrush");
+        assert_eq!((t.options()["keepSelected"].clone(), t.options()["mergeOnlySelection"].clone()), (json!(false), json!(false)));
+        for (keep, only) in [(false, false), (true, false), (false, true)] {
+            t.set_option("keepSelected", &json!(keep));
+            t.set_option("mergeOnlySelection", &json!(only));
+            let acts = drag(&mut t, &cx, &[(50.0, 150.0), (250.0, 150.0)], Mods::default());
+            assert!(
+                matches!(&acts[2][0], Action::Exec(c, v) if c == "path.blob" && v["keepSelected"] == keep && v["mergeOnlySelection"] == only),
+                "{acts:?}"
+            );
+        }
+        // The Eraser keeps Size only.
+        assert_eq!(GestureTool::new("eraser").options(), json!({"size": 10.0}));
     }
 
     #[test]

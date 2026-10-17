@@ -103,7 +103,7 @@ fn effects_and_fills_apply_to_layers_by_id() {
     // Two undo steps take both off again.
     run(&mut s, "edit.undo", json!({}));
     run(&mut s, "edit.undo", json!({}));
-    assert_eq!(node(&s, layer).appearance, Default::default());
+    assert_eq!(node(&s, layer).appearance, vectorcraft_doc::Appearance::default());
     // Nothing selected and no ids: an error, not a silent no-op.
     assert!(s.execute("appearance.addFill", &json!({})).is_err());
 }
@@ -120,6 +120,45 @@ fn type_fills_go_above_or_below_the_characters() {
     assert_eq!(n.appearance.fill_paint(), tx.runs[0].style.fill);
     run(&mut s, "appearance.moveItem", json!({"from": "contents", "to": 1}));
     assert_eq!(node(&s, t).appearance.contents_at(), 1);
+}
+
+#[test]
+fn an_effect_on_the_types_own_stroke_exports_as_the_offset_outline() {
+    let mut s = session();
+    let t = id_of(&run(&mut s, "text.create", json!({"x": 20, "y": 100, "text": "Hi"})));
+    run(&mut s, "select.set", json!({"ids": [t.0]}));
+    run(&mut s, "appearance.addStroke", json!({}));
+    run(&mut s, "paint.setStroke", json!({"color": "#ff0000", "item": 0}));
+    run(&mut s, "appearance.moveItem", json!({"from": "contents", "to": 1}));
+    run(&mut s, "effect.apply", json!({"effect": "path.offsetPath", "params": {"offset": 4}, "item": 0}));
+    let doc = s.doc().unwrap().doc.clone();
+    let svg = vectorcraft_svg::export(&doc, &Default::default());
+    assert!(!svg.contains("<text") && svg.contains("<path"), "{svg}");
+    // The baked type is its outlines, and the stroke's outline lies 4 pt outside the glyphs on every side.
+    let glyphs = vectorcraft_render::effects::outline_text(&node(&s, t)).unwrap().geometric_bounds().unwrap();
+    let baked = vectorcraft_render::effects::bake_document(&doc).unwrap();
+    let n = baked.node(t).unwrap();
+    assert!(!matches!(n.kind, NodeKind::Text(_)), "{n:?}");
+    let b = n.geometric_bounds().unwrap();
+    let off = [glyphs.x0 - b.x0, glyphs.y0 - b.y0, b.x1 - glyphs.x1, b.y1 - glyphs.y1];
+    assert!(off.iter().all(|o| (o - 4.0).abs() < 0.5), "{off:?}");
+}
+
+#[test]
+fn type_with_an_inline_graphic_stays_type_when_its_own_stroke_has_an_effect() {
+    let mut s = session();
+    run(&mut s, "shape.ellipse", json!({"x": 150, "y": 150, "width": 10, "height": 10}));
+    run(&mut s, "symbol.new", json!({"name": "Dot"}));
+    run(&mut s, "edit.clear", json!({}));
+    let t = id_of(&run(&mut s, "text.create", json!({"x": 20, "y": 100, "text": "Hi"})));
+    run(&mut s, "text.insertInline", json!({"id": t.0, "at": 0, "symbol": "Dot"}));
+    run(&mut s, "select.set", json!({"ids": [t.0]}));
+    run(&mut s, "appearance.addStroke", json!({}));
+    run(&mut s, "paint.setStroke", json!({"color": "#ff0000", "item": 0}));
+    run(&mut s, "effect.apply", json!({"effect": "path.offsetPath", "params": {"offset": 4}, "item": 0}));
+    // Exports keep it as type, with its inline graphic.
+    let baked = vectorcraft_render::effects::bake_document(&s.doc().unwrap().doc).unwrap();
+    assert!(matches!(baked.node(t).unwrap().kind, NodeKind::Text(_)));
 }
 
 #[test]
@@ -148,4 +187,42 @@ fn group_appearance_round_trips_and_expands() {
     assert!((outline.width() - 41.0).abs() < 0.1, "{outline:?}");
     // Moved down 50 pt; the outlined 1 pt stroke reaches half a point beyond.
     assert!((n.geometric_bounds().unwrap().y0 - 69.5).abs() < 1e-6);
+}
+
+#[test]
+fn type_in_a_group_with_a_geometry_effect_exports_and_expands_with_its_look() {
+    let mut s = session();
+    let square = id_of(&run(&mut s, "shape.rectangle", json!({"x": 20, "y": 20, "width": 40, "height": 40})));
+    let t = id_of(&run(&mut s, "text.create", json!({"x": 20, "y": 100, "text": "Hi"})));
+    run(&mut s, "transparency.set", json!({"ids": [t.0], "opacity": 50}));
+    run(&mut s, "select.set", json!({"ids": [square.0, t.0]}));
+    let g = id_of(&run(&mut s, "object.group", json!({})));
+    run(&mut s, "effect.apply", json!({"effect": "path.offsetPath", "params": {"offset": 0}}));
+    // SVG export writes the type's outlines at its opacity, and none of them while it is hidden.
+    let svg = |s: &Session| vectorcraft_svg::export(&s.doc().unwrap().doc, &Default::default());
+    let shown = svg(&s);
+    assert!(!shown.contains("<text") && shown.contains("opacity=\"0.5\""), "{shown}");
+    run(&mut s, "select.set", json!({"ids": [t.0]}));
+    run(&mut s, "object.hide", json!({}));
+    let hidden = svg(&s);
+    assert_eq!(hidden.matches("<path").count() + 1, shown.matches("<path").count(), "{hidden}");
+    // Expand Appearance keeps the type's opacity and visibility on its outlines.
+    run(&mut s, "select.set", json!({"ids": [g.0]}));
+    run(&mut s, "effect.expandAppearance", json!({}));
+    let n = node(&s, g);
+    let outlines = &n.children().unwrap()[1];
+    assert!(!matches!(outlines.kind, NodeKind::Text(_)) && (outlines.opacity - 0.5).abs() < 1e-6 && !outlines.visible, "{outlines:?}");
+}
+
+#[test]
+fn hidden_type_with_a_geometry_effect_is_left_out_of_svg_export() {
+    let mut s = session();
+    let t = id_of(&run(&mut s, "text.create", json!({"x": 20, "y": 100, "text": "Hi"})));
+    run(&mut s, "effect.apply", json!({"effect": "path.offsetPath", "params": {"offset": 0}, "ids": [t.0]}));
+    let svg = |s: &Session| vectorcraft_svg::export(&s.doc().unwrap().doc, &Default::default());
+    let shown = svg(&s);
+    run(&mut s, "select.set", json!({"ids": [t.0]}));
+    run(&mut s, "object.hide", json!({}));
+    let hidden = svg(&s);
+    assert_eq!((shown.matches("<path").count(), hidden.matches("<path").count()), (1, 0), "{hidden}");
 }

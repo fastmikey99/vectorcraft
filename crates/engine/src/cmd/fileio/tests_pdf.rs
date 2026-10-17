@@ -28,6 +28,17 @@ fn pages(bytes: &[u8]) -> usize {
     vectorcraft_pdf::import(bytes).unwrap().artboards.len()
 }
 
+#[test]
+fn print_preservation_and_hard_bitmap_edges_are_command_options() {
+    let mut s = session(1);
+    let p = json!({"discardImportedPrintSettings": true, "disableImageInterpolation": true});
+    let settings = s.execute("document.pdfSettings", &p).unwrap();
+    assert_eq!(settings["settings"]["discardImportedPrintSettings"], true);
+    assert_eq!(settings["settings"]["disableImageInterpolation"], true);
+    let result = export(&mut s, p);
+    assert_eq!(pages(&b64(&result)), 1);
+}
+
 /// `p` plus `format: pdf` (the same options through `document.export`).
 fn as_export(p: &Value) -> Value {
     let mut o = p.as_object().cloned().unwrap_or_default();

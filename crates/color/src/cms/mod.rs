@@ -13,7 +13,7 @@ pub mod generic;
 pub mod icc;
 pub mod lab;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -165,6 +165,8 @@ fn generic() -> Arc<GenericCmyk> {
 }
 
 static USER: RwLock<Vec<Arc<IccProfile>>> = RwLock::new(Vec::new());
+/// Counts the profiles [`register_icc`] has registered ([`profiles_generation`]).
+static PROFILES_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 fn builtin_rgb_cache(name: &str) -> Option<Arc<IccProfile>> {
     static CACHE: Mutex<Vec<Arc<IccProfile>>> = Mutex::new(Vec::new());
@@ -251,7 +253,15 @@ pub fn register_icc(bytes: &[u8], name: Option<String>) -> Result<ProfileInfo, C
     u.push(Arc::new(p));
     drop(u);
     clear_proof_cache();
+    PROFILES_GENERATION.fetch_add(1, Ordering::Relaxed);
     Ok(info)
+}
+
+/// A number that changes whenever [`register_icc`] registers a profile: conversions through a
+/// profile looked up by name, such as those of a [`ProofTarget::Cmyk`] proof, give the same colors
+/// as long as the number stays the same.
+pub fn profiles_generation() -> u64 {
+    PROFILES_GENERATION.load(Ordering::Relaxed)
 }
 
 /// Profile `name` as an ICC file to embed in an export: any RGB or CMYK profile of [`profiles`]
@@ -356,9 +366,64 @@ impl Cms {
         }
     }
 
-    /// CMYK in the working space → display sRGB (`absolute` simulates the paper colour).
+    /// CMYK in the working space → display sRGB (`absolute` simulates the paper colour). An ICC
+    /// CMYK profile converts as [`Self::cmyk_to_rgb`] does into sRGB (with the settings'
+    /// black-point compensation), so what shows is what an RGB export writes.
     pub fn cmyk_to_srgb(&self, cmyk: [f32; 4], absolute: bool) -> [f32; 3] {
+        if let (false, CmykSpace::Icc(p)) = (absolute, &self.cmyk)
+            && let Some(srgb) = builtin_rgb_cache(SRGB)
+            && let Some(v) = p.to_rgb_of(&srgb, &cmyk.map(|v| v.clamp(0.0, 1.0)), Intent::RelativeColorimetric, self.settings.bpc)
+        {
+            return v;
+        }
         Self::cmyk_to_srgb_in(&self.cmyk, cmyk, absolute)
+    }
+    /// CMYK in the working space → working RGB with `intent`. An ICC CMYK profile converts
+    /// directly into the RGB profile: not through display sRGB, which would clip colours a wider
+    /// RGB space holds (Wide Gamut RGB keeps CMYK cyan that sRGB can't show), and with the
+    /// settings' black-point compensation. The built-in CMYK spaces go through sRGB as before
+    /// (Generic CMYK compensates in its own model).
+    pub fn cmyk_to_rgb(&self, cmyk: [f32; 4], intent: Intent) -> [f32; 3] {
+        let cmyk = cmyk.map(|v| v.clamp(0.0, 1.0));
+        let src = match &self.cmyk {
+            CmykSpace::Icc(p) => Some(p.clone()),
+            CmykSpace::Generic(_) | CmykSpace::Device => None,
+        };
+        let dest = match &self.rgb {
+            RgbSpace::Icc(p) => Some(p.clone()),
+            RgbSpace::Srgb => builtin_rgb_cache(SRGB),
+        };
+        src.zip(dest)
+            .and_then(|(s, d)| s.to_rgb_of(&d, &cmyk, intent, self.settings.bpc))
+            .unwrap_or_else(|| self.srgb_to_rgb(self.cmyk_to_srgb(cmyk, false)))
+    }
+    /// The working RGB profile (sRGB built in), for direct conversions.
+    fn rgb_icc(&self) -> Option<Arc<IccProfile>> {
+        match &self.rgb {
+            RgbSpace::Icc(p) => Some(p.clone()),
+            RgbSpace::Srgb => builtin_rgb_cache(SRGB),
+        }
+    }
+    fn cmyk_icc(&self) -> Option<Arc<IccProfile>> {
+        match &self.cmyk {
+            CmykSpace::Icc(p) => Some(p.clone()),
+            CmykSpace::Generic(_) | CmykSpace::Device => None,
+        }
+    }
+    /// CMYK in this working space → the CMYK of `dest`'s, directly from one ICC profile into the
+    /// other (not through sRGB, which clips CMYK colours it can't hold, such as cyan), with the
+    /// settings' black-point compensation. `None` unless both CMYK spaces are ICC profiles.
+    pub fn cmyk_into(&self, dest: &Cms, cmyk: [f32; 4], intent: Intent) -> Option<[f32; 4]> {
+        self.cmyk_icc()?.to_cmyk_of(&*dest.cmyk_icc()?, &cmyk.map(|v| v.clamp(0.0, 1.0)), intent, self.settings.bpc)
+    }
+    /// RGB in this working space → `dest`'s ICC CMYK, directly (see [`Self::cmyk_into`]).
+    pub fn rgb_into_cmyk(&self, dest: &Cms, rgb: [f32; 3], intent: Intent) -> Option<[f32; 4]> {
+        self.rgb_icc()?.to_cmyk_of(&*dest.cmyk_icc()?, &rgb.map(|v| v.clamp(0.0, 1.0)), intent, self.settings.bpc)
+    }
+    /// Display sRGB (an image's pixels) → this working ICC CMYK, directly, with the settings'
+    /// black-point compensation; `None` unless the CMYK space is an ICC profile.
+    pub fn srgb_into_cmyk(&self, srgb: [f32; 3], intent: Intent) -> Option<[f32; 4]> {
+        builtin_rgb_cache(SRGB)?.to_cmyk_of(&*self.cmyk_icc()?, &srgb.map(|v| v.clamp(0.0, 1.0)), intent, self.settings.bpc)
     }
     /// Display sRGB → working CMYK with `intent`.
     pub fn srgb_to_cmyk(&self, srgb: [f32; 3], intent: Intent) -> [f32; 4] {
@@ -424,6 +489,10 @@ impl Cms {
                 let [c, m, y, k] = self.to_cmyk(c, intent);
                 Color::Cmyk { c, m, y, k }
             }
+            (Color::Cmyk { c, m, y, k }, Model::Rgb) => {
+                let [r, g, b] = self.cmyk_to_rgb([*c, *m, *y, *k], intent);
+                Color::Rgb { r, g, b }
+            }
             (_, Model::Rgb) => {
                 let [r, g, b] = self.srgb_to_rgb(self.display_rgb(c));
                 Color::Rgb { r, g, b }
@@ -474,6 +543,7 @@ impl Cms {
             ProofTarget::LegacyMacRgb => srgb.map(|v| lab::linear_to_srgb(v.powf(1.8))),
             ProofTarget::Protanopia => simulate_cvd(srgb, &PROTANOPIA),
             ProofTarget::Deuteranopia => simulate_cvd(srgb, &DEUTERANOPIA),
+            ProofTarget::Tritanopia => TRITANOPIA.simulate(srgb),
             ProofTarget::WorkingCmyk => {
                 let cmyk = self.srgb_to_cmyk(srgb, proof.intent);
                 self.cmyk_to_srgb(cmyk, proof.simulate_paper)
@@ -541,6 +611,106 @@ fn simulate_cvd(srgb: [f32; 3], m: &[[f32; 3]; 3]) -> [f32; 3] {
     lab::mat_mul(m, lab::srgb_linear(srgb)).map(|v| lab::linear_to_srgb(v.clamp(0.0, 1.0)))
 }
 
+// Tritanopia: Brettel, Viénot & Mollon (1997), "Computerized simulation of color appearance for
+// dichromats", JOSA A 14(10), 2647-2655, https://doi.org/10.1364/JOSAA.14.002647. A color keeps its
+// L and M cone responses, and its S response is replaced so that it lies on one of two half-planes in
+// LMS space. Both half-planes contain the neutral axis (black to the display's white, so grays keep
+// their value); one passes through the 485 nm spectral color and the other through the 660 nm one. A
+// color uses the half-plane on its own side of the plane through the neutral axis and the S axis.
+// The matrices are computed at compile time from these inputs:
+// - linear sRGB → CIE XYZ: IEC 61966-2-1 (D65);
+// - CIE XYZ → LMS: Smith & Pokorny (1975), as printed in https://daltonlens.org/understanding-cvd-simulation/;
+// - the 485 nm and 660 nm colors: the Judd-Vos color matching functions,
+//   http://www.cvrl.org/database/data/cmfs/ciexyzjv.csv.
+const LINEAR_SRGB_TO_XYZ: [[f64; 3]; 3] = [[0.4124, 0.3576, 0.1805], [0.2126, 0.7152, 0.0722], [0.0193, 0.1192, 0.9505]];
+const XYZ_TO_LMS: [[f64; 3]; 3] = [[0.155_14, 0.543_12, -0.032_86], [-0.155_14, 0.456_84, 0.032_86], [0.0, 0.0, 0.016_08]];
+const XYZ_485_NM: [f64; 3] = [0.056_985, 0.169_87, 0.586_4];
+const XYZ_660_NM: [f64; 3] = [0.161_61, 0.061, 0.000_011_906];
+const TRITANOPIA: Dichromat = Dichromat::tritanope();
+
+/// A dichromat simulation with two half-planes, as matrices on linear sRGB. `near` applies to colors
+/// whose dot product with `side` is 0 or more, and `far` applies to the others.
+struct Dichromat {
+    side: [f32; 3],
+    near: [[f32; 3]; 3],
+    far: [[f32; 3]; 3],
+}
+
+impl Dichromat {
+    const fn tritanope() -> Self {
+        let to_lms = mat3_mul(&XYZ_TO_LMS, &LINEAR_SRGB_TO_XYZ);
+        let to_rgb = mat3_inverse(&to_lms);
+        let white = mat3_apply(&to_lms, [1.0; 3]);
+        let a485 = mat3_apply(&XYZ_TO_LMS, XYZ_485_NM);
+        let a660 = mat3_apply(&XYZ_TO_LMS, XYZ_660_NM);
+        let mut side = cross(white, [0.0, 0.0, 1.0]);
+        if dot(side, a485) < 0.0 {
+            side = [-side[0], -side[1], -side[2]];
+        }
+        // A color on the 485 nm side lands on that half-plane.
+        let near = mat3_mul(&to_rgb, &mat3_mul(&keep_lm_on_plane(cross(white, a485)), &to_lms));
+        let far = mat3_mul(&to_rgb, &mat3_mul(&keep_lm_on_plane(cross(white, a660)), &to_lms));
+        // `side · lms(rgb)` is `(to_lmsᵀ · side) · rgb`.
+        let t = &to_lms;
+        let side_rgb = [
+            t[0][0] * side[0] + t[1][0] * side[1] + t[2][0] * side[2],
+            t[0][1] * side[0] + t[1][1] * side[1] + t[2][1] * side[2],
+            t[0][2] * side[0] + t[1][2] * side[1] + t[2][2] * side[2],
+        ];
+        Dichromat { side: vec3_f32(side_rgb), near: mat3_f32(&near), far: mat3_f32(&far) }
+    }
+
+    fn simulate(&self, srgb: [f32; 3]) -> [f32; 3] {
+        let rgb = lab::srgb_linear(srgb);
+        let s = self.side;
+        let m = if s[0] * rgb[0] + s[1] * rgb[1] + s[2] * rgb[2] >= 0.0 { &self.near } else { &self.far };
+        lab::mat_mul(m, rgb).map(|v| lab::linear_to_srgb(v.clamp(0.0, 1.0)))
+    }
+}
+
+/// LMS → LMS: keeps L and M and sets S so the result lies in the plane with normal `n`.
+const fn keep_lm_on_plane(n: [f64; 3]) -> [[f64; 3]; 3] {
+    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-n[0] / n[2], -n[1] / n[2], 0.0]]
+}
+
+const fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+const fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+const fn mat3_apply(m: &[[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
+    [dot(m[0], v), dot(m[1], v), dot(m[2], v)]
+}
+
+const fn mat3_mul(a: &[[f64; 3]; 3], b: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let mut out = [[0.0; 3]; 3];
+    let mut i = 0;
+    while i < 3 {
+        out[i] = [dot(a[i], [b[0][0], b[1][0], b[2][0]]), dot(a[i], [b[0][1], b[1][1], b[2][1]]), dot(a[i], [b[0][2], b[1][2], b[2][2]])];
+        i += 1;
+    }
+    out
+}
+
+const fn mat3_inverse(m: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let c0 = cross(m[1], m[2]);
+    let c1 = cross(m[2], m[0]);
+    let c2 = cross(m[0], m[1]);
+    let det = dot(m[0], c0);
+    [[c0[0] / det, c1[0] / det, c2[0] / det], [c0[1] / det, c1[1] / det, c2[1] / det], [c0[2] / det, c1[2] / det, c2[2] / det]]
+}
+
+const fn vec3_f32(v: [f64; 3]) -> [f32; 3] {
+    [v[0] as f32, v[1] as f32, v[2] as f32]
+}
+
+const fn mat3_f32(m: &[[f64; 3]; 3]) -> [[f32; 3]; 3] {
+    [vec3_f32(m[0]), vec3_f32(m[1]), vec3_f32(m[2])]
+}
+
 /// View → Proof Setup target.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "profile", rename_all = "camelCase")]
@@ -560,6 +730,8 @@ pub enum ProofTarget {
     Protanopia,
     /// Colour blindness — deuteranopia type.
     Deuteranopia,
+    /// Color blindness, tritanopia type.
+    Tritanopia,
 }
 
 impl ProofTarget {
@@ -574,6 +746,7 @@ impl ProofTarget {
             "monitorRgb" | "monitor" => ProofTarget::MonitorRgb,
             "protanopia" => ProofTarget::Protanopia,
             "deuteranopia" => ProofTarget::Deuteranopia,
+            "tritanopia" => ProofTarget::Tritanopia,
             _ => return None,
         })
     }
@@ -586,6 +759,7 @@ impl ProofTarget {
             ProofTarget::MonitorRgb => "monitorRgb".into(),
             ProofTarget::Protanopia => "protanopia".into(),
             ProofTarget::Deuteranopia => "deuteranopia".into(),
+            ProofTarget::Tritanopia => "tritanopia".into(),
         }
     }
     /// Whether the target simulates a CMYK press (separations make sense).

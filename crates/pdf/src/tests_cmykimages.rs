@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 
-use hayro_syntax::Pdf;
-use hayro_syntax::object::{Array, Name, Object, Stream};
+use craft_pdf::syntax::Pdf;
+use craft_pdf::syntax::object::{Array, Name, Object, Stream};
 use serde_json::json;
 use vectorcraft_color::cms::{self, DEVICE_CMYK, GENERIC_CMYK, SRGB};
 use vectorcraft_doc::cmyk::Inks;
@@ -73,6 +73,28 @@ fn cmyk_dict(w: u32, h: u32, more: &str) -> String {
 }
 
 const INVERTED: &str = "/Decode [1 0 1 0 1 0 1 0]";
+
+#[test]
+fn hard_edge_export_disables_interpolation_on_images_and_their_masks() {
+    let mask = stream("/Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8", &[0, 255]);
+    let input = pdf_with_images(&[(cmyk_dict(2, 1, "/SMask 6 0 R"), vec![255, 0, 0, 0, 0, 255, 0, 0])], &[mask]);
+    let doc = import(&input).unwrap();
+    for hard in [true, false] {
+        let opts = PdfOptions { settings: PdfSettings { disable_image_interpolation: hard, ..Default::default() }, ..Default::default() };
+        let out = export(&doc, &opts).unwrap();
+        let file = Pdf::new(Arc::new(out)).unwrap();
+        let mut count = 0;
+        for object in file.objects() {
+            if let Object::Stream(s) = object
+                && s.dict().get::<Name<'_>>(b"Subtype").is_some_and(|n| n.as_str() == "Image")
+            {
+                assert_eq!(s.dict().get::<bool>(b"Interpolate").unwrap_or(false), !hard);
+                count += 1;
+            }
+        }
+        assert_eq!(count, 2, "the colour image and opacity-mask image both survive");
+    }
+}
 
 /// An image XObject of a written PDF: its colour space and the components of its ICC profile,
 /// its Decode array, its filter and its stream data.
@@ -212,17 +234,94 @@ fn other_cmyk_images_keep_their_ink_amounts() {
 }
 
 #[test]
-fn cmyk_images_with_a_mask_or_odd_samples_open_in_rgb_with_a_warning() {
-    let inks = flat([0, 102, 255, 0], 4);
-    let mask = stream("/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8", &[255, 128, 255, 128]);
-    let source = pdf_with_images(&[(cmyk_dict(2, 2, "/SMask 6 0 R /Filter /FlateDecode"), crate::output::deflate(&inks).unwrap())], &[mask]);
-    let r = import_with_report(&source, &ImportOptions::default()).unwrap();
-    assert_eq!(blobs(&r.document)[0].mime, "image/png");
-    assert!(r.warnings.iter().any(|w| w == crate::import_image::MASKED), "{:?}", r.warnings);
+fn cmyk_images_with_odd_samples_open_in_rgb_with_a_warning() {
     let four_bits = cmyk_dict(2, 2, "").replace("/BitsPerComponent 8", "/BitsPerComponent 4");
     let r = import_with_report(&pdf_with_images(&[(four_bits, vec![0x0F; 8])], &[]), &ImportOptions::default()).unwrap();
     assert_eq!(blobs(&r.document)[0].mime, "image/png");
     assert!(r.warnings.iter().any(|w| w == crate::import_image::UNREAD), "{:?}", r.warnings);
+}
+
+/// An opacity mask's image: its blob and pixel size.
+type MaskImage<'d> = (&'d ImageBlob, u32, u32);
+
+/// The image nodes on the first layer: each one's blob and its opacity mask's image, if it has one.
+fn masked(d: &Document) -> Vec<(&ImageBlob, Option<MaskImage<'_>>)> {
+    let NodeKind::Layer { children, .. } = &d.layers[0].kind else { panic!() };
+    children
+        .iter()
+        .filter_map(|n| {
+            let NodeKind::Image(im) = &n.kind else { return None };
+            let mask = n.extras().mask.as_ref().map(|m| match &m.art.kind {
+                NodeKind::Image(a) => (&d.images[&a.key], a.width, a.height),
+                other => panic!("mask art is an image: {other:?}"),
+            });
+            Some((&d.images[&im.key], mask))
+        })
+        .collect()
+}
+
+#[test]
+fn masked_cmyk_images_keep_their_inks_and_carry_the_mask_as_an_opacity_mask() {
+    let inks = flat([0, 102, 255, 0], 4);
+    let z = |data: &[u8]| crate::output::deflate(data).unwrap();
+    // Object 6 (the first after the two images): a soft mask; image 2 a colour key masking its
+    // first two pixels.
+    let smask = stream("/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8", &[255, 128, 255, 128]);
+    let keyed: Vec<u8> = [[10, 20, 30, 40], [10, 20, 30, 40], [0, 102, 255, 0], [0, 102, 255, 0]].concat();
+    let images = [
+        (cmyk_dict(2, 2, "/SMask 7 0 R /Filter /FlateDecode"), z(&inks)),
+        (cmyk_dict(2, 2, "/Mask [10 10 20 20 30 30 40 40] /Filter /FlateDecode"), z(&keyed)),
+    ];
+    let source = pdf_with_images(&images, &[smask]);
+    let r = import_with_report(&source, &ImportOptions::default()).unwrap();
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    let m = masked(&r.document);
+    assert_eq!(m.len(), 2);
+    for ((blob, mask), (want, alpha)) in m.iter().zip([(&inks, [255, 128, 255, 128]), (&keyed, [0, 0, 255, 255])]) {
+        assert_eq!(blob.mime, "image/tiff");
+        assert!(close(&blob.cmyk().unwrap().data, want, 0), "the inks as they were");
+        let (mblob, mw, mh) = mask.expect("an opacity mask");
+        assert_eq!((mw, mh), (2, 2));
+        let grey = image::load_from_memory(&mblob.bytes).unwrap().to_luma8();
+        assert_eq!(grey.into_raw(), alpha, "the mask's values");
+    }
+    // The mask art covers the image exactly.
+    let NodeKind::Layer { children, .. } = &r.document.layers[0].kind else { panic!() };
+    let img = children.iter().find(|n| matches!(n.kind, NodeKind::Image(_))).unwrap();
+    assert_eq!(img.geometric_bounds(), img.extras().mask.as_ref().unwrap().art.geometric_bounds());
+    // Written as CMYK with the mask in grey; it opens with the same inks.
+    let out = export_with_report(&r.document, &opts(json!({}))).unwrap();
+    let w = written(&out.bytes);
+    assert!(w.iter().filter(|w| w.space == "DeviceCMYK").count() == 2 && w.iter().any(|w| w.space == "DeviceGray"), "{w:?}");
+    let back = import_with_report(&out.bytes, &ImportOptions::default()).unwrap();
+    let inked: Vec<Vec<u8>> = all_images(&back.document).iter().filter_map(|b| b.cmyk()).map(|i| i.data).collect();
+    assert!(inked.iter().any(|d| close(d, &inks, 3)) && inked.iter().any(|d| close(d, &keyed, 3)), "{:?}", back.warnings);
+    // A mask that hides nothing adds none.
+    let opaque = stream("/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8", &[255; 4]);
+    let r = import_with_report(
+        &pdf_with_images(&[(cmyk_dict(2, 2, "/SMask 6 0 R /Filter /FlateDecode"), z(&inks))], &[opaque]),
+        &ImportOptions::default(),
+    )
+    .unwrap();
+    assert!(masked(&r.document)[0].1.is_none());
+}
+
+/// Every image blob a document's art uses (mask art included).
+fn all_images(d: &Document) -> Vec<&ImageBlob> {
+    let mut keys = vec![];
+    d.walk(|n| {
+        if let NodeKind::Image(im) = &n.kind {
+            keys.push(im.key.clone());
+        }
+        if let Some(m) = &n.extras().mask {
+            m.art.walk(&mut |a| {
+                if let NodeKind::Image(im) = &a.kind {
+                    keys.push(im.key.clone());
+                }
+            });
+        }
+    });
+    keys.iter().filter_map(|k| d.images.get(k)).collect()
 }
 
 /// A document with CMYK image `blob` of `w` × `h` pixels placed 40 pt wide.
@@ -230,7 +329,7 @@ fn image_doc(blob: ImageBlob, w: u32, h: u32) -> Document {
     let mut d = Document::new_with_mode(100.0, 100.0, ColorMode::Cmyk);
     d.images.insert("img".into(), blob);
     let image = ImageObject { key: "img".into(), width: w, height: h, xf: Affine::scale(40.0 / w as f64), link: None, placement: Default::default() };
-    let n = Node::new(d.alloc_id(), NodeKind::Image(image));
+    let n = Node::new(d.alloc_id(), NodeKind::Image(Box::new(image)));
     let l = d.layers[0].id;
     d.insert(Some(l), 0, n).unwrap();
     d
@@ -289,4 +388,81 @@ fn the_output_settings_convert_cmyk_images_and_compression_recompresses_them_in_
     let (w, blob, _) = first(json!({"standard": "pdfX1a", "output": {"destination": GENERIC_CMYK}}));
     assert_eq!(w.space, "DeviceCMYK");
     assert_eq!(blob.cmyk().unwrap().data, flat(ink, 16));
+}
+
+#[test]
+fn named_process_image_channels_survive_import_export_and_reopen() {
+    // ISO 32000-1, Separation/DeviceN process colorant names. Deliberately reorder
+    // the samples and leave channels out; the preview tint function is not ink data.
+    for (space, samples, decode, expected) in [
+        ("[/DeviceN [/Yellow /Cyan /Magenta] /DeviceCMYK 6 0 R]", vec![30, 10, 20, 90, 70, 80], "", vec![10, 20, 30, 0, 70, 80, 90, 0]),
+        ("[/DeviceN [/Magenta /Yellow /Black] /DeviceCMYK 6 0 R]", vec![20, 30, 40, 80, 90, 100], "", vec![0, 20, 30, 40, 0, 80, 90, 100]),
+        (
+            "[/DeviceN [/Magenta /Yellow /Black] /DeviceCMYK 6 0 R]",
+            vec![235, 225, 215, 175, 165, 155],
+            "/Decode [1 0 1 0 1 0]",
+            vec![0, 20, 30, 40, 0, 80, 90, 100],
+        ),
+    ] {
+        let dict = format!("/Width 2 /Height 1 /BitsPerComponent 8 /ColorSpace {space} {decode}");
+        let tint = stream("/FunctionType 4 /Domain [0 1 0 1 0 1] /Range [0 1 0 1 0 1 0 1]", b"{ pop pop pop 0 0 0 0 }");
+        let source = pdf_with_images(&[(dict, samples)], &[tint]);
+        let imported = import_with_report(&source, &ImportOptions::default()).unwrap();
+        assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+        assert_eq!(blobs(&imported.document)[0].cmyk().unwrap().data, expected);
+        let bytes = export(&imported.document, &PdfOptions::default()).unwrap();
+        let reopened = import(&bytes).unwrap();
+        assert_eq!(blobs(&reopened)[0].cmyk().unwrap().data, expected);
+    }
+}
+
+#[test]
+fn sixteen_bit_named_process_samples_keep_their_ink_values() {
+    let dict = "/Width 2 /Height 1 /BitsPerComponent 16 /ColorSpace [/Separation /Black /DeviceCMYK 6 0 R]";
+    let tint = b"<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 0 0 1] /N 1 >>".to_vec();
+    let source = pdf_with_images(&[(dict.into(), vec![0x40, 0x40, 0xC0, 0xC0])], &[tint]);
+    let imported = import(&source).unwrap();
+    assert_eq!(blobs(&imported)[0].cmyk().unwrap().data, [0, 0, 0, 64, 0, 0, 0, 192]);
+}
+
+#[test]
+fn pdf_jpeg_decode_polarity_and_original_encoding_survive_export() {
+    let jpg = cmyk_jpeg(&flat([30, 70, 120, 10], 16 * 16), 16, 16);
+    let source = pdf_with_images(&[(cmyk_dict(16, 16, "/Filter /DCTDecode"), jpg.clone())], &[]);
+    let mut doc = import(&source).unwrap();
+    let blob = blobs(&doc)[0];
+    assert_eq!(blob.source_jpeg.as_ref().unwrap().bytes.as_slice(), jpg);
+    let working = blob.cmyk().unwrap();
+    let out = export(&doc, &opts(json!({"compression":{"color":{"compression":"auto"}}}))).unwrap();
+    let images = written(&out);
+    assert_eq!(images[0].data, jpg, "compressed source bytes unchanged");
+    assert!(images[0].decode.is_empty(), "PDF samples must not be inverted");
+    assert_eq!(blobs(&import(&out).unwrap())[0].cmyk().unwrap(), working);
+    // An edited working bitmap invalidates the preserved encoding, even if metadata was cloned.
+    let key = doc.images.keys().next().unwrap().clone();
+    let old = doc.images.get_mut(&key).unwrap();
+    old.bytes = ImageBlob::cmyk_tiff(&Inks::new(16, 16, flat([0, 0, 0, 255], 256)).unwrap()).unwrap().bytes;
+    let changed = export(&doc, &opts(json!({}))).unwrap();
+    assert_ne!(written(&changed)[0].data, jpg);
+    assert!(blobs(&import(&changed).unwrap())[0].cmyk().unwrap().data.chunks_exact(4).all(|p| p == [0, 0, 0, 255]));
+}
+
+#[test]
+fn vector_cmyk_keeps_fractional_press_values() {
+    let source = pdf_with_images(&[], &[]);
+    let doc = import(&source).unwrap();
+    let out = export(&doc, &PdfOptions::default()).unwrap();
+    let back = import(&out).unwrap();
+    fn colours(doc: &Document) -> Vec<vectorcraft_color::Color> {
+        let mut result = vec![];
+        doc.walk(|n| {
+            if matches!(n.kind, NodeKind::Path { .. })
+                && let Some(c) = n.appearance.fill_paint().color()
+            {
+                result.push(c);
+            }
+        });
+        result
+    }
+    assert_eq!(colours(&back), colours(&doc));
 }

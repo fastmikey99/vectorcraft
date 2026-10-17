@@ -32,6 +32,15 @@ pub struct LoadOptions {
     pub layers: bool,
     /// How a DXF drawing comes in (the `dxf` param, see [`super::dxfimport`]).
     pub dxf: vectorcraft_cad::ImportOptions,
+    /// An Illustrator EPS or `.ai` that carries the editing copy of its art opens from it (its
+    /// layers, hidden objects and the art outside its artboards); else only what its page or PDF
+    /// part prints comes in.
+    pub editing_data: bool,
+    /// A `.ai` opens from its editing copy even where that draws differently from its PDF part
+    /// (which can be older than it), with a warning, instead of from the PDF part.
+    pub trust_editing_data: bool,
+    /// Import the public PDF print representation with its layers and media frame.
+    pub print_production: bool,
 }
 
 impl Default for LoadOptions {
@@ -45,6 +54,9 @@ impl Default for LoadOptions {
             text_as: TextAs::default(),
             layers: true,
             dxf: Default::default(),
+            editing_data: true,
+            trust_editing_data: false,
+            print_production: false,
         }
     }
 }
@@ -52,8 +64,19 @@ impl Default for LoadOptions {
 impl LoadOptions {
     /// From command params: `pages` (`"2-3, 5"`, a page number or `"all"`), `page` (one page, when
     /// `pages` isn't given), `cropTo` (or `crop`), `password`, `colorMode` (`rgb` | `cmyk`) with `grays`,
-    /// `textAs` (`text` | `outlines`), `layers` (true | false) and `dxf` (the DXF import options).
+    /// `textAs` (`text` | `outlines`), `layers` (true | false), `editingData` (true | false | `always`) and `dxf`
+    /// (the DXF import options).
     pub fn from_params(cmd: &str, p: &Value) -> Result<Self> {
+        let print_production = match p.get("printProduction") {
+            None => false,
+            Some(v) => v.as_bool().ok_or_else(|| bad(cmd, "printProduction must be true or false"))?,
+        };
+        if print_production && ["editingData", "colorMode", "cropTo", "crop", "layers", "pages", "page"].iter().any(|k| p.get(*k).is_some()) {
+            return Err(bad(
+                cmd,
+                "printProduction preserves all PDF pages, layers and inks; omit editingData, colorMode, cropTo, crop, layers, pages and page",
+            ));
+        }
         let pages = match p.get("pages").filter(|v| !v.is_null()).or_else(|| p.get("page").filter(|v| !v.is_null())) {
             None => None,
             Some(Value::String(s)) if s.trim().eq_ignore_ascii_case("all") => None,
@@ -70,24 +93,43 @@ impl LoadOptions {
             Some(m) => return Err(bad(cmd, format!("colorMode must be rgb or cmyk, not `{m}`"))),
         };
         let grays = Grays::param(cmd, p)?;
-        let text_as = choice(cmd, "textAs", str_param(p, "textAs"))?;
+        let text_as = choice(cmd, "textAs", str_param(p, "textAs").or(print_production.then_some("outlines")))?;
         let layers = match p.get("layers").filter(|v| !v.is_null()) {
             None => true,
             Some(v) => v.as_bool().ok_or_else(|| bad(cmd, "layers must be true or false"))?,
         };
+        let (editing_data, trust_editing_data) = match p.get("editingData").filter(|v| !v.is_null()) {
+            None => (true, false),
+            Some(Value::String(s)) if s.eq_ignore_ascii_case("always") => (true, true),
+            Some(v) => (v.as_bool().ok_or_else(|| bad(cmd, "editingData must be true, false or \"always\""))?, false),
+        };
         let dxf = super::dxfimport::options(cmd, p.get("dxf"))?;
-        Ok(Self { pages, crop, password, color_mode, grays, text_as, layers, dxf })
+        Ok(Self {
+            pages,
+            crop: if print_production { CropTo::Media } else { crop },
+            password,
+            color_mode,
+            grays,
+            text_as,
+            layers,
+            dxf,
+            editing_data: editing_data && !print_production,
+            trust_editing_data,
+            print_production,
+        })
     }
 
     /// Does the document read only part of the file, or read it differently (a page range, another
     /// box, a password, without its hidden layers)? Writing it back would lose the rest, so Save
     /// doesn't (it asks for a name).
     pub fn is_partial(&self) -> bool {
-        self.pages.is_some() || self.crop != CropTo::default() || self.password.is_some() || !self.layers
+        self.pages.is_some() || (self.crop != CropTo::default() && !self.print_production) || self.password.is_some() || !self.layers
     }
 
-    /// The PDF import options: `pages` resolved against the file's page count.
-    fn import_options(&self, bytes: &[u8]) -> Result<ImportOptions> {
+    /// The PDF import options: `pages` resolved against the file's page count. A PDF-compatible
+    /// `.ai`, or a PDF saved with its editing data, asked for its crop box opens on its trim boxes,
+    /// its editor's artboards, with the bleed round them (its crop box takes the bleed in).
+    fn import_options(&self, bytes: &[u8], editor_document: bool) -> Result<ImportOptions> {
         let pages = match &self.pages {
             None => None,
             Some(range) => {
@@ -95,12 +137,15 @@ impl LoadOptions {
                 Some(parse_range(range, count).map_err(|e| err(format!("pages: {e}")))?)
             }
         };
+        let is_ai = self.crop == CropTo::Crop && vectorcraft_pdf::has_illustrator_data(bytes, self.password.as_deref());
         Ok(ImportOptions {
             pages,
-            crop: self.crop,
+            crop: if is_ai { CropTo::Trim } else { self.crop },
             password: self.password.clone(),
             text_as: self.text_as,
             layers: self.layers,
+            uncalibrated_rgb: editor_document,
+            reject_depth_loss: self.print_production,
             ..Default::default()
         })
     }
@@ -117,10 +162,10 @@ fn choice<T: Choice + Default>(cmd: &str, key: &str, id: Option<&str>) -> Result
         .ok_or_else(|| bad(cmd, format!("{key} must be one of {}", T::IDS.join(", "))))
 }
 
-/// Import the pages `o` pick → the document and import notes.
-pub(super) fn import(bytes: &[u8], o: &LoadOptions) -> Result<(Document, Vec<String>)> {
-    let r = vectorcraft_pdf::import_with_report(bytes, &o.import_options(bytes)?).map_err(err)?;
-    Ok((r.document, r.warnings))
+/// Import the pages `o` pick → the document, import notes and what else the import tells.
+/// `editor_document`: a `.ai` file.
+pub(super) fn import(bytes: &[u8], o: &LoadOptions, editor_document: bool) -> Result<vectorcraft_pdf::ImportReport> {
+    vectorcraft_pdf::import_with_report(bytes, &o.import_options(bytes, editor_document)?).map_err(err)
 }
 
 /// Page `page` (0-based) of a PDF as a document of one artboard (its `o.crop` box) and one

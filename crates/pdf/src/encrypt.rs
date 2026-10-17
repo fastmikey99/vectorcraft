@@ -551,6 +551,10 @@ pub(crate) struct Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
+    pub(crate) fn position(&self) -> usize {
+        self.pos
+    }
+
     pub(crate) fn at(buf: &'a [u8], pos: usize) -> Self {
         Self { buf, pos }
     }

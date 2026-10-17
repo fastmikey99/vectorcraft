@@ -65,6 +65,34 @@ fn other_eps_files_are_read_by_the_postscript_interpreter() {
     assert_eq!(s.doc().unwrap().title(), "plain.eps");
 }
 
+/// A CMYK image the PostScript interpreter reads keeps its ink amounts when the EPS opens and when
+/// it is placed, with its transparent pixel as its opacity mask.
+#[test]
+fn cmyk_images_keep_their_inks_when_an_eps_opens_or_is_placed() {
+    let eps = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 60 20\n%%EndComments\n/DeviceCMYK setcolorspace 60 20 scale \
+        << /ImageType 4 /Width 2 /Height 1 /BitsPerComponent 8 /Decode [0 1 0 1 0 1 0 1] /ImageMatrix [2 0 0 -1 0 1] \
+        /MaskColor [10 20 30 40] /DataSource <0a141e28 00667f08> >> image\nshowpage\n%%EOF\n";
+    // Each image object's ink amounts (`None` when it isn't CMYK) and whether it has a mask.
+    let images = |s: &Session| {
+        let d = &s.doc().unwrap().doc;
+        let mut found = vec![];
+        d.walk(|n| {
+            if let vectorcraft_doc::NodeKind::Image(im) = &n.kind {
+                found.push((d.images[&im.key].cmyk().map(|i| i.data), n.extras().mask.is_some()));
+            }
+        });
+        found
+    };
+    let want = (Some(vec![10, 20, 30, 40, 0, 102, 127, 8]), true);
+    let mut s = Session::new();
+    let r = open(&mut s, "cmyk.eps", eps).unwrap();
+    assert_eq!(r["format"], "eps", "{r}");
+    assert_eq!(images(&s), std::slice::from_ref(&want));
+    let r = s.execute("file.place", &json!({"name": "cmyk.eps", "dataBase64": vectorcraft_format::base64_encode(eps)})).unwrap();
+    assert_eq!(r["ids"].as_array().unwrap().len(), 1, "{r}");
+    assert_eq!(images(&s), [want.clone(), want]);
+}
+
 #[test]
 fn an_unreadable_eps_file_comes_in_as_its_preview() {
     let mut s = Session::new();
@@ -108,6 +136,15 @@ showpage
     let inner = outer.children().map(|c| (c.len(), c[1].children().map(Vec::len))).unwrap();
     assert!(matches!(outer.kind, vectorcraft_doc::NodeKind::Group { clip: false, .. }), "{:?}", outer.kind);
     assert_eq!(inner, (2, Some(2)));
+    // One that names the prolog defining its operators without including it (as other apps write
+    // the format) opens with the layers its program has (#1027).
+    let named = b"%!PS-Adobe-3.0\n%%BoundingBox: 0 0 100 100\n%%DocumentNeededResources: procset Adobe_IllustratorA_AI3 1.0 0\n%AI3_TemplateBox: 50 50 50 50\n%%EndComments\n\
+                  %%BeginProlog\n%%IncludeResource: procset Adobe_IllustratorA_AI3 1.0 0\n%%EndProlog\n%%BeginSetup\nAdobe_IllustratorA_AI3 /initialize get exec\n%%EndSetup\n\
+                  %AI5_BeginLayer\n1 1 1 1 0 0 2 0 0 0 Lb\n(PLAN::Walls) Ln\n0 0 0 1 K\n0 i 1 w\n10 10 m\n90 90 L\nS\nLB\n%AI5_EndLayer--\n%%PageTrailer\n%%Trailer\n%%EOF\n";
+    let r = open(&mut s, "cad.ai", named).unwrap();
+    assert_eq!(r["warnings"].as_array().map_or(0, Vec::len), 0, "{r}");
+    let d = s.doc().unwrap().doc.clone();
+    assert_eq!((d.layers.len(), d.layers[0].name.as_deref(), objects(&s)), (1, Some("PLAN::Walls"), 1));
     // A .ait one opens as a new untitled document.
     let r = open(&mut s, "legacy.ait", ps).unwrap();
     assert!(r["title"].as_str().unwrap().starts_with("Untitled"), "{r}");

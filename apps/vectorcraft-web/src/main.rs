@@ -9,13 +9,27 @@
 //! - File → Open uses the browser file picker; bytes arrive asynchronously through
 //!   `Services::inbox`;
 //! - Save / Export trigger a browser download;
-//! - dropped files are read asynchronously by `web::WebShell` and delivered through the inbox.
+//! - dropped files are read asynchronously by `web::WebShell` and delivered through the inbox;
+//! - pen and finger input is read from Pointer Events by `pencil` (Apple Pencil pressure and
+//!   hover, palm rejection, fingers navigate once a pen has been seen).
 //!
 //! URL query flags: `?webgl` forces the WebGL2 backend instead of WebGPU; `?lang=es` (any
 //! language code) stands in for the browser's languages when the interface language is Automatic.
 
 #[cfg(target_arch = "wasm32")]
+mod fonts;
+#[cfg(target_arch = "wasm32")]
+mod host;
+#[cfg(target_arch = "wasm32")]
 mod locks;
+#[cfg(any(target_arch = "wasm32", test))]
+mod operations;
+#[cfg(any(target_arch = "wasm32", test))]
+mod pencil;
+#[cfg(any(target_arch = "wasm32", test))]
+mod prefs;
+#[cfg(any(target_arch = "wasm32", test))]
+mod protocol;
 #[cfg(target_arch = "wasm32")]
 mod web;
 

@@ -3,9 +3,12 @@
 //! available (the bundled and installed ones) and rescanning the installed fonts.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use serde_json::{Value, json};
-use vectorcraft_doc::{Document, Node, NodeId, NodeKind};
+use vectorcraft_color::Paint;
+use vectorcraft_doc::{AppearanceItem, Document, Node, NodeId, NodeKind, TextKind, TextRun};
+use vectorcraft_geom::Rect;
 
 use super::typecmd::refresh_bounds;
 use super::*;
@@ -17,7 +20,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Fonts in Document",
             [],
             None,
-            "{selectionOnly?} → [{family, style, runs, objects, missing, status: exact|substitute|missing, resolved: {family, style}, missingGlyphs}] sorted by name. A font is found by any of its names (ヒラギノ角ゴシック = Hiragino Sans) among the loaded and installed fonts; substitute: the family is there but not the style (resolved names the stand-in); missing: the family is unknown (the fallback family stands in); missingGlyphs: characters of its text the resolved font lacks (drawn by a fallback font)",
+            "{selectionOnly?} → [{family, style, runs, objects, missing, status: exact|substitute|missing, resolved: {family, style}, missingGlyphs, version?: the installed version the type names (when it names one)}] sorted by name. A font is found by any of its names (ヒラギノ角ゴシック = Hiragino Sans) among the loaded and installed fonts; substitute: the family is there but not the style (resolved names the stand-in); missing: the family is unknown (the fallback family stands in); missingGlyphs: characters of its text the resolved font lacks (drawn by a fallback font)",
             has_doc,
             fonts
         ),
@@ -44,7 +47,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Font List",
             [],
             None,
-            "{family?} → {families: [names]} sorted: the bundled fonts, fonts added and the fonts installed on the system (none on the web), as the font menus list them (without the system's hidden families, whose names start with a dot; they still resolve by name); with family: {family, styles: [names]} (upright styles by weight, then italics; an error when the family isn't available)",
+            "{family?} → {families: [names]} sorted: the bundled fonts, fonts added and the fonts installed on the system (none on the web), each the family's English (canonical) name for `text.setStyle` and documents (without the system's hidden families, whose names start with a dot; they still resolve by name). Preferences › Type › Show Font Names in English only changes the UI menu labels, not this list; with family: {family, styles: [names]} (upright styles by weight, then italics; an error when the family isn't available)",
             always,
             font_list
         ),
@@ -53,7 +56,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Refresh Font List",
             [],
             None,
-            "{} scan the system font folders again, for fonts installed or removed since the app started; text in a font that became available redraws in it (no fonts are installed on the web) → {families, faces} (families listed, installed faces found)",
+            "{} scan the system font folders again, for fonts installed or removed since the app started; text in a font that became available redraws in it, and text in a family that was removed redraws in the fallback font (no fonts are installed on the web) → {families, faces} (families listed, installed faces found)",
             always,
             rescan
         ),
@@ -85,12 +88,23 @@ fn scope(s: &Session, selection_only: bool) -> Result<Vec<NodeId>> {
     Ok(v)
 }
 
-/// The fonts (family, style) of the type in the layers and symbols of `d`.
-pub(super) fn used_fonts(d: &Document) -> BTreeSet<(String, String)> {
+/// A font as type names it: family, style and, when it names one, the installed version.
+pub(super) type UsedFont = (String, String, Option<String>);
+
+/// How a font is named in reports: family and style, then the version the type names, if any.
+pub(super) fn font_label((family, style, version): &UsedFont) -> String {
+    match version {
+        Some(v) => format!("{family} {style} ({v})"),
+        None => format!("{family} {style}"),
+    }
+}
+
+/// The fonts (family, style, version) of the type in the layers and symbols of `d`.
+pub(super) fn used_fonts(d: &Document) -> BTreeSet<UsedFont> {
     let mut fonts = BTreeSet::new();
     let mut add = |n: &Node| {
         if let NodeKind::Text(t) = &n.kind {
-            fonts.extend(t.runs.iter().map(|r| (r.style.font_family.clone(), r.style.font_style.clone())));
+            fonts.extend(t.runs.iter().map(|r| (r.style.font_family.clone(), r.style.font_style.clone(), r.style.font_version.clone())));
         }
     };
     d.walk(&mut add);
@@ -100,16 +114,194 @@ pub(super) fn used_fonts(d: &Document) -> BTreeSet<(String, String)> {
     fonts
 }
 
+/// The type of `d` that prints on pages showing `areas` (document space): the fonts (family, style,
+/// version) it is set in, and the ids of the area type and type on a path among the objects of the
+/// document whose text doesn't fit (not those in the art of symbols, opacity masks, patterns,
+/// brushes or placed documents).
+/// The type that prints is visible type on `layers` (the layers that print) but not on a template
+/// layer (of area type and type on a path that don't fit, the runs that their layout draws),
+/// where what it paints ([`vectorcraft_render::painted_bounds`], its effects applied) meets an area
+/// inside the clipping paths around it, the type in the opacity masks and patterns of the objects
+/// that print and in the pieces their brushes draw, and the type of the symbols that their
+/// instances and inline graphics show.
+/// The objects of a blend, envelope, repeat or compound path, or of a layer or group with effects,
+/// fills or strokes of its own, are taken with it when what it paints meets an area, and so is the
+/// art of a placed document (`d` as [`Document::with_placed_art`] gives it, for that art's
+/// resources).
+pub(super) fn printed_type(d: &Document, layers: &[Arc<Node>], areas: &[Rect]) -> (BTreeSet<UsedFont>, BTreeSet<NodeId>) {
+    let mut walk = Printed { d, own: true, fonts: BTreeSet::new(), overflow: BTreeSet::new(), symbols: BTreeSet::new(), patterns: BTreeSet::new() };
+    for l in layers {
+        walk.node(l, Some(areas));
+    }
+    (walk.fonts, walk.overflow)
+}
+
+/// The walk of [`printed_type`].
+struct Printed<'a> {
+    d: &'a Document,
+    /// Whether the walk is among the objects of the document, not in art drawn for one.
+    own: bool,
+    fonts: BTreeSet<UsedFont>,
+    /// The objects of the document whose text doesn't fit.
+    overflow: BTreeSet<NodeId>,
+    /// The symbols and patterns whose art was walked.
+    symbols: BTreeSet<String>,
+    patterns: BTreeSet<String>,
+}
+
+impl Printed<'_> {
+    /// Adds the fonts of `n` and its descendants that print, and the ids of those that don't fit
+    /// while [`Printed::own`] is set: those whose bounds meet one of `areas`, or with `None` (in the
+    /// art of a symbol, opacity mask, pattern or placed document, in brush pieces, or in a live
+    /// object) all of them but those outside the clipping path of a clip group.
+    fn node(&mut self, n: &Node, areas: Option<&[Rect]>) {
+        if !n.visible || matches!(n.kind, NodeKind::Layer { template: true, .. }) {
+            return;
+        }
+        // A layer or group with effects, fills or strokes of its own prints where they paint (moved,
+        // shadowed…), drawn from its members' shapes.
+        let moved = vectorcraft_render::effects::has_container_appearance(n);
+        let open = !moved && matches!(n.kind, NodeKind::Layer { clip: false, .. } | NodeKind::Group { clip: false, .. });
+        if let Some(a) = areas
+            && !open
+            && !self.meets(n, a)
+        {
+            return;
+        }
+        // The art that its opacity mask, pattern paints and brushed strokes draw.
+        let mask = n.extras().mask.as_deref().filter(|m| !m.disabled);
+        let (runs, overflows) = match &n.kind {
+            NodeKind::Text(t) => drawn_runs(t),
+            _ => (vec![], false),
+        };
+        let items: Vec<&AppearanceItem> =
+            n.appearance.items.iter().filter(|i| i.visible() && !matches!(i, AppearanceItem::Stroke(s) if s.width <= 0.0)).collect();
+        let patterns: Vec<&str> = items
+            .iter()
+            .map(|i| i.paint())
+            .chain(runs.iter().flat_map(|r| [Some(&r.style.fill), (r.style.stroke_width > 0.0).then_some(&r.style.stroke)]).flatten())
+            .filter_map(|p| match p {
+                Paint::Pattern { pattern, .. } => Some(pattern.as_str()),
+                _ => None,
+            })
+            .collect();
+        let brushed = vectorcraft_brush::has_brush(n);
+        if (mask.is_some() || !patterns.is_empty() || brushed) && areas.is_none_or(|a| !open || self.meets(n, a)) {
+            if let Some(m) = mask {
+                self.art(&m.art);
+            }
+            let d = self.d;
+            for name in patterns {
+                if self.patterns.insert(name.to_string())
+                    && let Some(p) = d.pattern(name)
+                {
+                    for art in &p.art {
+                        self.art(art);
+                    }
+                }
+            }
+            // The pieces its brushes draw along the path (art and pattern brushes leave type out).
+            if brushed {
+                for piece in vectorcraft_brush::node_pieces(d, n).unwrap_or_default() {
+                    self.art(&piece);
+                }
+            }
+        }
+        match &n.kind {
+            NodeKind::Text(_) => {
+                if overflows && self.own {
+                    self.overflow.insert(n.id);
+                }
+                for r in runs {
+                    self.fonts.insert((r.style.font_family.clone(), r.style.font_style.clone(), r.style.font_version.clone()));
+                    // Inline graphics draw their symbols' art.
+                    if let Some(art) = &r.inline {
+                        self.symbol(&art.symbol);
+                    }
+                }
+            }
+            NodeKind::SymbolInstance { symbol, .. } => self.symbol(symbol),
+            NodeKind::PlacedDocument(p) => {
+                for art in p.art(n) {
+                    self.art(&art);
+                }
+            }
+            NodeKind::Layer { children, clip, .. } | NodeKind::Group { children, clip } if !moved => {
+                // Each object prints where it lies, inside the clipping path of a clip group.
+                let clipped = match (clip, areas) {
+                    (false, _) => None,
+                    (true, Some(a)) => Some(self.clip(n, a)),
+                    (true, None) => vectorcraft_render::painted_bounds(self.d, n).map(|c| vec![c]),
+                };
+                for c in children {
+                    self.node(c, clipped.as_deref().or(areas));
+                }
+            }
+            _ => {
+                for c in n.children().map(Vec::as_slice).unwrap_or_default() {
+                    self.node(c, None);
+                }
+            }
+        }
+    }
+
+    /// Adds the fonts of symbol `name`'s art, the first time it is shown.
+    fn symbol(&mut self, name: &str) {
+        let d = self.d;
+        if self.symbols.insert(name.to_string())
+            && let Some(s) = d.symbols.iter().find(|s| s.name == name)
+        {
+            self.art(&s.art);
+        }
+    }
+
+    /// Adds the fonts of `art`, drawn for an object of the document but not one of its objects (the
+    /// art of a symbol, opacity mask, pattern or placed document, or a brush piece), with
+    /// [`Printed::node`]'s `None`.
+    fn art(&mut self, art: &Node) {
+        let own = std::mem::replace(&mut self.own, false);
+        self.node(art, None);
+        self.own = own;
+    }
+
+    /// Whether what `n` paints, its effects applied, meets one of `areas`.
+    fn meets(&self, n: &Node, areas: &[Rect]) -> bool {
+        vectorcraft_render::painted_bounds(self.d, n).is_some_and(|b| areas.iter().any(|r| b.intersect(*r).area() > 0.0 || r.contains_rect(b)))
+    }
+
+    /// The parts of `areas` inside the bounds of clip group `n` (its clipping path's).
+    fn clip(&self, n: &Node, areas: &[Rect]) -> Vec<Rect> {
+        let Some(c) = vectorcraft_render::painted_bounds(self.d, n) else { return areas.to_vec() };
+        areas.iter().filter(|r| c.intersect(**r).area() > 0.0 || r.contains_rect(c)).map(|r| r.intersect(c)).collect()
+    }
+}
+
+/// The runs of `t` that print, and whether its text doesn't fit: all of them, or of area type and
+/// type on a path that don't fit, the runs that their layout draws glyphs or inline graphics of.
+fn drawn_runs(t: &vectorcraft_doc::TextObject) -> (Vec<&TextRun>, bool) {
+    let drawn: Option<BTreeSet<usize>> = (!matches!(t.kind, TextKind::Point))
+        .then(|| vectorcraft_text::layout(vectorcraft_text::FontDb::global(), t))
+        .filter(|lay| lay.overflow)
+        .map(|lay| lay.glyphs.iter().map(|g| g.run).chain(lay.inlines.iter().map(|i| i.run)).collect());
+    let runs = t.runs.iter().enumerate().filter(|(i, _)| drawn.as_ref().is_none_or(|d| d.contains(i))).map(|(_, r)| r).collect();
+    (runs, drawn.is_some())
+}
+
 /// What an export that draws type (as outlines, embedded fonts or pixels) says when `d` uses font
 /// families that aren't available: their type is drawn in the fallback font, not the font it names.
 pub(super) fn substitution_warning(d: &Document) -> Option<String> {
+    substitution_warning_of(used_fonts(d))
+}
+
+/// [`substitution_warning`] for type set in `fonts`.
+pub(super) fn substitution_warning_of(fonts: BTreeSet<UsedFont>) -> Option<String> {
     let db = vectorcraft_text::FontDb::global();
-    let mut missing: Vec<String> = used_fonts(d)
+    let mut missing: Vec<String> = fonts
         .into_iter()
-        .filter(|(family, style)| db.resolve(family, style).is_none_or(|(_, m)| m == vectorcraft_text::FontMatch::Missing))
-        .map(|(family, _)| family)
+        .filter(|(family, style, _)| db.resolve(family, style).is_none_or(|(_, m)| m == vectorcraft_text::FontMatch::Missing))
+        .map(|(family, _, _)| family)
         .collect();
-    // Sorted by family: its styles are neighbours.
+    // Sorted by family: its styles and versions are neighbours.
     missing.dedup();
     (!missing.is_empty()).then(|| {
         format!(
@@ -131,10 +323,10 @@ fn fonts(s: &mut Session, p: &Value) -> Result<Value> {
     let ids = scope(s, bool_or(p, "selectionOnly", false))?;
     let d = &s.doc()?.doc;
     let db = vectorcraft_text::FontDb::global();
-    let mut found: BTreeMap<(String, String), (usize, Vec<NodeId>, String)> = BTreeMap::new();
+    let mut found: BTreeMap<UsedFont, (usize, Vec<NodeId>, String)> = BTreeMap::new();
     for id in ids {
         for r in text(d, id).map(|t| t.runs.as_slice()).unwrap_or_default() {
-            let e = found.entry((r.style.font_family.clone(), r.style.font_style.clone())).or_default();
+            let e = found.entry((r.style.font_family.clone(), r.style.font_style.clone(), r.style.font_version.clone())).or_default();
             e.0 += 1;
             e.2.push_str(&r.text);
             if !e.1.contains(&id) {
@@ -144,20 +336,25 @@ fn fonts(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let list: Vec<Value> = found
         .into_iter()
-        .map(|((family, style), (runs, objects, chars))| {
-            let resolved = db.resolve(&family, &style);
+        .map(|((family, style, version), (runs, objects, chars))| {
+            // The face the type is set in: the version it names when that one is installed.
+            let resolved = db.resolve(&family, &style).map(|(f, m)| (db.face_version(&family, &style, version.as_deref()).unwrap_or(f), m));
             let status = resolved.as_ref().map(|(_, m)| *m).unwrap_or(vectorcraft_text::FontMatch::Missing);
             let mut lacking: Vec<char> = chars.chars().filter(|c| !c.is_whitespace() && !c.is_control()).collect();
             lacking.sort_unstable();
             lacking.dedup();
             lacking.retain(|c| !resolved.as_ref().is_some_and(|(f, _)| f.covers(*c)));
-            json!({
+            let mut row = json!({
                 "family": family, "style": style, "runs": runs, "objects": objects.len(),
                 "missing": status == vectorcraft_text::FontMatch::Missing,
                 "status": status.as_str(),
                 "resolved": resolved.as_ref().map(|(f, _)| json!({ "family": f.family, "style": f.style })),
                 "missingGlyphs": lacking.len(),
-            })
+            });
+            if let Some(v) = version {
+                row["version"] = json!(v);
+            }
+            row
         })
         .collect();
     Ok(json!(list))
@@ -198,6 +395,8 @@ fn replace(s: &mut Session, p: &Value) -> Result<Value> {
                         .unwrap_or_else(|| r.style.font_style.clone());
                     r.style.font_family = tf.clone();
                     r.style.font_style = style;
+                    // Another font: none of the old one's versions.
+                    r.style.font_version = None;
                     changed = true;
                     n += 1;
                 }
@@ -247,7 +446,7 @@ fn font_list(_: &mut Session, p: &Value) -> Result<Value> {
     }
 }
 
-fn rescan(s: &mut Session, _: &Value) -> Result<Value> {
+pub(crate) fn rescan(s: &mut Session, _: &Value) -> Result<Value> {
     let db = vectorcraft_text::FontDb::global();
     #[cfg(not(target_arch = "wasm32"))]
     let faces = db.load_system_fonts();
@@ -282,6 +481,21 @@ fn rescan(s: &mut Session, _: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Type › Options › Additional Fonts Folder (#683) adds its folder to the system font scan,
+    /// trimmed; clearing it takes the folder out again.
+    #[test]
+    fn the_additional_fonts_folder_joins_the_font_scan() {
+        let mut s = Session::new();
+        let dir = std::env::temp_dir().join("vectorcraft-fonts-folder-pref");
+        s.execute("prefs.set", &json!({"key": "fontsFolder", "value": format!("  {}  ", dir.display())})).unwrap();
+        assert_eq!(vectorcraft_text::user_font_dirs(), std::slice::from_ref(&dir));
+        if !cfg!(target_arch = "wasm32") {
+            assert!(vectorcraft_text::system_font_dirs().contains(&dir));
+        }
+        s.execute("prefs.set", &json!({"key": "fontsFolder", "value": ""})).unwrap();
+        assert!(vectorcraft_text::user_font_dirs().is_empty() && !vectorcraft_text::system_font_dirs().contains(&dir));
+    }
 
     #[test]
     fn list_flag_missing_replace_and_select() {
