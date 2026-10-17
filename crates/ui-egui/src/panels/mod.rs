@@ -33,6 +33,7 @@ pub mod opentype;
 pub mod paragraph;
 pub mod pathfinder;
 pub mod pattern_options;
+pub mod production_separations;
 pub mod properties;
 pub mod separations;
 pub mod stroke;
@@ -151,6 +152,7 @@ pub fn show_icon_panel(app: &mut VectorcraftApp, ui: &mut Ui, id: &str) {
         "actions" => actions::show(app, ui),
         "info" => info::show(app, ui),
         "separations" => separations::show(app, ui),
+        "productionSeparations" => production_separations::show(app, ui),
         "artboards" => artboards::show(app, ui),
         "gradient" => gradient::show(app, ui),
         "character" => character::show(app, ui),

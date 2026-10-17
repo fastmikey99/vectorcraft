@@ -4541,3 +4541,21 @@ lighting	Light	광원
 	Movie Clip	무비 클립
 @msg	name is empty	이름이 비어 있습니다
 @msg	no symbol named `{n}`	이름이 `{n}`인 심볼이 없습니다
+
+# Reporter production panel: original translations, not native-speaker reviewed.
+	Production Separations	생산용 색 분판
+	Configure Production Separations	생산용 색 분판 설정
+	List Production Separations	생산용 색 분판 목록
+	Preview Production Separations	생산용 색 분판 미리 보기
+	Select Separation Artwork	분판 아트워크 선택
+	Eyes change preview only. All artwork is saved.	눈 아이콘은 미리 보기만 변경합니다. 모든 객체가 저장됩니다.
+	No recipe context.	레시피 정보가 없습니다.
+	Existing groups only.	기존 그룹만 표시합니다.
+	Select whole objects containing this ink.	이 잉크를 포함하는 객체 전체를 선택합니다.
+	Show all	모두 표시
+	Show all components and select this group	모든 구성 요소를 표시하고 이 그룹 선택
+	Show/hide ink (Alt-click: isolate)	잉크 표시/숨기기 (Alt 클릭: 단독 표시)
+	Show/hide group in preview	미리 보기에서 그룹 표시/숨기기
+	Unassigned	할당되지 않음
+@msg	Invalid separation context or too many entries	잘못된 분판 정보이거나 항목이 너무 많습니다
+@msg	Invalid or duplicate separation name/component	분판 이름 또는 구성 요소가 잘못되었거나 중복됩니다

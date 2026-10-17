@@ -4917,3 +4917,21 @@ mark-style	Japanese	Japonesas
 # Symbol Options › Export Type
 @msg	name is empty	o nome está vazio
 @msg	no symbol named `{n}`	nenhum símbolo chamado `{n}`
+
+# Reporter production panel: original translations, not native-speaker reviewed.
+	Production Separations	Separações de produção
+	Configure Production Separations	Configurar separações de produção
+	List Production Separations	Listar separações de produção
+	Preview Production Separations	Visualizar separações de produção
+	Select Separation Artwork	Selecionar objetos da separação
+	Eyes change preview only. All artwork is saved.	Os olhos alteram apenas a prévia. Todos os objetos são salvos.
+	No recipe context.	Sem receita.
+	Existing groups only.	Somente grupos existentes.
+	Select whole objects containing this ink.	Selecionar objetos inteiros que contenham esta tinta.
+	Show all	Mostrar tudo
+	Show all components and select this group	Mostrar todos os componentes e selecionar este grupo
+	Show/hide ink (Alt-click: isolate)	Mostrar/ocultar tinta (Alt-clique: isolar)
+	Show/hide group in preview	Mostrar/ocultar grupo na prévia
+	Unassigned	Não atribuído
+@msg	Invalid separation context or too many entries	Contexto de separação inválido ou entradas demais
+@msg	Invalid or duplicate separation name/component	Nome de separação ou componente inválido ou duplicado

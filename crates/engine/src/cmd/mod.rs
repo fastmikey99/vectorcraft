@@ -64,6 +64,7 @@ pub mod print;
 pub(crate) mod printadvanced;
 pub mod printpresets;
 pub mod printtiling;
+pub mod production_separations;
 pub mod rasterfx;
 mod recolor;
 pub mod recovery;
@@ -229,6 +230,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(live::specs());
         v.extend(colorcmds::specs());
         v.extend(colormgmt::specs());
+        v.extend(production_separations::specs());
         v.extend(typemenu::specs());
         v.extend(textedit::specs());
         v.extend(inline::specs());

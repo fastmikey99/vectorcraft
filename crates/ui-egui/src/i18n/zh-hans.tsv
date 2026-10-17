@@ -4107,3 +4107,21 @@ lighting	Light	光源
 	Movie Clip	影片剪辑
 @msg	name is empty	名称为空
 @msg	no symbol named `{n}`	没有名为 `{n}` 的符号
+
+# Reporter production panel: original translations, not native-speaker reviewed.
+	Production Separations	生产分色
+	Configure Production Separations	配置生产分色
+	List Production Separations	列出生产分色
+	Preview Production Separations	预览生产分色
+	Select Separation Artwork	选择分色图稿
+	Eyes change preview only. All artwork is saved.	眼睛图标仅更改预览。所有图稿都会保存。
+	No recipe context.	没有配方信息。
+	Existing groups only.	仅显示现有组。
+	Select whole objects containing this ink.	选择包含此油墨的整个对象。
+	Show all	全部显示
+	Show all components and select this group	显示所有组成部分并选择此组
+	Show/hide ink (Alt-click: isolate)	显示/隐藏油墨（Alt 单击：单独显示）
+	Show/hide group in preview	在预览中显示/隐藏组
+	Unassigned	未分配
+@msg	Invalid separation context or too many entries	分色信息无效或条目过多
+@msg	Invalid or duplicate separation name/component	分色名称或组成部分无效或重复

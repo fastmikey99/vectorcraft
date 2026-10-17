@@ -201,6 +201,7 @@ pub struct HostOpen {
     pub name: String,
     pub bytes: Vec<u8>,
     pub print_production: bool,
+    pub separations: Option<vectorcraft_engine::cmd::production_separations::Context>,
 }
 pub type HostInbox = Arc<Mutex<Vec<HostOpen>>>;
 pub type HostOpenResult = Box<dyn Fn(Result<(), String>)>;
@@ -1028,13 +1029,35 @@ impl VectorcraftApp {
                 io::report_open_error(self, &name, &e);
             }
         }
-        for HostOpen { name, bytes, print_production } in handed {
+        for HostOpen { name, bytes, print_production, separations } in handed {
+            if let Some(c) = &separations
+                && let Err(e) = c.validate()
+            {
+                io::report_open_error(self, &name, &e);
+                continue;
+            }
+            // Acknowledge only after both the document and its panel context are installed.
+            let report = self.services.host_open_result.take();
             let before: Vec<u64> = self.session.documents().iter().map(|d| d.uid).collect();
             let opened = if print_production {
                 io::open_document(self, &name, &bytes, None, &serde_json::json!({"printProduction": true}))
             } else {
                 io::open_bytes(self, &name, &bytes, None)
             };
+            let opened = opened.and_then(|r| {
+                if let Some(c) = separations {
+                    let context = serde_json::to_value(c).map_err(|e| e.to_string())?;
+                    self.run("production.separations.configure", serde_json::json!({"context":context}))?;
+                    self.ui.open_panel = Some("productionSeparations".into());
+                }
+                Ok(r)
+            });
+            self.services.host_open_result = report;
+            if opened.is_ok()
+                && let Some(report) = &self.services.host_open_result
+            {
+                report(Ok(()));
+            }
             match opened {
                 // It takes the place of what was open (a file that opens later, after a dialog,
                 // does when it arrives: `keep_one_document`).

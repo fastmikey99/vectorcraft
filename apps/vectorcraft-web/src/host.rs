@@ -64,6 +64,7 @@ pub struct Bridge {
     prefs: Rc<RefCell<Option<String>>>,
     /// The files the parent hands over (`Services::host_inbox`), which outlive graphics restarts.
     inbox: Inbox,
+    ready: Rc<Cell<bool>>,
 }
 
 impl Bridge {
@@ -84,6 +85,7 @@ impl Bridge {
             places: Rc::default(),
             prefs: Rc::default(),
             inbox: Inbox::default(),
+            ready: Rc::default(),
         })
     }
 
@@ -105,6 +107,7 @@ impl Bridge {
     }
 
     pub fn post_ready(&self) {
+        self.ready.set(true);
         self.send(&[
             ("type", "vectorcraft:ready".into()),
             ("version", env!("CARGO_PKG_VERSION").into()),
@@ -112,6 +115,7 @@ impl Bridge {
             ("preserveSource", true.into()),
             ("openAcknowledgement", true.into()),
             ("printProduction", true.into()),
+            ("productionSeparations", true.into()),
         ]);
     }
 
@@ -242,6 +246,12 @@ impl Bridge {
                 }
                 return;
             }
+            if string(&data, "type").as_deref() == Some("vectorcraft:hello") {
+                if bridge.ready.get() {
+                    bridge.post_ready();
+                }
+                return;
+            }
             if string(&data, "type").as_deref() == Some("vectorcraft:prefs") {
                 match protocol::prefs(string(&data, "prefs")) {
                     Ok(text) => {
@@ -270,10 +280,32 @@ impl Bridge {
                         bridge.post_failed("vectorcraft:open: printProduction must be a boolean");
                         return;
                     }
+                    let value = js_sys::Reflect::get(&data, &JsValue::from_str("separations")).unwrap_or(JsValue::UNDEFINED);
+                    let separations = if value.is_undefined() {
+                        None
+                    } else {
+                        let result = js_sys::JSON::stringify(&value)
+                            .ok()
+                            .and_then(|s| s.as_string())
+                            .filter(|s| s.len() <= protocol::MAX_PREFS)
+                            .ok_or_else(|| "Invalid separation context".to_string())
+                            .and_then(|s| {
+                                serde_json::from_str::<vectorcraft_engine::cmd::production_separations::Context>(&s).map_err(|e| e.to_string())
+                            })
+                            .and_then(|c| c.validate().map(|()| c));
+                        match result {
+                            Ok(c) => Some(c),
+                            Err(e) => {
+                                bridge.post_failed(&e);
+                                return;
+                            }
+                        }
+                    };
                     bridge.inbox.lock().unwrap_or_else(|e| e.into_inner()).push(vectorcraft_ui_egui::HostOpen {
                         name: open.name,
                         bytes: open.bytes,
                         print_production: flag.as_bool().unwrap_or(false),
+                        separations,
                     });
                     wake();
                 }

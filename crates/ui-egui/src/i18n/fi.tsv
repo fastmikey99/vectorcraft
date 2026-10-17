@@ -4964,3 +4964,21 @@ mark-style	Japanese	Japanilainen
 	Movie Clip	Elokuvaleike
 @msg	name is empty	nimi on tyhjä
 @msg	no symbol named `{n}`	symbolia nimeltä `{n}` ei ole
+
+# Reporter production panel: original translations, not native-speaker reviewed.
+	Production Separations	Tuotantovärierottelut
+	Configure Production Separations	Määritä tuotantovärierottelut
+	List Production Separations	Luettele tuotantovärierottelut
+	Preview Production Separations	Esikatsele tuotantovärierotteluja
+	Select Separation Artwork	Valitse värierottelun objektit
+	Eyes change preview only. All artwork is saved.	Silmäkuvakkeet muuttavat vain esikatselua. Kaikki objektit tallennetaan.
+	No recipe context.	Ei reseptiä.
+	Existing groups only.	Vain olemassa olevat ryhmät.
+	Select whole objects containing this ink.	Valitse kokonaiset objektit, jotka sisältävät tätä painoväriä.
+	Show all	Näytä kaikki
+	Show all components and select this group	Näytä kaikki osat ja valitse tämä ryhmä
+	Show/hide ink (Alt-click: isolate)	Näytä/piilota painoväri (Alt-napsautus: eristä)
+	Show/hide group in preview	Näytä/piilota ryhmä esikatselussa
+	Unassigned	Ei määritetty
+@msg	Invalid separation context or too many entries	Virheellinen värierottelukonteksti tai liikaa merkintöjä
+@msg	Invalid or duplicate separation name/component	Virheellinen tai päällekkäinen värierottelun nimi tai osa

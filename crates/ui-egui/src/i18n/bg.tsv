@@ -4981,3 +4981,21 @@ theme	Appearance	Външен вид
 	Movie Clip	Филмов клип
 @msg	name is empty	името е празно
 @msg	no symbol named `{n}`	няма символ с име `{n}`
+
+# Reporter production panel: original translations, not native-speaker reviewed.
+	Production Separations	Производствени цветоотделки
+	Configure Production Separations	Настройване на производствени цветоотделки
+	List Production Separations	Списък на производствени цветоотделки
+	Preview Production Separations	Преглед на производствени цветоотделки
+	Select Separation Artwork	Избор на обекти от цветоотделката
+	Eyes change preview only. All artwork is saved.	Очите променят само прегледа. Всички обекти се запазват.
+	No recipe context.	Няма рецепта.
+	Existing groups only.	Само съществуващи групи.
+	Select whole objects containing this ink.	Избор на цели обекти, съдържащи това мастило.
+	Show all	Показване на всички
+	Show all components and select this group	Показване на всички компоненти и избор на тази група
+	Show/hide ink (Alt-click: isolate)	Показване/скриване на мастило (Alt-щракване: изолиране)
+	Show/hide group in preview	Показване/скриване на група в прегледа
+	Unassigned	Неназначено
+@msg	Invalid separation context or too many entries	Невалиден контекст на цветоотделка или твърде много записи
+@msg	Invalid or duplicate separation name/component	Невалидно или дублирано име на цветоотделка или компонент

@@ -4845,3 +4845,21 @@ mark-style	Japanese	Japońskie
 	Movie Clip	Klip filmowy
 @msg	name is empty	nazwa jest pusta
 @msg	no symbol named `{n}`	brak symbolu o nazwie `{n}`
+
+# Reporter production panel: original translations, not native-speaker reviewed.
+	Production Separations	Separacje produkcyjne
+	Configure Production Separations	Konfiguruj separacje produkcyjne
+	List Production Separations	Wyświetl listę separacji produkcyjnych
+	Preview Production Separations	Podgląd separacji produkcyjnych
+	Select Separation Artwork	Zaznacz obiekty separacji
+	Eyes change preview only. All artwork is saved.	Ikony oka zmieniają tylko podgląd. Zapisywane są wszystkie obiekty.
+	No recipe context.	Brak receptury.
+	Existing groups only.	Tylko istniejące grupy.
+	Select whole objects containing this ink.	Zaznacz całe obiekty zawierające tę farbę.
+	Show all	Pokaż wszystko
+	Show all components and select this group	Pokaż wszystkie składniki i zaznacz tę grupę
+	Show/hide ink (Alt-click: isolate)	Pokaż/ukryj farbę (Alt-kliknięcie: izoluj)
+	Show/hide group in preview	Pokaż/ukryj grupę w podglądzie
+	Unassigned	Nieprzypisane
+@msg	Invalid separation context or too many entries	Nieprawidłowy kontekst separacji lub zbyt wiele wpisów
+@msg	Invalid or duplicate separation name/component	Nieprawidłowa lub powielona nazwa separacji albo składnika
