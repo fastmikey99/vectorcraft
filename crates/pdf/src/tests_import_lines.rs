@@ -131,10 +131,9 @@ fn a_stroke_written_as_stroked_glyph_outlines_is_the_types_stroke() {
     assert_eq!(d.layers[0].children().unwrap().len(), 2);
 }
 
-/// A `.ai` page moved right in the row, so its art past the artboard clears the page before it
-/// (#1528), still has the stroke drawn on its type's glyphs read as the type's stroke.
+/// Cropping a `.ai` page keeps the stroke drawn on its type's glyphs as the type's stroke.
 #[test]
-fn a_stroke_on_the_type_of_a_moved_ai_page_is_still_the_types_stroke() {
+fn a_stroke_on_the_type_of_a_cropped_ai_page_is_still_the_types_stroke() {
     let ai = "/PieceInfo << /Illustrator << /Private << /AIPrivateData1 7 /NumBlock 1 >> >> >>";
     let content = format!(
         "0 g -70 10 80 20 re f BT 1 0 0 rg /F1 24 Tf 10 50 Td (Hi) Tj ET 0 0 1 RG 0.5 w {}{}",
@@ -147,7 +146,7 @@ fn a_stroke_on_the_type_of_a_moved_ai_page_is_still_the_types_stroke() {
         ..PdfPage::new(100.0, 100.0, c)
     });
     let d = import(&vectorcraft_testkit::pdf::pdf(&pages, None)).unwrap();
-    assert!(d.artboards[1].rect.x0 > d.artboards[0].rect.x1 + 36.0 + 1.0, "page 2 moved: {:?}", d.artboards);
+    assert_eq!(d.artboards[1].rect.x0, d.artboards[0].rect.x1 + 36.0, "cropped pages keep their spacing");
     let art = d.layers[1].children().unwrap();
     assert_eq!(art.len(), 2, "the note and the type: {art:?}");
     assert!(matches!(art[1].appearance.items.as_slice(), [AppearanceItem::Stroke(_)]), "{:?}", art[1].appearance);

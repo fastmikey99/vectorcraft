@@ -299,13 +299,12 @@ fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_p
         // dropped as redundant (by hayro and by `push_clip_path`), so restore the box here:
         // each object reaching past it keeps its own clip, which Fit to Artwork Bounds and
         // `CropTo::Bounding` then respect.
-        // The crop box is what viewers show, whichever box the artboard takes. Not in a
-        // PDF-compatible `.ai`: its PDF part stands in for the editable document, whose art
-        // crossing the artboard edge isn't clipped, so it opens whole (#646).
+        // Supacolour print policy: the CropBox is what prints, even for PDF-compatible
+        // `.ai` files and whichever box the artboard takes. Keep the visible page boundary.
         let shown = xf.transform_rect_bbox(crate::pages::page_box(page, CropTo::Crop));
         let page_box = shown.inflate(0.01, 0.01);
         let mut clipped = false;
-        for (_, art) in parts.iter_mut().filter(|_| !ai) {
+        for (_, art) in &mut parts {
             for n in art.iter_mut() {
                 if n.visual_bounds().is_some_and(|r| !contains(page_box, r)) {
                     let clip = Arc::new(b.clip_node(&shown.to_path(0.1), FillRule::NonZero));
@@ -317,11 +316,8 @@ fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_p
         if clipped {
             b.warn(PAST_PAGE_NOTE);
         }
-        // A `.ai` page keeps its art past the artboard edge, unclipped (#646), so a page whose art
-        // reaches far to the left would lay it over the page before it in the row: there it would
-        // be taken for that page's art (by the check against the editing data, which then finds
-        // art its layers don't have there, and by `place_pages`). Such a page moves right until its
-        // art clears the art before it.
+        // Keep the defensive page-spacing calculation for unusual page boxes. With the print
+        // crop applied above, ordinary `.ai` pages already fit and do not move right.
         let mut art_right = f64::NEG_INFINITY;
         if ai && let Some(art) = parts.iter().flat_map(|(_, v)| v.iter()).filter_map(|n| n.visual_bounds()).reduce(|a, b| a.union(b)) {
             // Art at a coordinate that isn't a number (a damaged file) moves nothing.

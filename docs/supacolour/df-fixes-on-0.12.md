@@ -58,3 +58,15 @@ metadata and successful decoding for both formats.
 
 Validation: engine (2,263 unit tests) and render (305 unit tests), plus their
 integration tests, passed in the affected-crate run. Clippy and fmt passed.
+
+## 4. PDF-compatible .ai crop — 10b56b9c
+
+**Ported as the local print policy.** PDF import applies CropBox clipping to
+PDF-compatible `.ai` artwork as well as ordinary PDFs. This intentionally differs
+from upstream's off-artboard editing policy; native editing-data restoration is
+unchanged. Adapted the layer/path-count, page-spacing and text-stroke tests rather
+than importing the old patch's two test ignores. Added a distinct CropBox versus
+MediaBox regression. All PDF inputs are synthetic.
+
+Validation: all 323 PDF unit tests and its integration tests passed, including
+the cropped-page stroke and spacing cases. Clippy and fmt passed.
