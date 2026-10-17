@@ -68,6 +68,11 @@ is not a protocol negotiation.
   its explicit Hybrid policy before persisting such a save. DF retains its existing
   export defaults. This bridge has no authority to release artwork to CodeWolf.
 
+Production import refuses artwork exceeding safe editable nesting limits before
+clipping or opacity-mask information is removed. The host receives
+`vectorcraft:failed`, without an `opened` acknowledgement. This does not provide
+editing support for those deeply nested files.
+
 Source preservation is a colour-output policy, not proof that arbitrary PDFs are
 lossless. Corpus qualification must compare page frames, layers, inks and rendered
 coverage. Tests: `operations::tests`, `protocol::tests`, UI single-document and

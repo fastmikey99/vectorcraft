@@ -644,3 +644,20 @@ fn clips_with_the_page_as_bounding_box_still_clip() {
     assert!(!clipped("0 0 100 100 re"), "the page");
     assert!(!clipped("50 -60 m 160 50 l 50 160 l -60 50 l h"), "a turned square around the page");
 }
+
+/// A synthetic stack of nonrectangular clips must never become an editable production file
+/// after the document depth limiter has removed some of its clipping boundaries.
+#[test]
+fn production_import_rejects_depth_loss() {
+    let levels = vectorcraft_doc::depth::MAX_DEPTH + 4;
+    let content = format!("{}1 0 0 rg 0 0 100 100 re f{}", "q 50 0 m 100 50 l 50 100 l 0 50 l h W n\n".repeat(levels), " Q".repeat(levels));
+    let bytes = one_page(&content, "<< >>", &[]);
+    let ordinary = import_with_report(&bytes, &ImportOptions::default()).unwrap();
+    assert!(ordinary.warnings.contains(&vectorcraft_doc::depth::merged_note()));
+    let strict = ImportOptions { reject_depth_loss: true, ..Default::default() };
+    let error = import_with_report(&bytes, &strict).unwrap_err();
+    assert!(matches!(error, PdfError::Unsupported(_)));
+    assert!(error.to_string().contains("clipping or mask information"));
+    let shallow = one_page("q 50 0 m 100 50 l 50 100 l 0 50 l h W n 1 0 0 rg 0 0 100 100 re f Q", "<< >>", &[]);
+    assert!(import_with_report(&shallow, &strict).is_ok());
+}

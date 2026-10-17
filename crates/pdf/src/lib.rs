@@ -130,6 +130,9 @@ pub struct ImportOptions {
     /// The file is an editor's own document (`.ai`): RGB in its `ICCBased` spaces keeps its numbers
     /// (see `Colors::uncalibrated_rgb`). Off for PDFs, whose profiles stand.
     pub uncalibrated_rgb: bool,
+    /// Refuse artwork exceeding safe nesting limits instead of discarding clips or masks.
+    /// Print-production callers must enable this before offering an editable separation.
+    pub reject_depth_loss: bool,
 }
 
 impl Default for ImportOptions {
@@ -143,6 +146,7 @@ impl Default for ImportOptions {
             text_as: TextAs::default(),
             layers: true,
             uncalibrated_rgb: false,
+            reject_depth_loss: false,
         }
     }
 }

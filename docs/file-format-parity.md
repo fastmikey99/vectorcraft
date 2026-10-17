@@ -206,3 +206,23 @@ explicit source-preserving export; open completion and refused exports are repor
 to the parent. The parent owns persistence and production release. See
 `docs/web-embed.md` and the native bridge/UI tests. No parity score increase or
 production qualification is claimed by this integration alone.
+
+### WEB.H2 — Production import guard and mask rendering (17 October 2026)
+
+Production PDF import now refuses documents exceeding safe editable nesting limits
+before the limiter can remove clipping paths or opacity masks. This is a guarded
+unsupported case, not support for arbitrarily deep artwork. Synthetic import and
+engine tests cover refusal and retaining the previously open document.
+
+Restore bounded opacity-mask raster work in the updated renderer, retaining the
+full-viewport reference and conservative fallback for symbols and effects. Coverage
+tests compare the two paths across clipping, inversion, transforms and antialiasing.
+The runtime-file `soft_mask_profile` example measures redraw/pan/zoom/move without
+embedding customer artwork. Reporter rollout remains held for DF fidelity and the
+actual Switch layer-consumption contract; parity scores and estimates are unchanged.
+
+Validation: all nine `cargo xtask ci` gates passed. All 16 Hybrid/gang references
+retain identical artwork objects and streams across 48 exports compared with the
+previous bridge build (writer timestamps/generated IDs excluded). The deep DF
+reference is refused in production mode before any export. All 58 sampled mask
+render frame hashes match the uncropped renderer. Customer PDFs stay outside Git.
