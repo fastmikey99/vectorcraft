@@ -1048,7 +1048,7 @@ impl VectorcraftApp {
                 if let Some(c) = separations {
                     let context = serde_json::to_value(c).map_err(|e| e.to_string())?;
                     self.run("production.separations.configure", serde_json::json!({"context":context}))?;
-                    self.ui.open_panel = Some("productionSeparations".into());
+                    self.run("window.panel.activate", serde_json::json!({"panel":"productionSeparations"}))?;
                 }
                 Ok(r)
             });
