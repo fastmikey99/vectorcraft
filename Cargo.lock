@@ -4653,6 +4653,7 @@ dependencies = [
  "crc32fast",
  "flate2",
  "image",
+ "jpeg-encoder",
  "kurbo 0.13.1",
  "log",
  "proptest",

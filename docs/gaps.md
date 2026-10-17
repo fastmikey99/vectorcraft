@@ -527,3 +527,9 @@ Native bridge and engine regressions are described in
 scores and estimates remain unchanged.
 
 Revision history: 2026-10-17 — add preference persistence and saved-state evidence.
+
+Revision evidence, 2026-10-18 — DF.10: the CMYK editing-copy guard now checks printed
+occurrences and retains public JPEG samples in matched editable image objects. Unsupported
+compositing/multiple-artboard cases still use the public PDF. See
+[file-format evidence](file-format-parity.md#df10--printed-cmyk-occurrences-18-october-2026).
+No parity score, estimate or milestone change.
