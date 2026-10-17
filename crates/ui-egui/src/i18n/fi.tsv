@@ -209,6 +209,7 @@
 	Join	Liitä
 	Average…	Keskiarvota…
 	Outline Stroke	Ääriviivaa viiva
+	Outline Object	Muunna objekti ääriviivoiksi
 	Offset Path…	Siirrä polkua…
 	Reverse Path Direction	Käännä polun suunta
 	Simplify…	Yksinkertaista…
@@ -388,6 +389,7 @@
 	Area Text Objects	Aluetekstiobjektit
 	Start Global Edit	Aloita yleismuokkaus
 	Save Selection…	Tallenna valinta…
+	Update Selection	Päivitä valinta
 	Edit Selection…	Muokkaa valintaa…
 	Effect	Tehoste
 	Apply Last Effect	Käytä viimeisintä tehostetta
@@ -483,6 +485,7 @@
 	Fit All in Window	Sovita kaikki ikkunaan
 	Actual Size	Todellinen koko
 	Reset Rotate View	Palauta näkymän kierto
+	Rotate View to Selection	Kierrä näkymää valinnan mukaan
 	Hide Edges	Piilota reunat
 	Show Edges	Näytä reunat
 	Hide Artboards	Piilota piirtoalustat
@@ -1543,6 +1546,9 @@ lighting	Light	Valo
 	Updated {} image(s)	Päivitetty {} kuva(a)
 	Break Link	Katkaise linkki
 	Tolerance:	Toleranssi:
+	Corner Point Angle Threshold:	Kulmapisteiden kulmakynnys:
+	Convert to Straight Lines	Muunna suoriksi viivoiksi
+	Show Original Path	Näytä alkuperäinen polku
 	Transparency Options	Läpinäkyvyysasetukset
 	Color Mixer (Shift-click the chip)	Värisekoitin (Vaihto-napsauta värilaattaa)
 	Fill: click for swatches, Shift-click for the color mixer	Täyttö: napsauta avataksesi värimallit, Vaihto-napsauta avataksesi värisekoittimen
@@ -1567,6 +1573,14 @@ lighting	Light	Valo
 	Every-line Composer	Kaikkien rivien asettelu
 	First-line Left Indent	Ensimmäisen rivin vasen sisennys
 	Hyphenation…	Tavutus…
+	Words Longer Than:	Sanat, jotka ovat pidempiä kuin:
+	After First:	Ensimmäisten jälkeen:
+	Before Last:	Ennen viimeisiä:
+	Hyphen Limit:	Tavuviivaraja:
+	Hyphenation Zone:	Tavutusalue:
+	letters	kirjainta
+	hyphens	tavuviivaa
+	Hyphenate Capitalized Words	Tavuta isolla alkukirjaimella alkavat sanat
 	Justification…	Tasaus…
 	Justify with last line aligned center	Tasaa molemmat reunat, viimeinen rivi keskelle
 	Justify with last line aligned right	Tasaa molemmat reunat, viimeinen rivi oikealle
@@ -2608,6 +2622,32 @@ lighting	Light	Valo
 	Summary	Yhteenveto
 	Download	Lataa
 	Export Artboard	Vie piirtoalusta
+	A File per Object	Yksi tiedosto objektia kohden
+	Example: {name}	Esimerkki: {name}
+	Export Preset:	Vientiesiasetus:
+	Folders:	Kansiot:
+	Insert	Lisää
+	Nothing is selected. Select the art to export, then open this tab again.	Mitään ei ole valittu. Valitse vietävä kuvitus ja avaa tämä välilehti uudelleen.
+	One File of the Selection	Yksi tiedosto valinnasta
+	Start at:	Aloita luvusta:
+	{n} objects selected	{n} objektia valittu
+	Delete Export Preset	Poista vientiesiasetus
+	Export Presets	Vientiesiasetukset
+	Save Export Preset	Tallenna vientiesiasetus
+	Export Layer	Vie taso
+	Export Selection	Vie valinta
+	All in One Folder	Kaikki yhteen kansioon
+	By Size or Row	Koon tai rivin mukaan
+	By Format	Muodon mukaan
+	By Artboard or Item	Piirtoalueen tai kohteen mukaan
+	By Item, Then Format	Kohteen, sitten muodon mukaan
+	Document Name	Asiakirjan nimi
+	Artboard or Item Name	Piirtoalueen tai kohteen nimi
+	Number (####)	Numero (####)
+	Date (YYYYMMDD)	Päivämäärä (VVVVKKPP)
+	Date (YYYY-MM-DD)	Päivämäärä (VVVV-KK-PP)
+	Time (hhmmss)	Aika (ttmmss)
+	PDF Print	Paino-PDF
 	Encoding:	Koodaus:
 	UTF-16 (Unicode)	UTF-16 (Unicode)
 	Line Endings:	Rivinvaihdot:
@@ -3416,7 +3456,9 @@ axis	Both	Molemmat
 	Duplicate Artboard	Monista piirtoalusta
 	Area / Path Type	Alue- / polkuteksti
 	Decrease Font Size	Pienennä fonttikokoa
+	Decrease Font Size by Five Steps	Pienennä fonttikokoa viisi askelta
 	Increase Font Size	Suurenna fonttikokoa
+	Increase Font Size by Five Steps	Suurenna fonttikokoa viisi askelta
 	Step Type	Porrasta teksti
 	Get Text Range	Hae tekstialue
 	Punctuation	Välimerkit
@@ -3925,6 +3967,8 @@ imageTrace	Outline	Ääriviiva
 @msg	cannot split an open path at its end point	avointa polkua ei voi jakaa sen päätepisteestä
 @msg	closing needs three anchors	sulkeminen vaatii kolme ankkuria
 @msg	check an asset to export	valitse vietävä resurssi
+@msg	check a layer to export	valitse vietävä taso
+@msg	select the art to export first	valitse ensin vietävä kuvitus
 @msg	choice must be "merge" or "add", not `{choice}`	choice-arvon on oltava "merge" tai "add", ei `{choice}`
 @msg	choose a direction to divide in	valitse jakosuunta
 @msg	choose a folder to export to	valitse kansio, johon viedään
@@ -4036,6 +4080,7 @@ imageTrace	Outline	Ääriviiva
 @msg	no saved presets	ei tallennettuja esiasetuksia
 @msg	no saved print preset named `{name}` ({DEFAULT_PRESET} is protected: start a new one from it)	ei tallennettua tulostuksen esiasetusta nimeltä `{name}` ({DEFAULT_PRESET} on suojattu: luo uusi sen pohjalta)
 @msg	no saved profiles	ei tallennettuja profiileja
+@msg	no saved selection recalled	tallennettua valintaa ei ole palautettu
 @msg	no saved selections	ei tallennettuja valintoja
 @msg	no saved themes	ei tallennettuja teemoja
 @msg	no segment {segment} on line {line}	ei segmenttiä {segment} viivalla {line}
@@ -4116,7 +4161,7 @@ imageTrace	Outline	Ääriviiva
 @msg	recovery copy `{file}`: {e}	palautuskopio `{file}`: {e}
 @msg	resolutions must be between 1 and 2400 ppi	tarkkuuksien on oltava väliltä 1–2400 ppi
 @msg	result would exceed the canvas (coordinates out of range)	tulos ylittäisi kankaan (koordinaatit alueen ulkopuolella)
-@msg	objects can't be nested more than 32 deep	objekteja ei voi sisäkkäistää yli 32 tason syvyyteen
+@msg	objects can't be nested more than 64 deep	objekteja ei voi sisäkkäistää yli 64 tason syvyyteen
 @msg	the SVG's elements are nested more than {0} deep	elementit ovat SVG-tiedostossa sisäkkäin yli {0} tason syvyydessä
 @msg	scale must be a number from {_1} to {_2}, not {_3}	mittakaavan on oltava luku väliltä {_1}–{_2}, ei {_3}
 @msg	scale must be a number from {_1} to {_2}, not {s}	mittakaavan on oltava luku väliltä {_1}–{_2}, ei {s}
@@ -4828,6 +4873,7 @@ mark-style	Japanese	Japanilainen
 	Intertwine	Lomita
 	Isolate Selected Object	Eristä valittu objekti
 	Keep selected	Pidä valittuna
+	Merge only with selection	Yhdistä vain valintaan
 	Legacy (version 7)	Vanha (versio 7)
 	Legacy .ai Options	Vanhan .ai-muodon asetukset
 	Linked Files	Linkitetyt tiedostot
@@ -4842,6 +4888,7 @@ mark-style	Japanese	Japanilainen
 	Precision:	Tarkkuus:
 	Preview (1 inch on the page)	Esikatselu (1 tuuma sivulla)
 	Registration:	Kohdistuspiste:
+	Reset Horizontal Scale	Palauta vaakaskaalaus
 	Reset Tracking and Kerning	Palauta merkkiväli ja parivälistys
 	Sample Color from Screen	Poimi väri näytöltä
 	Set as Default	Aseta oletukseksi
@@ -4896,3 +4943,24 @@ mark-style	Japanese	Japanilainen
 @msg	this is a PostScript file (an .ai saved in an older format or without PDF compatibility, or an EPS file), not a PDF: File › Open and File › Place read it as EPS	tämä on PostScript-tiedosto (vanhemmassa muodossa tai ilman PDF-yhteensopivuutta tallennettu .ai tai EPS-tiedosto), ei PDF: Tiedosto › Avaa ja Tiedosto › Sijoita lukevat sen EPS-muodossa
 @msg	this system has no screen color sampler	tässä järjestelmässä ei ole värin poimintaa näytöltä
 @msg	the image can't be read as a texture	kuvaa ei voi lukea tekstuurina
+@msg	{what}: this editor works on one file only	{what}: tämä editori käsittelee vain yhtä tiedostoa
+
+# User Interface › Accent Color
+	Accent Color	Korostusväri
+	Amber	Meripihka
+	Coral	Koralli
+	Violet	Violetti
+	Sketch	Luonnos
+	Halftone Pattern…	Rasterikuvio…
+	Halftone Pattern	Rasterikuvio
+	Pattern Type	Kuviotyyppi
+	Dot	Piste
+# User Interface › Color Scheme
+	Color Scheme	Värimalli
+	Modern	Moderni
+
+# Symbol Options › Export Type
+	Export Type:	Vientityyppi:
+	Movie Clip	Elokuvaleike
+@msg	name is empty	nimi on tyhjä
+@msg	no symbol named `{n}`	symbolia nimeltä `{n}` ei ole

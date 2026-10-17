@@ -141,6 +141,8 @@ mod tests_scrub;
 #[cfg(test)]
 mod tests_selectall;
 #[cfg(test)]
+mod tests_single_document;
+#[cfg(test)]
 mod tests_slices;
 #[cfg(test)]
 mod tests_svg;
@@ -193,6 +195,15 @@ pub type PickSave = Box<dyn FnMut(&FilePick) -> Option<String>>;
 pub type ReadFn = Box<dyn Fn(&str) -> Result<Vec<u8>, String>>;
 pub type WriteFn = Box<dyn FnMut(&str, &[u8]) -> Result<(), String>>;
 pub type Inbox = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+/// An embedding page's file and its PDF interpretation contract.
+#[derive(Debug, PartialEq, Eq)]
+pub struct HostOpen {
+    pub name: String,
+    pub bytes: Vec<u8>,
+    pub print_production: bool,
+}
+pub type HostInbox = Arc<Mutex<Vec<HostOpen>>>;
+pub type HostOpenResult = Box<dyn Fn(Result<(), String>)>;
 /// Starts a browser download of the bytes under a file name; an error when it couldn't be started
 /// (the save or export then fails as a refused write does: #1693).
 pub type DownloadFn = Box<dyn FnMut(&str, &[u8]) -> Result<(), String>>;
@@ -275,6 +286,17 @@ pub struct Services {
     /// The window is on Wayland: the tool cursors are painted into it instead of handed to the
     /// compositor as bitmaps ([`cursors::os_cursors`]).
     pub wayland: bool,
+    /// One document only, as when a page embeds the editor for the file it hands over (the web
+    /// build's `?host=parent`): nothing creates, opens or closes a document
+    /// ([`menus::blocked_in_single_document`]), the Home screen stays away, files the person opens
+    /// themselves open only when they aren't documents (libraries, presets, plug-ins), and a file
+    /// from [`Self::host_inbox`] takes the open document's place.
+    pub single_document: bool,
+    /// Files the embedding page hands over, each opened in place of the open document when
+    /// [`Self::single_document`] is on.
+    pub host_inbox: Option<HostInbox>,
+    /// Host notification after an actual document open (including an import dialog) or failure.
+    pub host_open_result: Option<HostOpenResult>,
 }
 
 /// Cached canvas raster.
@@ -300,6 +322,8 @@ pub struct CanvasCache {
     pub selection_box: Option<((u64, u64, bool), Option<vectorcraft_doc::OrientedBox>)>,
     /// [`VectorcraftApp::selection_bounds`] for (document uid, revision).
     pub selection_bounds: Option<((u64, u64), Option<vectorcraft_geom::Rect>)>,
+    /// [`VectorcraftApp::content_bounds`] for (document uid, revision).
+    pub content_bounds: Option<((u64, u64), Option<vectorcraft_geom::Rect>)>,
     /// The tools' cursors as OS cursor bitmaps.
     pub cursors: cursors::Images,
 }
@@ -497,6 +521,7 @@ impl VectorcraftApp {
                 hidden_chars: Default::default(),
                 selection_box: None,
                 selection_bounds: None,
+                content_bounds: None,
                 cursors: Default::default(),
             },
             perf: Perf::default(),
@@ -634,9 +659,11 @@ impl VectorcraftApp {
             guides: self.ui.view.guides,
             snap_to_grid: self.ui.view.snap_to_grid,
             snap_to_pixel: self.ui.view.snap_to_pixel,
-            show_bbox: self.ui.view.bounding_box,
+            // View › Hide Edges: the canvas draws neither the bounding box (with the type widget)
+            // nor the Live Corners widgets, and the tools do not answer the pointer on them.
+            show_bbox: self.ui.view.bounding_box && self.ui.view.edges,
             snap_to_point: self.ui.view.snap_to_point,
-            corner_widgets: self.ui.view.corner_widgets,
+            corner_widgets: self.ui.view.corner_widgets && self.ui.view.edges,
             screen: self.screen_frame(),
         }
     }
@@ -667,6 +694,10 @@ impl VectorcraftApp {
     /// [`Self::run`] it, inside what asks for file dialogs.
     fn run_now(&mut self, id: &str, params: Value) -> Result<Value, String> {
         self.run_count = self.run_count.wrapping_add(1);
+        if self.services.single_document && menus::blocked_in_single_document(id) {
+            let what = id;
+            return Err(format!("{what}: this editor works on one file only"));
+        }
         // In debug builds the app's own calls are held to the params descriptions too (#1442): a
         // panel passing a key its command doesn't read shows up in the tests.
         if cfg!(debug_assertions) {
@@ -687,15 +718,21 @@ impl VectorcraftApp {
         {
             p.insert("artboard".into(), serde_json::json!(panels::artboards::selected(self, n)));
         }
-        // Object › Artboards › Fit to Artwork Bounds and Fit to Selected Art resize the active
-        // artboard, which the app passes as their `index`.
+        // Object › Artboards › Fit to Artwork Bounds resizes the selected artboards (the Artboard
+        // tool's, else the active one), which the app passes as its `indices`, and Fit to Selected
+        // Art resizes the active artboard, which the app passes as its `index`.
         if vectorcraft_engine::FIT_ACTIVE_ARTBOARD.contains(&id)
             && params.get("index").is_none()
+            && params.get("indices").is_none()
             && self.view().is_some()
             && let Some(n) = self.session.active().map(|d| d.doc.artboards.len())
             && let Some(p) = params.as_object_mut()
         {
-            p.insert("index".into(), serde_json::json!(panels::artboards::selected(self, n)));
+            if id == "artboard.fitToArt" {
+                p.insert("indices".into(), serde_json::json!(panels::artboards::picked(self, n)));
+            } else {
+                p.insert("index".into(), serde_json::json!(panels::artboards::selected(self, n)));
+            }
         }
         if id.starts_with("edit.paste") {
             if let Err(e) = self.adopt_system_clipboard() {
@@ -975,14 +1012,63 @@ impl VectorcraftApp {
     }
 
     fn drain_inbox(&mut self) {
-        let arrived: Vec<(String, Vec<u8>)> =
-            self.services.inbox.as_ref().map(|q| std::mem::take(&mut *q.lock().unwrap_or_else(|e| e.into_inner()))).unwrap_or_default();
+        fn take<T>(q: Option<&Arc<Mutex<Vec<T>>>>) -> Vec<T> {
+            q.map(|q| std::mem::take(&mut *q.lock().unwrap_or_else(|e| e.into_inner()))).unwrap_or_default()
+        }
+        let (arrived, handed) = (take(self.services.inbox.as_ref()), take(self.services.host_inbox.as_ref()));
         for (name, bytes) in arrived {
+            // With one document, what the person opens themselves opens only when it isn't a
+            // document: a library, presets or a plug-in.
+            if self.services.single_document && io::opens_as(&name).is_none() {
+                let what = &name;
+                self.status(format!("{what}: this editor works on one file only"));
+                continue;
+            }
             if let Err(e) = io::open_bytes(self, &name, &bytes, None) {
                 io::report_open_error(self, &name, &e);
             }
         }
+        for HostOpen { name, bytes, print_production } in handed {
+            let before: Vec<u64> = self.session.documents().iter().map(|d| d.uid).collect();
+            let opened = if print_production {
+                io::open_document(self, &name, &bytes, None, &serde_json::json!({"printProduction": true}))
+            } else {
+                io::open_bytes(self, &name, &bytes, None)
+            };
+            match opened {
+                // It takes the place of what was open (a file that opens later, after a dialog,
+                // does when it arrives: `keep_one_document`).
+                Ok(_) if self.services.single_document && self.session.documents().len() > before.len() => {
+                    self.close_documents(&before);
+                }
+                Ok(_) => {}
+                Err(e) => io::report_open_error(self, &name, &e),
+            }
+        }
+        if self.services.single_document {
+            self.keep_one_document();
+        }
         place::drain(self);
+    }
+
+    /// Close the documents with these uids without asking to save them.
+    fn close_documents(&mut self, uids: &[u64]) {
+        while let Some(i) = self.session.documents().iter().rposition(|d| uids.contains(&d.uid)) {
+            if let Err(e) = unsaved::close_now(self, i) {
+                log::error!("couldn't close document {i}: {e}");
+                return;
+            }
+        }
+    }
+
+    /// With one document only, a second that came in anyway (a file that opened after a dialog)
+    /// takes the place of the others: the newest stays.
+    fn keep_one_document(&mut self) {
+        let docs = self.session.documents();
+        if docs.len() > 1 {
+            let older: Vec<u64> = docs[..docs.len() - 1].iter().map(|d| d.uid).collect();
+            self.close_documents(&older);
+        }
     }
 }
 
@@ -1047,6 +1133,22 @@ impl VectorcraftApp {
         }
         let b = st.doc.bounds_of(&st.selection.objects, true);
         self.canvas.selection_bounds = Some((key, b));
+        b
+    }
+
+    /// The art and the artboards together, the span of the canvas's scroll bars: measured once
+    /// per revision, as the canvas reads it every frame.
+    pub fn content_bounds(&mut self) -> Option<vectorcraft_geom::Rect> {
+        let st = self.session.active()?;
+        let key = (st.uid, st.revision);
+        if let Some((k, b)) = self.canvas.content_bounds
+            && k == key
+        {
+            return b;
+        }
+        let boards = st.doc.artboards.iter().map(|a| a.rect).reduce(|r, a| r.union(a));
+        let b = vectorcraft_geom::union_opt(st.doc.art_bounds(), boards);
+        self.canvas.content_bounds = Some((key, b));
         b
     }
 }

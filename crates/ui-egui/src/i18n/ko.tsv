@@ -206,6 +206,7 @@
 	Join	결합
 	Average…	평균…
 	Outline Stroke	선 윤곽선화
+	Outline Object	개체 윤곽선화
 	Offset Path…	패스 오프셋…
 	Reverse Path Direction	패스 방향 반전
 	Simplify…	단순화…
@@ -324,8 +325,11 @@
 	Remove Threading	연결 제거
 	Fit Headline	제목에 맞추기
 	Decrease Font Size	글꼴 크기 줄이기
+	Decrease Font Size by Five Steps	글꼴 크기 5단계 줄이기
 	Increase Font Size	글꼴 크기 키우기
+	Increase Font Size by Five Steps	글꼴 크기 5단계 키우기
 	Reset Tracking and Kerning	자간 및 커닝 재설정
+	Reset Horizontal Scale	가로 비율 재설정
 	Step Type	단계별 문자
 	Find Font…	글꼴 찾기…
 	Change Case	대소문자 변경
@@ -389,6 +393,7 @@
 	Area Text Objects	영역 문자 개체
 	Start Global Edit	전체 편집 시작
 	Save Selection…	선택 영역 저장…
+	Update Selection	선택 영역 업데이트
 	Edit Selection…	선택 영역 편집…
 	Effect	효과
 	Apply Last Effect	마지막 효과 적용
@@ -483,6 +488,7 @@
 	Actual Size	실제 크기
 	Rotate View	보기 회전
 	Reset Rotate View	회전 보기 재설정
+	Rotate View to Selection	선택 영역에 맞춰 보기 회전
 	Hide Edges	가장자리 숨기기
 	Hide Artboards	아트보드 숨기기
 	Show Print Tiling	인쇄 타일 표시
@@ -1084,6 +1090,7 @@
 	Convert Process to Global	프로세스 색상을 글로벌로 변환
 	Convert text to outlines	문자를 윤곽선으로 변환
 	Convert to sRGB	sRGB로 변환
+	Convert to Straight Lines	직선으로 변환
 	Copies:	매수:
 	Copy (make a transformed copy)	복사(변형된 복사본 만들기)
 	Copy All Styles	모든 스타일 복사
@@ -1095,6 +1102,7 @@
 	Copyright Info URL:	저작권 정보 URL:
 	Copyright Notice:	저작권 고지:
 	Copyright Status:	저작권 상태:
+	Corner Point Angle Threshold:	모퉁이 포인트 각도 임계값:
 	Corner Radius	모퉁이 반지름
 	Corner Radius:	모퉁이 반지름:
 	Corner:	모퉁이:
@@ -1357,6 +1365,32 @@
 	Expand:	확장:
 	Export All…	모두 내보내기…
 	Export Artboard	아트보드 내보내기
+	A File per Object	오브젝트마다 파일 1개
+	Example: {name}	예: {name}
+	Export Preset:	내보내기 사전 설정:
+	Folders:	폴더:
+	Insert	삽입
+	Nothing is selected. Select the art to export, then open this tab again.	선택된 항목이 없습니다. 내보낼 아트를 선택한 다음 이 탭을 다시 여십시오.
+	One File of the Selection	선택 영역을 파일 1개로
+	Start at:	시작 번호:
+	{n} objects selected	오브젝트 {n}개 선택됨
+	Delete Export Preset	내보내기 사전 설정 삭제
+	Export Presets	내보내기 사전 설정
+	Save Export Preset	내보내기 사전 설정 저장
+	Export Layer	레이어 내보내기
+	Export Selection	선택 영역 내보내기
+	All in One Folder	모두 폴더 하나에
+	By Size or Row	크기 또는 행별
+	By Format	형식별
+	By Artboard or Item	대지 또는 항목별
+	By Item, Then Format	항목별, 그다음 형식별
+	Document Name	문서 이름
+	Artboard or Item Name	대지 또는 항목 이름
+	Number (####)	번호(####)
+	Date (YYYYMMDD)	날짜(YYYYMMDD)
+	Date (YYYY-MM-DD)	날짜(YYYY-MM-DD)
+	Time (hhmmss)	시간(hhmmss)
+	PDF Print	인쇄용 PDF
 	Export As	다른 형식으로 내보내기
 	Export Assets	에셋 내보내기
 	Export CSS	CSS 내보내기
@@ -1412,6 +1446,7 @@
 	Fill and Stroke	칠과 선
 	Fill new strokes	새 선 칠하기
 	Keep selected	선택 유지
+	Merge only with selection	선택 영역과만 병합
 	Fill:	칠:
 	Find	찾기
 	Find Font	글꼴 찾기
@@ -1543,6 +1578,14 @@
 	Hyphenate	하이픈 넣기
 	Hyphenation	하이픈 넣기
 	Hyphenation…	하이픈 넣기…
+	Words Longer Than:	다음보다 긴 단어:
+	After First:	앞부분 최소:
+	Before Last:	뒷부분 최소:
+	Hyphen Limit:	연속 하이픈 제한:
+	Hyphenation Zone:	하이픈 넣기 영역:
+	letters	글자
+	hyphens	개
+	Hyphenate Capitalized Words	대문자로 시작하는 단어에 하이픈 넣기
 	ICC Profile	ICC 프로파일
 	Identify Objects By	개체 식별 기준
 	Ignore	무시
@@ -2574,6 +2617,7 @@
 	Show List View	목록 보기 표시
 	Show Note	메모 표시
 	Show Options	옵션 표시
+	Show Original Path	원래 패스 표시
 	Color Panel Options	색상 패널 옵션
 	Show Package	패키지 표시
 	Show Panel	패널 표시
@@ -3595,6 +3639,7 @@ theme	Appearance	외관
 @msg	Make Guides: select paths	안내선 만들기: 패스를 선택하세요
 @msg	Release Guides: no guides	안내선 해제: 안내선이 없습니다
 @msg	guides are locked	안내선이 잠겨 있습니다
+@msg	no saved selection recalled	불러온 저장된 선택 영역이 없습니다
 @msg	no saved selections	저장된 선택 영역이 없습니다
 @msg	no such artboard	해당 아트보드가 없습니다
 @msg	cannot split an open path at its end point	열린 패스는 끝점에서 나눌 수 없습니다
@@ -3795,7 +3840,7 @@ theme	Appearance	외관
 @msg	no interaction in progress	진행 중인 상호작용이 없습니다
 @msg	no such object {0}	개체 {0}이(가) 없습니다
 @msg	result would exceed the canvas (coordinates out of range)	결과가 캔버스를 벗어납니다(좌표 범위 초과)
-@msg	objects can't be nested more than 32 deep	개체는 32단계보다 깊게 중첩할 수 없습니다
+@msg	objects can't be nested more than 64 deep	개체는 64단계보다 깊게 중첩할 수 없습니다
 @msg	the SVG's elements are nested more than {0} deep	SVG 요소가 {0}단계보다 깊게 중첩되어 있습니다
 @msg	unknown command `{0}`	알 수 없는 명령 `{0}`
 @msg	`{what}` closes nothing	`{what}`이(가) 닫는 항목이 없습니다
@@ -3937,6 +3982,8 @@ theme	Appearance	외관
 @msg	nothing to export: the document has no visible art (or turn on Use Artboards)	내보낼 항목이 없습니다: 문서에 보이는 아트웍이 없습니다(또는 아트보드 사용을 켜세요)
 @msg	add a format to export	내보낼 형식을 추가하세요
 @msg	check an asset to export	내보낼 자산을 체크하세요
+@msg	check a layer to export	내보낼 레이어를 선택하십시오
+@msg	select the art to export first	먼저 내보낼 아트를 선택하십시오
 @msg	`{tool}` isn't a freehand tool	`{tool}`은(는) 프리핸드 도구가 아닙니다
 @msg	bad colour `{hex}` (#rrggbb)	잘못된 색상 `{hex}`(#rrggbb)
 @msg	no gradient stop or freeform point is selected	선택된 그레이디언트 정지점이나 자유형 점이 없습니다
@@ -4472,3 +4519,25 @@ lighting	Light	광원
 @msg	choose a source folder	소스 폴더를 선택하세요
 @msg	open a document with data sets	데이터 세트가 있는 문서를 여세요
 @msg	the action has no steps	액션에 단계가 없습니다
+@msg	{what}: this editor works on one file only	{what}: 이 편집기는 파일 하나만 다룹니다
+
+# User Interface › Accent Color
+	Accent Color	강조 색상
+	Amber	호박색
+	Coral	코럴
+	Violet	보라
+	Pink	분홍
+	Sketch	스케치
+	Halftone Pattern…	하프톤 패턴…
+	Halftone Pattern	하프톤 패턴
+	Pattern Type	패턴 유형
+	Dot	점
+# User Interface › Color Scheme
+	Color Scheme	색 구성표
+	Modern	모던
+
+# Symbol Options › Export Type
+	Export Type:	내보내기 유형:
+	Movie Clip	무비 클립
+@msg	name is empty	이름이 비어 있습니다
+@msg	no symbol named `{n}`	이름이 `{n}`인 심볼이 없습니다

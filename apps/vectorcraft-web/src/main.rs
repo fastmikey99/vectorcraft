@@ -19,9 +19,15 @@
 #[cfg(target_arch = "wasm32")]
 mod fonts;
 #[cfg(target_arch = "wasm32")]
+mod host;
+#[cfg(target_arch = "wasm32")]
 mod locks;
 #[cfg(any(target_arch = "wasm32", test))]
+mod operations;
+#[cfg(any(target_arch = "wasm32", test))]
 mod pencil;
+#[cfg(any(target_arch = "wasm32", test))]
+mod protocol;
 #[cfg(target_arch = "wasm32")]
 mod web;
 

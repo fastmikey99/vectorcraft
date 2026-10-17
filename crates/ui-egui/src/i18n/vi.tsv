@@ -667,6 +667,7 @@
 	Convert to RGB	Chuyển sang RGB
 	Convert to Shape	Chuyển thành hình dạng
 	Convert to sRGB	Chuyển sang sRGB
+	Convert to Straight Lines	Chuyển thành đường thẳng
 	Convert:	Chuyển đổi:
 	Copied the CSS of {rules} object(s)	Đã sao chép CSS của {rules} đối tượng
 	Copies:	Bản sao:
@@ -689,6 +690,7 @@
 	Copyright Status:	Trạng thái bản quyền:
 	Copyright Symbol	Ký hiệu bản quyền
 	Corner	Góc
+	Corner Point Angle Threshold:	Ngưỡng góc của điểm góc:
 	Corner Radius	Bán kính góc
 	Corner Radius:	Bán kính góc:
 	Corner:	Góc:
@@ -781,6 +783,7 @@
 	Decimal:	Thập phân:
 	Decorative	Trang trí
 	Decrease Font Size	Giảm cỡ chữ
+	Decrease Font Size by Five Steps	Giảm cỡ chữ năm bước
 	Default	Mặc định
 	Default Actions	Hành động mặc định
 	Default Figure	Chữ số mặc định
@@ -1132,6 +1135,32 @@
 	Export All…	Xuất tất cả…
 	Export and Clipboard Transparency Flattener Settings	Cài đặt làm phẳng độ trong suốt khi xuất và dán
 	Export Artboard	Xuất bảng vẽ
+	A File per Object	Mỗi đối tượng một tệp
+	Example: {name}	Ví dụ: {name}
+	Export Preset:	Cài đặt sẵn xuất:
+	Folders:	Thư mục:
+	Insert	Chèn
+	Nothing is selected. Select the art to export, then open this tab again.	Chưa chọn gì. Hãy chọn hình cần xuất rồi mở lại thẻ này.
+	One File of the Selection	Một tệp cho vùng chọn
+	Start at:	Bắt đầu từ:
+	{n} objects selected	Đã chọn {n} đối tượng
+	Delete Export Preset	Xóa cài đặt sẵn xuất
+	Export Presets	Cài đặt sẵn xuất
+	Save Export Preset	Lưu cài đặt sẵn xuất
+	Export Layer	Xuất lớp
+	Export Selection	Xuất vùng chọn
+	All in One Folder	Tất cả trong một thư mục
+	By Size or Row	Theo kích thước hoặc hàng
+	By Format	Theo định dạng
+	By Artboard or Item	Theo bảng vẽ hoặc mục
+	By Item, Then Format	Theo mục, rồi theo định dạng
+	Document Name	Tên tài liệu
+	Artboard or Item Name	Tên bảng vẽ hoặc mục
+	Number (####)	Số (####)
+	Date (YYYYMMDD)	Ngày (YYYYMMDD)
+	Date (YYYY-MM-DD)	Ngày (YYYY-MM-DD)
+	Time (hhmmss)	Giờ (hhmmss)
+	PDF Print	PDF in ấn
 	Export As	Xuất thành
 	Export As PNG…	Xuất thành PNG…
 	Export As SVG…	Xuất thành SVG…
@@ -1209,6 +1238,7 @@
 	Fill Grid	Tô lưới
 	Fill new strokes	Tô nét mới
 	Keep selected	Giữ trạng thái đã chọn
+	Merge only with selection	Chỉ hợp nhất với vùng chọn
 	Fill New Type Objects With Placeholder Text	Tô đối tượng chữ mới bằng văn bản giữ chỗ
 	Fill Rule	Quy tắc tô
 	Fill with Placeholder Text	Tô bằng văn bản giữ chỗ
@@ -1494,6 +1524,14 @@
 	Hyphenate	Gạch nối
 	Hyphenation	Gạch nối từ
 	Hyphenation…	Gạch nối từ…
+	Words Longer Than:	Từ dài hơn:
+	After First:	Sau số chữ đầu:
+	Before Last:	Trước số chữ cuối:
+	Hyphen Limit:	Giới hạn gạch nối:
+	Hyphenation Zone:	Vùng gạch nối:
+	letters	chữ cái
+	hyphens	gạch nối
+	Hyphenate Capitalized Words	Gạch nối từ viết hoa chữ đầu
 	ICC Profile	Hồ sơ ICC
 	ICF Bottom/Left	ICF Dưới/Trái
 	ICF Top/Right	ICF Trên/Phải
@@ -1579,6 +1617,7 @@
 	Include SVG Code	Bao gồm mã SVG
 	Include Swatches for Tints	Bao gồm mẫu màu cho sắc pha
 	Increase Font Size	Tăng cỡ chữ
+	Increase Font Size by Five Steps	Tăng cỡ chữ năm bước
 	Inflate…	Phình…
 	Info	Thông tin
 	Ink	Mực
@@ -2231,6 +2270,7 @@
 	Outer Corner Tile	Ô góc ngoài
 	Outer Glow…	Phát sáng ngoài…
 	Outline	Đường bao
+	Outline Object	Đường bao đối tượng
 	Outline Others	Đường bao các mục khác
 	Outline Stroke	Đường bao nét
 	Outline Text	Chuyển chữ thành đường bao
@@ -2660,6 +2700,7 @@
 	Reset Envelope Mesh	Đặt lại lưới Envelope
 	Reset Envelope Shape	Đặt lại hình dạng Envelope
 	Reset Essentials	Đặt lại Essentials
+	Reset Horizontal Scale	Đặt lại tỷ lệ ngang
 	Reset Keyboard Shortcuts	Đặt lại phím tắt
 	Reset OpenType Features	Đặt lại tính năng OpenType
 	Reset Panel	Đặt lại bảng
@@ -2667,6 +2708,7 @@
 	Reset Profiles	Đặt lại hồ sơ màu
 	Rotate View	Xoay chế độ xem
 	Reset Rotate View	Đặt lại xoay chế độ xem
+	Rotate View to Selection	Xoay chế độ xem theo vùng chọn
 	Reset Ruler Origin	Đặt lại gốc thước
 	Reset the rows to the artwork's colors	Đặt lại các hàng về màu của tác phẩm
 	Reset to Default	Đặt lại về mặc định
@@ -2806,6 +2848,7 @@
 	Save Save for Web Preset	Lưu thiết lập sẵn Lưu cho Web
 	Save selected colors as swatches	Lưu màu đã chọn thành mẫu màu
 	Save Selection…	Lưu vùng chọn…
+	Update Selection	Cập nhật vùng chọn
 	Save Swatch Library	Lưu thư viện mẫu màu
 	Save Swatch Library…	Lưu thư viện mẫu màu…
 	Save the current layout under this name	Lưu bố cục hiện tại với tên này
@@ -3069,6 +3112,7 @@
 	Show Modified	Hiện đã sửa đổi
 	Show Note	Hiện ghi chú
 	Show Options	Hiện tùy chọn
+	Show Original Path	Hiện đường dẫn gốc
 	Color Panel Options	Tùy chọn bảng màu
 	Show Package	Hiện gói
 	Show Panel	Hiện bảng
@@ -3849,6 +3893,8 @@ theme	Appearance	Giao diện
 @msg	cannot read PDF: {0}	không thể đọc PDF: {0}
 @msg	cannot split an open path at its end point	không thể tách đường dẫn mở tại điểm cuối
 @msg	check an asset to export	hãy chọn một asset để xuất
+@msg	check a layer to export	hãy đánh dấu một lớp để xuất
+@msg	select the art to export first	hãy chọn hình cần xuất trước
 @msg	choice must be "merge" or "add", not `{choice}`	lựa chọn phải là "merge" hoặc "add", không phải `{choice}`
 @msg	choose a direction to divide in	hãy chọn hướng để chia
 @msg	choose a folder to export to	hãy chọn thư mục để xuất vào
@@ -4051,6 +4097,7 @@ theme	Appearance	Giao diện
 @msg	no saved presets	không có thiết lập sẵn đã lưu
 @msg	no saved print preset named `{name}` ({DEFAULT_PRESET} is protected: start a new one from it)	không có thiết lập sẵn in đã lưu tên `{name}` ({DEFAULT_PRESET} được bảo vệ: tạo mới từ nó)
 @msg	no saved profiles	không có hồ sơ đã lưu
+@msg	no saved selection recalled	chưa khôi phục vùng chọn đã lưu nào
 @msg	no saved selections	không có vùng chọn đã lưu
 @msg	No saved selections (Select → Save Selection…)	Không có vùng chọn đã lưu (Chọn → Lưu vùng chọn…)
 @msg	no saved themes	chưa có bộ màu nào được lưu
@@ -4164,7 +4211,7 @@ theme	Appearance	Giao diện
 @msg	resolutions must be between 1 and 2400 ppi	độ phân giải phải nằm trong khoảng 1 đến 2400 ppi
 @msg	Restored {_1} recovered document(s): save them to keep them	Đã phục hồi {_1} tài liệu: hãy lưu để giữ lại
 @msg	result would exceed the canvas (coordinates out of range)	kết quả sẽ vượt quá vùng vẽ (tọa độ ngoài phạm vi)
-@msg	objects can't be nested more than 32 deep	không thể lồng các đối tượng sâu quá 32 cấp
+@msg	objects can't be nested more than 64 deep	không thể lồng các đối tượng sâu quá 64 cấp
 @msg	the SVG's elements are nested more than {0} deep	các phần tử SVG lồng nhau sâu quá {0} cấp
 @msg	Save for Web: the image is empty	Lưu cho Web: ảnh trống
 @msg	Save writes {_1}, not {_2}: use document.export for other formats	Lưu ghi {_1}, không phải {_2}: dùng document.export cho các định dạng khác
@@ -4488,3 +4535,25 @@ theme	Appearance	Giao diện
 @msg	choose a source folder	hãy chọn thư mục nguồn
 @msg	open a document with data sets	hãy mở một tài liệu có tập dữ liệu
 @msg	the action has no steps	hành động không có bước nào
+@msg	{what}: this editor works on one file only	{what}: trình soạn thảo này chỉ làm việc với một tệp
+
+# User Interface › Accent Color
+	Accent Color	Màu nhấn
+	Amber	Hổ phách
+	Coral	San hô
+	Violet	Tím
+	Pink	Hồng
+	Sketch	Phác thảo
+	Halftone Pattern…	Mẫu bán sắc…
+	Halftone Pattern	Mẫu bán sắc
+	Pattern Type	Loại mẫu
+	Dot	Chấm
+# User Interface › Color Scheme
+	Color Scheme	Bảng phối màu
+	Modern	Hiện đại
+
+# Symbol Options › Export Type
+	Export Type:	Kiểu xuất:
+	Movie Clip	Clip phim
+@msg	name is empty	tên trống
+@msg	no symbol named `{n}`	không có biểu tượng nào tên `{n}`

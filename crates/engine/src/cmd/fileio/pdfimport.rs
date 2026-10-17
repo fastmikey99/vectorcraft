@@ -145,6 +145,7 @@ impl LoadOptions {
             text_as: self.text_as,
             layers: self.layers,
             uncalibrated_rgb: editor_document,
+            reject_depth_loss: self.print_production,
             ..Default::default()
         })
     }

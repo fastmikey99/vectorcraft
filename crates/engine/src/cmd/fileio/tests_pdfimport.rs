@@ -224,3 +224,16 @@ fn print_production_reads_all_public_pages_without_private_editing_data() {
         assert!(LoadOptions::from_params("document.open", &json!({"printProduction":true, key:false})).is_err());
     }
 }
+
+#[test]
+fn refused_production_depth_keeps_the_open_document() {
+    let mut session = Session::new();
+    open(&mut session, &three_pages(), json!({"printProduction": true})).unwrap();
+    let before = session.active().unwrap().doc.clone();
+    let levels = vectorcraft_doc::depth::MAX_DEPTH + 4;
+    let content = format!("{}1 0 0 rg 0 0 100 100 re f{}", "q 50 0 m 100 50 l 50 100 l 0 50 l h W n\n".repeat(levels), " Q".repeat(levels));
+    let bytes = pdf(&[PdfPage::new(100.0, 100.0, &content)], None);
+    let error = open(&mut session, &bytes, json!({"printProduction": true})).unwrap_err();
+    assert!(error.to_string().contains("clipping or mask information"));
+    assert!(std::sync::Arc::ptr_eq(&before, &session.active().unwrap().doc));
+}

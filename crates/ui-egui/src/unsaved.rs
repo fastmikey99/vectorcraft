@@ -23,8 +23,15 @@ fn refuse_while_picking(app: &VectorcraftApp) -> Result<(), String> {
     if app.file_sheet_open() { Err(crate::picks::busy().into()) } else { Ok(()) }
 }
 
+/// A single-document editor ([`crate::Services::single_document`]) closes nothing: its one
+/// document is the page's, which replaces it.
+fn refuse_single_document(app: &VectorcraftApp, what: &str) -> Result<(), String> {
+    if app.services.single_document { Err(format!("{what}: this editor works on one file only")) } else { Ok(()) }
+}
+
 /// File → Close (or a tab's ×) for document `i`.
 pub fn close(app: &mut VectorcraftApp, i: usize) -> Result<Value, String> {
+    refuse_single_document(app, "file.close")?;
     refuse_while_picking(app)?;
     // A save still running decides whether there is anything left to save.
     crate::background::wait_all(app);
@@ -35,6 +42,7 @@ pub fn close(app: &mut VectorcraftApp, i: usize) -> Result<Value, String> {
 /// File → Close All (`then` = `closeAll`) or Quit (`quit`): ask about the next modified document,
 /// or finish once none is left.
 pub fn close_all(app: &mut VectorcraftApp, then: &str) -> Result<Value, String> {
+    refuse_single_document(app, if then == "quit" { "app.quit" } else { "file.closeAll" })?;
     refuse_while_picking(app)?;
     crate::background::wait_all(app);
     if let Some(i) = app.session.documents().iter().position(|d| d.is_dirty()) {
@@ -70,7 +78,7 @@ fn ask(app: &mut VectorcraftApp, i: usize, then: &str) -> Result<Value, String> 
 }
 
 /// Close document `i` through the engine command, keeping `views` aligned with the documents.
-fn close_now(app: &mut VectorcraftApp, i: usize) -> Result<Value, String> {
+pub(crate) fn close_now(app: &mut VectorcraftApp, i: usize) -> Result<Value, String> {
     let r = app.session.execute("file.close", &json!({ "index": i })).map_err(|e| e.to_string())?;
     if i < app.views.len() {
         app.views.remove(i);

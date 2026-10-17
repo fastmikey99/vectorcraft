@@ -574,6 +574,21 @@ impl Frame<'_> {
     }
 }
 
+/// Conservatively keep symbols and effect-bearing mask art on the full-viewport path.
+/// Their painted extent can reach beyond the simple shape bounds used for the crop.
+fn mask_needs_full_viewport(art: &Node) -> bool {
+    let mut full = false;
+    art.walk(&mut |n| {
+        full |= matches!(n.kind, NodeKind::SymbolInstance { .. })
+            || !n.appearance.effects.is_empty()
+            || n.appearance.items.iter().any(|i| match i {
+                AppearanceItem::Fill(l) => !l.effects.is_empty(),
+                AppearanceItem::Stroke(l) => !l.effects.is_empty(),
+            });
+    });
+    full
+}
+
 impl Renderer {
     pub fn new() -> Self {
         Self {
@@ -1052,6 +1067,48 @@ impl Renderer {
     /// The coverage of opacity mask `m` per output pixel (row-major): its art rendered offscreen,
     /// as luminance ([`mask_value`]).
     fn mask_values(&mut self, f: &Frame, m: &vectorcraft_doc::OpacityMask, w: u16, h: u16) -> Vec<u8> {
+        // Most PDF soft masks cover only a small image. Rasterizing and converting a full
+        // viewport for each one makes frame cost proportional to viewport pixels × masks.
+        // Keep vello's full-sized coverage buffer, but draw/convert only the mask art's
+        // conservative paint bounds. Outside it, coverage is the transparent-pixel value
+        // (not always zero: unclipped and inverted masks have different backgrounds).
+        let full = Rect::new(0.0, 0.0, w as f64, h as f64);
+        if mask_needs_full_viewport(&m.art) {
+            return self.mask_values_full(f, m, w, h);
+        }
+        let Some(bounds) = self.bounds_of(f.symbols, &m.art) else {
+            return self.mask_values_full(f, m, w, h);
+        };
+        let bounds = f.view.transform_rect_bbox(bounds).inflate(2.0, 2.0);
+        if ![bounds.x0, bounds.y0, bounds.x1, bounds.y1].iter().all(|v| v.is_finite()) {
+            return self.mask_values_full(f, m, w, h);
+        }
+        let bounds = bounds.intersect(full);
+        let x = bounds.x0.floor().clamp(0.0, w as f64) as u16;
+        let y = bounds.y0.floor().clamp(0.0, h as f64) as u16;
+        let right = bounds.x1.ceil().clamp(0.0, w as f64) as u16;
+        let bottom = bounds.y1.ceil().clamp(0.0, h as f64) as u16;
+        let cw = right.saturating_sub(x);
+        let ch = bottom.saturating_sub(y);
+        if cw == w && ch == h {
+            return self.mask_values_full(f, m, w, h);
+        }
+        let mut values = vec![mask_value(0, 0, 0, 0, m.clip, m.invert); w as usize * h as usize];
+        if cw == 0 || ch == 0 || w == 0 {
+            return values;
+        }
+        let sub = Frame { view: Affine::translate((-(x as f64), -(y as f64))) * f.view, ..*f };
+        let cropped = self.mask_values_full(&sub, m, cw, ch);
+        for (dest, src) in values.chunks_mut(w as usize).skip(y as usize).zip(cropped.chunks(cw as usize)) {
+            if let Some(span) = dest.get_mut(x as usize..right as usize) {
+                span.copy_from_slice(src);
+            }
+        }
+        values
+    }
+
+    /// Uncropped reference, also used when the mask has no finite paint bounds.
+    fn mask_values_full(&mut self, f: &Frame, m: &vectorcraft_doc::OpacityMask, w: u16, h: u16) -> Vec<u8> {
         let mut mctx = f.offscreen_context(w, h);
         // Mask art is a picture of its own: it takes no part in a knockout group around the object,
         // and its luminance is that of its screen colours.

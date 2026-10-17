@@ -21,14 +21,16 @@ use crate::{Document, Node, NodeKind};
 /// from 1 again.
 ///
 /// A native file writes three levels of JSON for each level of objects, and its reader stops at
-/// 128 levels: 32 leaves the deepest object 29 of them for its own data, so every document that
-/// can be made can be saved and opened again.
-pub const MAX_DEPTH: usize = 32;
+/// 256 levels after a nonrecursive preflight: 64 leaves room for the deepest object
+/// and its data. Native save/open tests cover groups, clips and masks at this cap.
+pub const MAX_DEPTH: usize = 64;
 
 /// The deepest an object may be drawn: as [`MAX_DEPTH`], the art of a symbol counted under its
 /// instance and a pattern's tile under the object it paints (and what those use, under them).
 /// Symbols a few objects deep nest in one another dozens deep within it.
-pub const MAX_DRAWN_DEPTH: usize = 4 * MAX_DEPTH;
+// Keep the previous aggregate drawing budget; raising editable nesting must not
+// also double the permitted recursion through symbols and patterns.
+pub const MAX_DRAWN_DEPTH: usize = 128;
 
 /// The warning of a file whose objects were nested deeper than [`MAX_DEPTH`].
 pub fn merged_note() -> String {

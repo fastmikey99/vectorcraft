@@ -18,6 +18,9 @@ vectorcraft-engine = { workspace = true }
 vectorcraft-ui-egui = { workspace = true }
 vectorcraft-format = { workspace = true }
 vectorcraft-text = { workspace = true }
+vectorcraft-doc = { workspace = true }
+vectorcraft-geom = { workspace = true }
+serde_json = { workspace = true }
 egui = { workspace = true }
 log = { workspace = true }
 
@@ -28,4 +31,8 @@ rfd = { workspace = true }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "HtmlIFrameElement", "HtmlAnchorElement", "Blob", "BlobPropertyBag", "ClipboardEvent", "DataTransfer", "File", "FileList", "Url", "Location", "CssStyleDeclaration", "Event", "EventTarget", "MouseEvent", "PointerEvent", "TouchEvent", "AddEventListenerOptions", "DomRect", "DragEvent", "Storage", "Navigator", "RequestInit", "Response", "AbortController", "AbortSignal"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "HtmlIFrameElement", "HtmlAnchorElement", "Blob", "BlobPropertyBag", "ClipboardEvent", "DataTransfer", "File", "FileList", "Url", "Location", "CssStyleDeclaration", "Event", "EventTarget", "MouseEvent", "PointerEvent", "TouchEvent", "AddEventListenerOptions", "DomRect", "DragEvent", "Storage", "Navigator", "RequestInit", "Response", "AbortController", "AbortSignal", "MessageEvent", "KeyboardEvent"] }
+
+[dev-dependencies]
+vectorcraft-color = { workspace = true }
+craft-pdf = { workspace = true }

@@ -462,6 +462,12 @@ fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_p
             }
         }
     }
+    if opts.reject_depth_loss && doc.too_deep(None) {
+        return Err(PdfError::Unsupported(format!(
+            "this PDF exceeds the editable nesting limit ({} levels); opening it would discard clipping or mask information",
+            vectorcraft_doc::depth::MAX_DEPTH
+        )));
+    }
     doc.limit_depth_noting(&mut warnings);
     let user_unit = picked.first().and_then(|&n| pages.get(n)).map_or(1.0, |page| f64::from(page.user_unit()));
     Ok(ImportReport { document: doc, warnings, native: crate::editing::editing_in(&pdf), only_text, user_unit })

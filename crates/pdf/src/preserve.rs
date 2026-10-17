@@ -188,7 +188,7 @@ fn inherited_groups(parsed: &crate::linearize::Parsed<'_>, page: u32, space: &st
     Ok(())
 }
 
-pub(crate) fn finish(pdf: Vec<u8>, doc: &Document, opts: &PdfOptions, warnings: &mut Vec<String>) -> Result<Vec<u8>, PdfError> {
+pub(crate) fn finish(pdf: Vec<u8>, doc: &Document, opts: &PdfOptions, units: &[f64], warnings: &mut Vec<String>) -> Result<Vec<u8>, PdfError> {
     let Some(value) = doc.unknown.get(KEY) else { return Ok(pdf) };
     if opts.settings.discard_imported_print_settings {
         return Ok(pdf);
@@ -202,10 +202,13 @@ pub(crate) fn finish(pdf: Vec<u8>, doc: &Document, opts: &PdfOptions, warnings: 
         return Ok(pdf);
     }
     let parsed = crate::linearize::parse(&pdf).map_err(error)?;
+    if units.len() != parsed.pages.len() || units.iter().any(|u| !u.is_finite() || *u < 1.0) {
+        return Err(error("invalid output page units"));
+    }
     let mut patch = Patch::new(&parsed.xref);
     let mut inherited = BTreeMap::new();
     let indices: Vec<usize> = opts.artboards.clone().unwrap_or_else(|| (0..doc.artboards.len()).collect());
-    for (&number, &index) in parsed.pages.iter().zip(&indices) {
+    for ((&number, &index), &unit) in parsed.pages.iter().zip(&indices).zip(units) {
         let Some(board) = doc.artboards.get(index) else { continue };
         let Some(source) = state.pages.iter().find(|s| s.artboard == board.id) else { continue };
         let keep_boxes = !(source.frame != rect(board.rect)
@@ -222,7 +225,7 @@ pub(crate) fn finish(pdf: Vec<u8>, doc: &Document, opts: &PdfOptions, warnings: 
         let mut replacements = BTreeMap::new();
         for name in BOXES {
             if let Some(v) = source.boxes.get(name).filter(|_| keep_boxes) {
-                replacements.insert(name, format!("[{} {} {} {}]", v[0], v[1], v[2], v[3]));
+                replacements.insert(name, format!("[{} {} {} {}]", v[0] / unit, v[1] / unit, v[2] / unit, v[3] / unit));
             }
         }
         if let Some(group) = &source.group {
@@ -245,7 +248,7 @@ pub(crate) fn finish(pdf: Vec<u8>, doc: &Document, opts: &PdfOptions, warnings: 
                     .join(" "),
                 _ => return Err(error("missing page content")),
             };
-            let pre = patch.add_object(stream(format!("q 1 0 0 1 {} {} cm\n", source.origin[0], source.origin[1]).as_bytes()));
+            let pre = patch.add_object(stream(format!("q 1 0 0 1 {} {} cm\n", source.origin[0] / unit, source.origin[1] / unit).as_bytes()));
             let post = patch.add_object(stream(b"Q\n"));
             replacements.insert("Contents", format!("[{pre} 0 R {refs} {post} 0 R]"));
         }
@@ -352,6 +355,32 @@ mod tests {
         let b = back.layers[0].visual_bounds().unwrap();
         for (a, b) in rect(a).into_iter().zip(rect(b)) {
             assert!((a - b).abs() < 1e-9, "{a} changed to {b}");
+        }
+    }
+
+    #[test]
+    fn large_imported_page_retains_physical_boxes_and_origin_with_user_units() {
+        let mut page = PdfPage::new(20_000.0, 10_000.0, "0 0 0 1 k 12 9 30 20 re f");
+        page.media = [-2.0, -3.0, 19_998.0, 9_997.0];
+        page.crop = Some(page.media);
+        page.art = Some([6.0, 5.0, 19_990.0, 9_990.0]);
+        let bytes = pdf_with(&[page.clone()], &[], None);
+        let opts = ImportOptions { crop: CropTo::Media, ..Default::default() };
+        let doc = import_with_report(&bytes, &opts).unwrap().document;
+        let out = export(&doc, &PdfOptions::default()).unwrap();
+        let pdf = crate::pages::open(&out, None).unwrap();
+        let output = &pdf.pages()[0];
+        let unit = f64::from(output.user_unit());
+        assert!(unit > 1.0);
+        for (key, expected) in [(b"MediaBox".as_slice(), page.media), (b"ArtBox".as_slice(), page.art.unwrap())] {
+            let actual = output.raw().get::<[f64; 4]>(key).unwrap();
+            for (a, b) in actual.into_iter().zip(expected) {
+                assert!((a * unit - b).abs() < 0.01, "{a} * {unit} != {b}");
+            }
+        }
+        let back = import_with_report(&out, &opts).unwrap().document;
+        for (a, b) in rect(doc.layers[0].visual_bounds().unwrap()).into_iter().zip(rect(back.layers[0].visual_bounds().unwrap())) {
+            assert!((a - b).abs() < 0.01, "art moved: {a} != {b}");
         }
     }
 

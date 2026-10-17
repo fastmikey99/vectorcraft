@@ -55,6 +55,8 @@ struct Host {
     locks: Option<WebLocks>,
     /// Graphics restarts so far.
     restarts: u32,
+    /// The page embedding VectorCraft (`?host=parent`).
+    bridge: Option<crate::host::Bridge>,
 }
 
 pub fn start() {
@@ -79,8 +81,20 @@ pub fn start() {
             pointers: SharedPointers::default(),
             locks,
             restarts: 0,
+            // `?host=parent`: a same-origin page framing VectorCraft (such as a Nextcloud app)
+            // opens files in it and stores what it saves (`host`).
+            bridge: if query_param("host").as_deref() == Some("parent") { crate::host::Bridge::new() } else { None },
         };
         track_paste(&host.pasted);
+        keep_shortcuts_from_the_browser();
+        if let Some(bridge) = &host.bridge {
+            let pasted = host.pasted.clone();
+            bridge.listen(move || {
+                if let Some(ctx) = &pasted.borrow().ctx {
+                    ctx.request_repaint();
+                }
+            });
+        }
         run(host, canvas, None).await;
     });
 }
@@ -101,6 +115,7 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
     let slot = Rc::new(RefCell::new(moving.map(|m| m.app)));
     let (runner, taken, page) = (host.runner.clone(), slot.clone(), canvas.clone());
     let (pointers, pen_canvas) = (host.pointers.clone(), canvas.clone());
+    let bridge = host.bridge.clone();
     let result = runner
         .start(
             canvas,
@@ -116,7 +131,10 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
                     rs.device.set_device_lost_callback(move |reason, msg| loss.report(&ctx, format!("{reason:?}: {msg}")));
                 }
                 host.pasted.borrow_mut().ctx = Some(ctx.clone());
-                let services = services(host.inbox.clone(), host.place_inbox.clone(), ctx.clone(), host.locks.clone());
+                let mut services = services(host.inbox.clone(), host.place_inbox.clone(), ctx.clone(), host.locks.clone());
+                if let Some(bridge) = &host.bridge {
+                    bridge.connect(&mut services);
+                }
                 let app = match taken.borrow_mut().take() {
                     Some(mut app) => {
                         // The old services asked the old context for frames.
@@ -124,9 +142,19 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
                         app.status("The graphics were lost and have been restarted");
                         app
                     }
-                    None => VectorcraftApp::new(Session::new(), services),
+                    None => {
+                        let mut app = VectorcraftApp::new(Session::new(), services);
+                        // Embedded, the page hands over the preferences of the person signed in.
+                        let saved =
+                            if host.bridge.is_some() { None } else { local_storage().ok().and_then(|s| s.get_item(PREFS_KEY).ok().flatten()) };
+                        restore_prefs(&mut app, saved);
+                        if let Some(bridge) = &host.bridge {
+                            bridge.post_ready();
+                        }
+                        app
+                    }
                 };
-                Ok(Box::new(WebShell { app: Some(app), host, canvas: page, loss }))
+                Ok(Box::new(WebShell { app: Some(app), host, canvas: page, loss, prefs_saved: None, prefs_checked: 0.0 }))
             }),
         )
         .await;
@@ -139,7 +167,13 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
                 el.remove();
             }
         }
-        (Err(e), None) => notice(&[&format!("VectorCraft failed to start: {}", js_err(e)), "A browser with WebGPU or WebGL2 is required."]),
+        (Err(e), None) => {
+            let error = js_err(e);
+            if let Some(bridge) = &bridge {
+                bridge.post_failed(&error);
+            }
+            notice(&[&format!("VectorCraft failed to start: {error}"), "A browser with WebGPU or WebGL2 is required."]);
+        }
         (Err(e), Some(kept)) => {
             log::error!("vectorcraft-web: couldn't restart the graphics: {}", js_err(e));
             give_up(slot.borrow_mut().take(), kept);
@@ -201,6 +235,44 @@ fn track_drag(canvas: &web_sys::HtmlCanvasElement, pos: &DragPos) {
     }
     // The listener lives as long as the canvas.
     on_drag.forget();
+}
+
+/// The browser acts on some of the editor's shortcuts as well, unless told not to: Ctrl+2 locks the
+/// selection and switched to the browser's second tab too, Ctrl+= zoomed the page as well as the view,
+/// Ctrl+D bookmarked it. A key press that is one of the editor's command shortcuts in effect
+/// (`shortcuts::is_bound`) doesn't get the browser's action; the editor still gets the key (no
+/// `stopPropagation`). Copy, cut and paste are left alone: the editor works from the browser's own
+/// clipboard events. The shortcuts browsers keep for themselves (new tab, close tab…) can't be
+/// taken, so they still act.
+fn keep_shortcuts_from_the_browser() {
+    let Some(window) = web_sys::window() else { return };
+    let mac = window.navigator().platform().is_ok_and(|p| p.to_ascii_lowercase().contains("mac"));
+    let on_key = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
+        if !(e.ctrl_key() || e.meta_key()) {
+            return;
+        }
+        // `code` is the physical key, whatever the layout (Digit2, KeyG, Equal…), as egui names it.
+        let Some(key) = egui::Key::from_name(&e.code()) else { return };
+        if matches!(key, egui::Key::C | egui::Key::V | egui::Key::X) {
+            return;
+        }
+        let m = egui::Modifiers {
+            alt: e.alt_key(),
+            ctrl: e.ctrl_key(),
+            shift: e.shift_key(),
+            mac_cmd: mac && e.meta_key(),
+            command: if mac { e.meta_key() } else { e.ctrl_key() },
+        };
+        if vectorcraft_ui_egui::shortcuts::is_bound(key, m) {
+            e.prevent_default();
+        }
+    });
+    // Captured, so it is decided before anything else on the page acts on the key.
+    if let Err(e) = window.add_event_listener_with_callback_and_bool("keydown", on_key.as_ref().unchecked_ref(), true) {
+        log::error!("couldn't follow keydown events: {e:?}");
+    }
+    // The listener lives as long as the page.
+    on_key.forget();
 }
 
 /// Take pictures and files pasted into the page (egui reads a paste's text only): a paste without
@@ -326,9 +398,71 @@ struct WebShell {
     host: Host,
     canvas: web_sys::HtmlCanvasElement,
     loss: GraphicsLoss,
+    /// The preferences and workspace last written to the browser's storage ([`PREFS_KEY`]), and
+    /// when they were last compared with the app's (ms since the epoch).
+    prefs_saved: Option<String>,
+    prefs_checked: f64,
+}
+
+/// Where the preferences and the workspace (the interface's state, as the desktop app keeps them
+/// in its preferences file) live in the browser's storage, shared by the site's tabs. Embedded
+/// (`?host=parent`) they go to the page instead (`vectorcraft:prefs`), which keeps them per person.
+const PREFS_KEY: &str = "vectorcraft-prefs";
+/// How often the app's preferences are compared with the stored ones (ms). Browsers don't say
+/// reliably when a tab closes, so they are written as they change rather than on the way out.
+const PREFS_EVERY_MS: f64 = 2000.0;
+
+/// The stored preferences and workspace (`saved`), when there are any, put back (as the desktop app
+/// does at start-up); then the preferences applied to the session.
+fn restore_prefs(app: &mut VectorcraftApp, saved: Option<String>) {
+    match saved.map(|t| serde_json::from_str::<vectorcraft_ui_egui::UiState>(&t)) {
+        Some(Ok(ui)) => app.ui = ui.sanitized(),
+        Some(Err(e)) => log::warn!("vectorcraft-web: the stored preferences couldn't be read, so the defaults apply: {e}"),
+        None => {}
+    }
+    vectorcraft_ui_egui::prefs_dialog::restore(app);
+}
+
+/// The app's preferences and workspace as stored.
+fn prefs_json(app: &VectorcraftApp) -> Option<String> {
+    let mut ui = app.ui.clone();
+    ui.engine_prefs = app.session.prefs.to_json();
+    serde_json::to_string(&ui).ok()
 }
 
 impl WebShell {
+    /// Every [`PREFS_EVERY_MS`]: write the preferences and workspace when they changed (embedded:
+    /// hand them to the page). Preferences the page handed back are put on first.
+    fn save_prefs(&mut self) {
+        if let (Some(bridge), Some(app)) = (&self.host.bridge, &mut self.app)
+            && let Some(text) = bridge.take_prefs()
+        {
+            restore_prefs(app, Some(text.clone()));
+            // What the page holds already: not handed back unless it changes.
+            self.prefs_saved = prefs_json(app).or(Some(text));
+        }
+        let now = js_sys::Date::now();
+        if now - self.prefs_checked < PREFS_EVERY_MS {
+            return;
+        }
+        self.prefs_checked = now;
+        let Some(json) = self.app.as_ref().and_then(prefs_json) else { return };
+        if self.prefs_saved.as_deref() == Some(json.as_str()) {
+            return;
+        }
+        if let Some(bridge) = &self.host.bridge {
+            if bridge.post_prefs(&json) {
+                self.prefs_saved = Some(json);
+            }
+            return;
+        }
+        match local_storage().and_then(|s| s.set_item(PREFS_KEY, &json).map_err(js_err)) {
+            Ok(()) => self.prefs_saved = Some(json),
+            // Best effort, as on the desktop: the next change tries again.
+            Err(e) => log::warn!("vectorcraft-web: couldn't store the preferences: {e}"),
+        }
+    }
+
     /// The graphics were lost (`why`): keep recovery copies, then start again on a new canvas
     /// with the same app once this frame is over (the runner is busy with it until then).
     fn restart(&mut self, why: &str) {
@@ -386,6 +520,7 @@ impl eframe::App for WebShell {
             }
         }
         app.logic(ctx);
+        self.save_prefs();
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
@@ -398,6 +533,10 @@ impl eframe::App for WebShell {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if let Some(app) = &mut self.app {
             app.ui(ui);
+            if let Some(bridge) = &self.host.bridge {
+                bridge.run_exports(app);
+                bridge.report_dirty(app);
+            }
         }
     }
 }
