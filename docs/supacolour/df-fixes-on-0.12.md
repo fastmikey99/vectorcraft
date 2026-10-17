@@ -70,3 +70,17 @@ MediaBox regression. All PDF inputs are synthetic.
 
 Validation: all 323 PDF unit tests and its integration tests passed, including
 the cropped-page stroke and spacing cases. Clippy and fmt passed.
+
+## 5. Preferred units on open — f3cbafb4
+
+**Ported.** Renamed `Loaded::with_grid_prefs` to `with_prefs`, retaining 0.12's
+resolved-links argument. Both open and revert apply preferred units when the
+importer supplies no explicit unit. Native/restored documents and explicitly
+unit-sized SVGs retain their units; geometry is not rescaled.
+
+Tests: restored PDF, pixel SVG, inch SVG and native reopen cases, added explicit
+SVG points and embedded-native PDF preservation. The SVG size check allows its
+parser's existing floating-point rounding.
+
+Validation: all 2,263 engine unit tests and integration tests passed, including
+both preferred-unit regressions. Clippy and fmt passed.
