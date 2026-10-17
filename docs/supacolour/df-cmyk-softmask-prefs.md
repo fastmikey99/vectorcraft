@@ -1,6 +1,6 @@
 # DF CMYK soft masks and preferences
 
-Status: local regression verification, 17 October 2026. No customer files are
+Status: locally verified, 17 October 2026. No customer files are
 included. Base: `0016bd97` (regression also observed in `aa97e68e`).
 
 ## CMYK images
@@ -46,3 +46,38 @@ This fix targets the CMYK-to-RGB regression and does not claim exact source ink
 coverage. Customer input/output files remain under `/tmp` only.
 
 Revision history: 2026-10-17 — document the substitution cause and synthetic coverage.
+
+## Preferences
+
+The web shell polled before the UI frame committed OK, and its serialized UI state
+included uncommitted dialog fields. It now snapshots after the UI frame, sends
+immediately on the dialog's commit signal, and excludes transient state using the
+same normalization as preference restoration. Workspace changes still poll every
+two seconds; only successful delivery updates the stored baseline.
+
+General Units previously used a document edit, creating an undo step and dirtying
+saved content. Grid changes also replaced the document pointer. Both now update
+display settings across current/saved/history snapshots while preserving shared
+snapshot identity. Existing artwork changes stay dirty; Undo/Redo can still return
+to clean saved content. Explicit Document Setup remains an undoable document edit.
+
+Web tests cover committed units in the immediate outgoing snapshot, preference
+restoration, no duplicate messages, invalid values and Cancel, and clean state.
+Engine tests cover clean/dirty documents, grid/units changes and Undo/Redo.
+
+Revision history: 2026-10-17 — add committed preference persistence and saved-state regressions.
+
+## Verification
+
+- `cargo test -p vectorcraft-engine -p vectorcraft-web`: passed (2,538 engine
+  tests; two pre-existing ignored tests; 28 web tests).
+- `cargo fmt --all -- --check`: passed.
+- `cargo clippy -p vectorcraft-engine -p vectorcraft-web --all-targets -- -D warnings`: passed.
+- `cargo xtask ci`: all nine gates passed, including workspace tests and all
+  23 WASM crates. The native socket tests required execution outside the sandbox.
+  Homebrew Rust's WASM check used `RUSTC_BOOTSTRAP=1` and
+  `CARGO_UNSTABLE_BUILD_STD=std,panic_abort`.
+- Ordinary CLI DF33155 export: CMYK JPEG plus gray masks confirmed with
+  `pdfimages -list`; ink coverage recorded above. No push or customer-file commit.
+
+Revision history: 2026-10-17 — record final tests, CI and customer-file verification.

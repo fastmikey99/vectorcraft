@@ -489,6 +489,45 @@ impl DocState {
     pub fn is_dirty(&self) -> bool {
         !Arc::ptr_eq(&self.doc, &self.saved_doc)
     }
+    /// Change display preferences without creating an edit or changing saved-state identity.
+    /// Update retained snapshots too: Undo/Redo must neither undo a preference nor
+    /// make a previously saved version dirty just because its display settings changed.
+    pub(crate) fn apply_display_preferences(&mut self, units: Option<vectorcraft_doc::Unit>, grid: Option<vectorcraft_doc::GridPrefs>) {
+        let mut versions = std::collections::HashMap::new();
+        let mut update = |snapshot: &mut Arc<Document>| {
+            let key = Arc::as_ptr(snapshot) as usize;
+            let (_, next) = versions.entry(key).or_insert_with(|| {
+                let original = snapshot.clone();
+                let mut next = original.clone();
+                if units.is_some_and(|u| u != next.units) || grid.as_ref().is_some_and(|g| g != &next.grid) {
+                    let doc = Arc::make_mut(&mut next);
+                    if let Some(u) = units {
+                        doc.units = u;
+                    }
+                    if let Some(g) = &grid {
+                        doc.grid = g.clone();
+                    }
+                }
+                // Keep originals alive while mapping identities (addresses cannot be reused).
+                (original, next)
+            });
+            *snapshot = next.clone();
+        };
+        update(&mut self.doc);
+        update(&mut self.saved_doc);
+        for step in self.history.undo.iter_mut().chain(&mut self.history.redo) {
+            update(&mut step.doc);
+        }
+        if let Some(interaction) = &mut self.interaction {
+            update(&mut interaction.doc);
+            interaction.copies = None;
+        }
+        if let Some(first) = self.undo_group.as_mut().and_then(|g| g.first.as_mut()) {
+            update(first);
+        }
+        self.revision += 1;
+    }
+
     /// Record the current document as saved.
     pub fn mark_saved(&mut self) {
         self.saved_doc = self.doc.clone();

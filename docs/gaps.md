@@ -516,3 +516,14 @@ alpha soft-mask regressions cover import and PDF export. See
 hours and milestone estimates remain unchanged.
 
 Revision history: 2026-10-17 — add CMYK substitution regression evidence; no parity increase.
+
+
+### WEB.P1 — committed preferences (17 October 2026)
+
+The web host receives preferences after OK commits, excluding dialog drafts and
+transient status. Units/grid preferences preserve content dirty state and Undo/Redo.
+Native bridge and engine regressions are described in
+[local DF validation](supacolour/df-cmyk-softmask-prefs.md). G12/UI and milestone
+scores and estimates remain unchanged.
+
+Revision history: 2026-10-17 — add preference persistence and saved-state evidence.

@@ -559,9 +559,7 @@ impl Session {
                 st.revision += 1;
             }
             if grid_changed {
-                let d = std::sync::Arc::make_mut(&mut st.doc);
-                d.grid = self.prefs.grid();
-                st.revision += 1;
+                st.apply_display_preferences(None, Some(self.prefs.grid()));
             }
             // Hyphenation exceptions change every text object's line breaks.
             if hyphen_exceptions_changed {
@@ -581,7 +579,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Set Preference",
             [],
             None,
-            "{key, value} or {values: {key: value, …}} set preferences (validated; see prefs.list; lengths in pt or strings with a unit; unitsGeneral also sets the active document's units, one undo step; the eyedropper group takes a partial object, as eyedropper.setOptions)",
+            "{key, value} or {values: {key: value, …}} set preferences (validated; see prefs.list; lengths in pt or strings with a unit; unitsGeneral also sets the active document's display units without a content edit; the eyedropper group takes a partial object, as eyedropper.setOptions)",
             always,
             set
         ),
@@ -615,7 +613,10 @@ fn set(s: &mut Session, p: &Value) -> Result<Value> {
     s.apply_prefs(next);
     // Units ▸ General is also the open document's units (as Document Setup sets them).
     if values.contains_key("unitsGeneral") && s.active().is_some() {
-        s.set_document_units(s.default_units())?;
+        let units = s.default_units();
+        if let Some(st) = s.active_mut() {
+            st.apply_display_preferences(Some(units), None);
+        }
     }
     let all = s.prefs.to_json();
     Ok(Value::Object(values.keys().map(|k| (k.clone(), all[k.as_str()].clone())).collect()))

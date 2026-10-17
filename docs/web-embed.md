@@ -113,6 +113,10 @@ Together they make a "trace this image" button: export the selected image with `
 - Send them back, as they came, after `ready` and before `vectorcraft:open`; the editor puts them on. Text that isn't what the editor gave (not a JSON object, or over 1 MB) is refused with `vectorcraft:failed`.
 - Someone with nothing stored starts from the defaults; their first change is sent to the page.
 
+Preferences OK sends a snapshot after the dialog commits, without waiting for the periodic
+workspace poll. General Units and grid preferences update display settings without marking
+saved artwork dirty or consuming Undo; existing unsaved artwork remains dirty.
+
 **`vectorcraft:dirty`** is sent after the first frame and then whenever the answer changes, so the first one is usually `dirty: false`. `true` means at least one open document has unsaved changes.
 
 ## Who is heard

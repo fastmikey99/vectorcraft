@@ -88,7 +88,7 @@ dominate; 3D, graphs and automation are specialist). They sum to 105. Feature de
 | Export for Screens, Asset Export, slices, Save for Web | 3 | 85% | anti-aliasing ghost borders (#983); TIFF choices and settings are implemented | 2–4 | estimated |
 | Print, colour management, separations, flattener | 3 | 80% | print preview fidelity | 2–4 | estimated |
 | Automation (Actions, Variables, scripting, batch) | 3 | 60% | a scripting surface (Illustrator: JavaScript/ExtendScript), Batch, image and graph variables, dataset import/export | 8–14 | estimated; MCP `add_text` exposes existing vertical type; score and hours unchanged |
-| UI chrome (panels, Properties, workspaces, preferences) | 6 | 80% | Properties per context, ~16 Preferences options stored but unused (#394), panels outside the window, SVG Interactivity, context menus beyond the canvas, accessibility | 13–20 | estimated; macOS save Format menu implemented (#866), score and hours unchanged; Eyedropper cursor and precise setting checked (#1269), OS visual QA unverified; numeric-field focus and normal text drags regression-tested (#1326, in part); movements below the click threshold still select all; artboard navigation synchronizes the tool selection before destructive actions |
+| UI chrome (panels, Properties, workspaces, preferences) | 6 | 80% | [Web preference commit/dirty regressions fixed](supacolour/df-cmyk-softmask-prefs.md); remaining: Properties per context, ~16 Preferences options stored but unused (#394), panels outside the window, SVG Interactivity, context menus beyond the canvas, accessibility | 13–20 | estimated; macOS save Format menu implemented (#866), score and hours unchanged; Eyedropper cursor and precise setting checked (#1269), OS visual QA unverified; numeric-field focus and normal text drags regression-tested (#1326, in part); movements below the click threshold still select all; artboard navigation synchronizes the tool selection before destructive actions |
 | Libraries, Links, Package | 2 | 82% | shared libraries, linked graphics, gradients and patterns as library items (no cloud by design) | 2–3 | estimated |
 | Generative AI (Text to Vector, Generative Recolor, Shape Fill, Concept to Vector, Prompt to Edit, Rewrite Text) | 2 | 0% | a pluggable provider and the panels; needs an owner decision on models | 30–60 | measured (absent) |
 | **Feature depth** | **105** | **~75%** | | **~250–420** | |
@@ -906,3 +906,14 @@ alpha soft-mask regressions cover import and PDF export. See
 hours and milestone estimates remain unchanged.
 
 Revision history: 2026-10-17 — add CMYK substitution regression evidence; no parity increase.
+
+
+### WEB.P1 — committed preferences (17 October 2026)
+
+The web host receives preferences after OK commits, excluding dialog drafts and
+transient status. Units/grid preferences preserve content dirty state and Undo/Redo.
+Native bridge and engine regressions are described in
+[local DF validation](supacolour/df-cmyk-softmask-prefs.md). G12/UI and milestone
+scores and estimates remain unchanged.
+
+Revision history: 2026-10-17 — add preference persistence and saved-state evidence.

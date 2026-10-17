@@ -2179,7 +2179,7 @@ only change what the UI shows and how it reads typed numbers. Preferences ▸ Un
 three: General (rulers, positions and sizes, the Info panel, dialog distances, canvas measurement labels), Stroke
 (weights, dashes) and Type (font size, leading, baseline shift). General is the active document's units
 (`document.inspect` → `units`): `document.setUnits {units}` (Document Setup) sets it for that document, and
-`prefs.set {key: "unitsGeneral", value}` sets it for the active document too (one undo step) and is the units
+`prefs.set {key: "unitsGeneral", value}` sets the active document’s display units too (no content edit or undo step) and is the units
 `file.new` starts in when it gets no `units`. Stroke and Type are the preferences `unitsStroke` and `unitsType`.
 `numbersWithoutUnitsArePoints` (on by default) makes the desktop app's length fields in picas read a number typed
 with no unit in points (`12` is 12 pt, `2p6` and `1p` stay picas, `12 mm` millimetres); off, it is in picas. Fields in
