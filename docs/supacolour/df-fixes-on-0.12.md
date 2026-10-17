@@ -100,3 +100,15 @@ fallible API versus a consumed inset. With only the old probe logic temporarily 
 Validation: 38 pathops unit tests and all integration tests passed, including
 both `df_inset` cases. Clippy and fmt passed. No release/performance build was
 run in the resumed session, per the disk/build constraint.
+
+## 7. Painted-path clip — e510c801 history / f90c755a
+
+**Fix already present in the pinned shared dependency; test restored.**
+`git log e510c801 -S a_clip_on_a_painted_path_still_clips_what_follows -- crates`
+located `f90c755a`. Restored that synthetic diamond/shading regression for
+`W* f*`, `W f`, `W S`, and `W* B*`. No vendored reader, dependency override or
+backend revision change is needed; craft-libs remains pinned to
+`6f322f53d6f73c937b4347a146e911f037d16752`.
+
+Validation: the restored test passed for all four operators in the 323-test
+PDF suite against the pinned dependency. Clippy and fmt passed.
