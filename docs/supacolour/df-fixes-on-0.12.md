@@ -84,3 +84,19 @@ parser's existing floating-point rounding.
 
 Validation: all 2,263 engine unit tests and integration tests passed, including
 both preferred-unit regressions. Clippy and fmt passed.
+
+## 6. Compound insets — 0a8a0513
+
+**Ported with original synthetic tests.** Face probes exclude directly nested
+holes and consider up to eight interior spans before dropping an outline.
+`try_offset_path` distinguishes invalid/unresolvable input from a genuinely empty
+inset; `offset_path` retains its previous convenience fallback.
+
+The historical test explicitly identifies its coordinates as customer-derived;
+those coordinates were not copied. `tests/df_inset.rs` instead constructs a square
+with a thin counter, checks several neighbouring inset distances, and tests the
+fallible API versus a consumed inset. With only the old probe logic temporarily restored, the synthetic counter test fails (9,984 area becomes zero at -0.28); with the port it passes. The fixed code was restored before final validation.
+
+Validation: 38 pathops unit tests and all integration tests passed, including
+both `df_inset` cases. Clippy and fmt passed. No release/performance build was
+run in the resumed session, per the disk/build constraint.
