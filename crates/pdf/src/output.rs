@@ -14,7 +14,7 @@
 //! - Profiles ([`ProfileInclusion`]): with `all`, with `destination`, and with `taggedSource` on a
 //!   document that was assigned profiles, colours are written in ICC-based colour spaces: CMYK
 //!   with the CMYK profile in effect (the destination when converting to CMYK, else the
-//!   document's), RGB with sRGB (colours of another RGB space as their sRGB equivalents) and grey
+//!   document's), RGB with its working/destination profile (PDF/A uses sRGB equivalents) and grey
 //!   with the sRGB tone curve. Otherwise they are device colours. PDF/A, PDF/X-3 and PDF/X-4
 //!   always tag them, whatever `profiles` says; PDF/X-1a never does, and always converts to a
 //!   CMYK destination (see [`crate::pdfx`]).
@@ -60,8 +60,10 @@ pub(crate) struct ColorOut {
     /// The CMYK profile that tags CMYK colours.
     cmyk_profile: String,
     /// Tagged RGB colours are written as their sRGB equivalents: why (a warning), when their RGB
-    /// space isn't sRGB.
+    /// space isn't sRGB and cannot tag it (PDF/A).
     pub srgb_note: Option<String>,
+    /// The profile replacing the writer's built-in sRGB profile for tagged RGB.
+    rgb_icc: Option<String>,
     /// The image transform, built when the first image needs it.
     pixels: OnceLock<Option<Pixels>>,
     /// The CMYK image transform, built when the first CMYK image needs it.
@@ -105,6 +107,7 @@ impl Default for ColorOut {
             tagged: false,
             cmyk_profile,
             srgb_note: None,
+            rgb_icc: None,
             pixels: OnceLock::new(),
             cmyk_pixels: OnceLock::new(),
             intent,
@@ -234,10 +237,15 @@ impl ColorOut {
             _ => (source.rgb_is_srgb(), st.rgb.clone()),
         };
         if out.tagged && !rgb.0 {
-            out.srgb_note = Some(format!("RGB colours are tagged with the sRGB profile: those of {} are written as their sRGB equivalents", rgb.1));
+            if set.standard != Standard::PdfA2b && cms::icc_bytes(&rgb.1).is_ok() {
+                out.rgb_icc = Some(rgb.1);
+            } else {
+                out.srgb_note =
+                    Some(format!("RGB colours are tagged with the sRGB profile: those of {} are written as their sRGB equivalents", rgb.1));
+            }
         }
-        if out.preserve_source && out.srgb_note.is_some() {
-            return Err(PdfError::BadSetting("preserveSource cannot convert a tagged RGB source profile to sRGB".into()));
+        if out.preserve_source && out.tagged && !rgb.0 {
+            return Err(PdfError::BadSetting("preserveSource cannot retag a non-sRGB source without converting decoded RGB images".into()));
         }
         out.catalog = catalog(set, &out.cmyk_profile);
         out.standard = set.standard;
@@ -295,6 +303,11 @@ impl ColorOut {
     pub(crate) fn pixels(&self) -> Option<&Pixels> {
         self.pixels
             .get_or_init(|| {
+                // Decoded RGB images are sRGB, so their pixels must match their new tag.
+                if self.rgb_icc.is_some() && self.dest.as_ref().is_none_or(|d| d.model == Model::Rgb) {
+                    let space = self.dest.as_ref().map_or(&*self.source, |d| &d.cms);
+                    return Some(Pixels::Rgb(Box::new(ProofLut::build(|rgb| space.srgb_to_rgb(rgb)))));
+                }
                 let d = self.dest.as_ref()?;
                 let intent = self.intent;
                 match d.model {
@@ -343,10 +356,17 @@ impl ColorOut {
     /// `pdf` with the output intent and Trapped entries, and a PDF/X file's identification
     /// ([`crate::pdfx`]) → (the file, warnings).
     pub(crate) fn write_catalog(&self, pdf: Vec<u8>) -> Result<(Vec<u8>, Vec<String>), PdfError> {
-        let Some(cat) = &self.catalog else { return Ok((pdf, vec![])) };
+        if self.catalog.is_none() && self.rgb_icc.is_none() {
+            return Ok((pdf, vec![]));
+        }
         let xref = Xref::read(&pdf).ok_or_else(|| PdfError::Write("the written PDF has no cross-reference table".into()))?;
         let mut patch = Patch::new(&xref);
         let mut warnings = vec![];
+        let rgb_streams = match &self.rgb_icc {
+            Some(name) => retag_rgb(&pdf, &xref, &mut patch, name)?,
+            None => vec![],
+        };
+        let Some(cat) = &self.catalog else { return Ok((patch.apply(&pdf, &xref)?, warnings)) };
         let root = xref.trailer_ref(&pdf, b"/Root").and_then(|n| xref.dict(&pdf, n));
         let Some(root) = root else { return Err(PdfError::Write("the written PDF has no catalog".into())) };
         if let Some(OutputIntent { id, condition, registry, info, profile }) = &cat.intent {
@@ -362,7 +382,14 @@ impl ColorOut {
                 if let Some((name, n)) = profile {
                     let icc = cms::icc_bytes(name).map_err(|e| PdfError::Write(format!("output intent profile: {e}")))?;
                     // The profile tagging the colours is often this one: both share its stream.
-                    let shared = if self.tagged { tagging_stream(&pdf, &xref, &icc) } else { None };
+                    // Retagging is queued in `patch`, so the original bytes still contain sRGB.
+                    let shared = if self.rgb_icc.as_ref() == Some(name) {
+                        rgb_streams.first().copied()
+                    } else if self.tagged {
+                        tagging_stream(&pdf, &xref, &icc).filter(|n| !rgb_streams.contains(n))
+                    } else {
+                        None
+                    };
                     let stream = match shared {
                         Some(s) => s,
                         None => {
@@ -435,6 +462,32 @@ impl Dest {
             }
         }
     }
+}
+
+/// Replace each three-component ICC profile stream of `pdf` (the sRGB profile the PDF writer tags
+/// RGB colours, images and blending spaces with) by RGB profile `name`'s, in place.
+fn retag_rgb(pdf: &[u8], xref: &Xref, patch: &mut Patch, name: &str) -> Result<Vec<u32>, PdfError> {
+    let icc = cms::icc_bytes(name).map_err(|e| PdfError::Write(format!("RGB profile: {e}")))?;
+    let data = deflate(&icc).map_err(|e| PdfError::Write(format!("RGB profile: {e}")))?;
+    let mut body = format!("<</N 3/Range[0 1 0 1 0 1]/Length {}/Filter/FlateDecode>>\nstream\n", data.len()).into_bytes();
+    body.extend_from_slice(&data);
+    body.extend_from_slice(b"\nendstream\n");
+    let mut replaced = vec![];
+    for (n, _) in xref.objects(pdf) {
+        let Some((start, end)) = xref.dict(pdf, n) else { continue };
+        let Some(obj) = pdf.get(start..end) else { continue };
+        let Some(close) = crate::lab_spot::find(obj, b">>", 0) else { continue };
+        let dict = obj.get(..close).unwrap_or_default();
+        let n3 = crate::lab_spot::find(dict, b"/N 3", 0).is_some_and(|i| !dict.get(i + 4).is_some_and(u8::is_ascii_digit));
+        let stream = obj.get(close + 2..).is_some_and(|rest| rest.trim_ascii_start().starts_with(b"stream"));
+        let image = crate::lab_spot::find(dict, b"/Subtype", 0).is_some();
+        if n3 && stream && !image {
+            // From the dictionary's `<<` to just before `endobj`.
+            patch.replace(start - 2, end, body.clone());
+            replaced.push(n);
+        }
+    }
+    Ok(replaced)
 }
 
 /// The catalog entries `set` asks for (none in PDF/A files, see [`warnings`]); a PDF/X file's

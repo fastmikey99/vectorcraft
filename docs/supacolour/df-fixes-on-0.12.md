@@ -28,3 +28,24 @@ WASM standard library). `CRAFT_FONTS_DIR` is unset. An initial native build
 without these cache/size settings was interrupted and restarted with them.
 
 Revision: 17 October 2026 — begin behavioural ports and synthetic regressions.
+
+## 2. Non-sRGB PDF tags — f1f35863
+
+**Ported and adapted.** Tagged RGB keeps its working/destination numbers and
+profile; decoded RGB images convert into that space, and the writer's RGB
+colour/blending profile streams are retagged. PDF/A retains its sRGB fallback.
+BPC now affects only relative colorimetric RGB transforms. Unlike the old patch,
+the colour tag and matching output intent share one profile stream; a different
+sRGB output intent must not reuse a stream being retagged. The existing
+`preserveSource` refusal for non-sRGB tagging remains: decoded image conversion
+is outside that mode's promise.
+
+Tests: restored `tagged_rgb_in_a_wide_space_keeps_its_numbers_and_embeds_its_profile`
+using 0.12's fractional writer output, with same/different output intents,
+no-catalog tagging, loaded RGB profiles, image readback and PDF/A checks. Restored
+the perceptual BPC assertion in the colour tests.
+
+Validation: affected-crate test run passed (119 colour and 323 PDF unit tests,
+plus integrations); affected-crate clippy with `--all-targets -- -D warnings`
+and `cargo fmt --all -- --check` passed. Full commands are recorded below as
+the remaining ports land.
