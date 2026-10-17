@@ -18,6 +18,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = VectorcraftApp::new(Session::new(), Services::default());
     let imported =
         io::open_document(&mut app, &name, &std::fs::read(input)?, None, &if hybrid { json!({"printProduction": true}) } else { json!({}) })?;
+    let doc = &app.session.active().ok_or("no active document")?.doc;
+    let native = vectorcraft_format::save_with(doc, &Default::default())?;
+    let reopened = vectorcraft_format::load_file(&native)?;
+    if !reopened.depth_notes.is_empty() || reopened.doc != **doc {
+        return Err("native save/reopen changed the document".into());
+    }
+    std::fs::write(out.join("saved.vectorcraft"), native)?;
     let requested = protocol::export(None, Some(true), None, Some(false), None)?;
     let requested = protocol::with_output(requested, hybrid.then_some(r#"{"conversion":"preserveSource"}"#))?;
     let (_, original, _, _) = operations::write_export(&mut app, &requested)?;

@@ -561,6 +561,7 @@
 	Convert to RGB	Конвертиране в RGB
 	Convert to Shape	Конвертиране в фигура
 	Convert to sRGB	Конвертиране в sRGB
+	Convert to Straight Lines	Преобразуване в прави линии
 	Convert:	Конвертиране:
 	Copied the CSS of {rules} object(s)	Копиран е CSS кодът на {rules} обект(а)
 	Copies:	Копия:
@@ -579,6 +580,7 @@
 	Copyright Notice:	Бележка за авторското право:
 	Copyright Status:	Статус на авторското право:
 	Copyright Symbol	Символ за авторско право
+	Corner Point Angle Threshold:	Праг на ъгъла при ъгловите точки:
 	Corner Radius	Радиус на ъгъла
 	Corner Radius:	Радиус на ъгъла:
 	Corner:	Ъгъл:
@@ -956,6 +958,32 @@
 	Export All…	Експортиране на всичко…
 	Export and Clipboard Transparency Flattener Settings	Настройки за сплескване на прозрачността за експортиране и клипборд
 	Export Artboard	Експортиране на работна област
+	A File per Object	Отделен файл за всеки обект
+	Example: {name}	Пример: {name}
+	Export Preset:	Набор за експортиране:
+	Folders:	Папки:
+	Insert	Вмъкване
+	Nothing is selected. Select the art to export, then open this tab again.	Нищо не е избрано. Изберете графиката за експортиране и отворете този раздел отново.
+	One File of the Selection	Един файл от избраното
+	Start at:	Начало от:
+	{n} objects selected	Избрани обекти: {n}
+	Delete Export Preset	Изтриване на набор за експортиране
+	Export Presets	Набори за експортиране
+	Save Export Preset	Запазване на набор за експортиране
+	Export Layer	Експортиране на слой
+	Export Selection	Експортиране на избраното
+	All in One Folder	Всичко в една папка
+	By Size or Row	По размер или ред
+	By Format	По формат
+	By Artboard or Item	По монтажна област или елемент
+	By Item, Then Format	По елемент, после по формат
+	Document Name	Име на документа
+	Artboard or Item Name	Име на монтажната област или елемента
+	Number (####)	Номер (####)
+	Date (YYYYMMDD)	Дата (ГГГГММДД)
+	Date (YYYY-MM-DD)	Дата (ГГГГ-ММ-ДД)
+	Time (hhmmss)	Час (ччммсс)
+	PDF Print	PDF за печат
 	Export As	Експортиране като
 	Export As PNG…	Експортиране като PNG…
 	Export As SVG…	Експортиране като SVG…
@@ -1046,7 +1074,9 @@
 	Fit dashes to corners and ends	Напасване на тиретата към ъглите и краищата
 	Fit Headline	Напасване на заглавие
 	Decrease Font Size	Намаляване размера на шрифта
+	Decrease Font Size by Five Steps	Намаляване размера на шрифта с пет стъпки
 	Increase Font Size	Увеличаване размера на шрифта
+	Increase Font Size by Five Steps	Увеличаване размера на шрифта с пет стъпки
 	Spacing	Разстояние
 	Step Type	Тип стъпка
 	Fit in View	Побиране в изгледа
@@ -1285,6 +1315,14 @@
 	Hyphenate	Пренасяне на думи
 	Hyphenation	Пренасяне
 	Hyphenation…	Пренасяне…
+	Words Longer Than:	Думи, по-дълги от:
+	After First:	След първите:
+	Before Last:	Преди последните:
+	Hyphen Limit:	Лимит на тиретата:
+	Hyphenation Zone:	Зона за пренасяне:
+	letters	букви
+	hyphens	тирета
+	Hyphenate Capitalized Words	Пренасяне на думи с главна буква
 	ICC Profile	ICC профил
 	Identify Objects By	Идентифициране на обектите по
 	Ignore	Игнориране
@@ -1944,6 +1982,7 @@
 	Out Tangent Handles	Външни тангентни дръжки
 	Outer Glow…	Външно разсейване…
 	Outline	Контур
+	Outline Object	Преобразуване на обекта в контур
 	Outline Others	Контуриране на другите
 	Outline Stroke	Преобразуване на щриха в контур
 	Outline Text	Преобразуване на текста в контури
@@ -2370,6 +2409,7 @@
 	Reset Preferences	Нулиране на настройките
 	Reset Profiles	Нулиране на профилите
 	Reset Rotate View	Нулиране на изгледа на завъртане
+	Rotate View to Selection	Завъртане на изгледа спрямо селекцията
 	Reset the rows to the artwork's colors	Нулиране на редовете към цветовете на илюстрацията
 	Reset to Default	Връщане към стандартните
 	Reset to White, Black	Нулиране към бяло, черно
@@ -2479,6 +2519,7 @@
 	Save Save for Web Preset	Запази предварителна настройка за „Запази за уеб“
 	Save selected colors as swatches	Запази избраните цветове като образци
 	Save Selection…	Запази селекцията…
+	Update Selection	Актуализиране на селекцията
 	Save Swatch Library	Запази библиотека с образци
 	Save Swatch Library…	Запази библиотека с образци…
 	Save the current layout under this name	Запази текущото разположение под това име
@@ -2706,6 +2747,7 @@
 	Show Modified	Показване на променените
 	Show Note	Показване на бележка
 	Show Options	Показване на опциите
+	Show Original Path	Показване на оригиналния път
 	Show Package	Показване на пакет
 	Show Panel	Показване на панел
 	Show Pattern Swatches	Показване на образци за мостра
@@ -3628,6 +3670,8 @@ axis	Both	И двете
 @msg	cannot split an open path at its end point	отворен път не може да бъде разделен в крайната му точка
 @msg	closing needs three anchors	затварянето изисква три опорни точки
 @msg	check an asset to export	изберете актив за експортиране
+@msg	check a layer to export	отметнете слой за експортиране
+@msg	select the art to export first	първо изберете графиката за експортиране
 @msg	choice must be "merge" or "add", not `{choice}`	изборът трябва да бъде "merge" или "add", а не `{choice}`
 @msg	choose a direction to divide in	изберете посока за разделяне
 @msg	choose a folder to export to	изберете папка за експортиране
@@ -3739,6 +3783,7 @@ axis	Both	И двете
 @msg	no saved presets	няма запазени предварителни настройки
 @msg	no saved print preset named `{name}` ({DEFAULT_PRESET} is protected: start a new one from it)	няма запазена предварителна настройка за печат с име „{name}“ ({DEFAULT_PRESET} е защитена: създайте нова от нея)
 @msg	no saved profiles	няма запазени профили
+@msg	no saved selection recalled	няма възстановена запазена селекция
 @msg	no saved selections	няма запазени селекции
 @msg	no saved themes	няма запазени теми
 @msg	no segment {segment} on line {line}	няма сегмент {segment} на ред {line}
@@ -3820,7 +3865,7 @@ axis	Both	И двете
 @msg	recovery copy `{file}`: {e}	възстановяване на копие `{file}`: {e}
 @msg	resolutions must be between 1 and 2400 ppi	резолюциите трябва да бъдат между 1 и 2400 ppi
 @msg	result would exceed the canvas (coordinates out of range)	резултатът ще надвиши платното (координатите са извън обхвата)
-@msg	objects can't be nested more than 32 deep	 обектите не могат да бъдат вложени на повече от 32 нива
+@msg	objects can't be nested more than 64 deep	 обектите не могат да бъдат вложени на повече от 64 нива
 @msg	the SVG's elements are nested more than {0} deep	 елементите на SVG са вложени на повече от {0} нива
 @msg	scale must be a number from {_1} to {_2}, not {_3}	мащабът трябва да е число от {_1} до {_2}, а не {_3}
 @msg	scale must be a number from {_1} to {_2}, not {s}	мащабът трябва да е число от {_1} до {_2}, а не {s}
@@ -4870,6 +4915,7 @@ theme	Appearance	Външен вид
 	Darkness	Затъмняване
 	Isolate Selected Object	Изолиране на избрания обект
 	Keep selected	Запазване на избора
+	Merge only with selection	Сливане само с избраното
 	Sample Color from Screen	Взимане на цвят от екрана
 	The active document changed while the screen color sampler was open	Активният документ се промени, докато взимането на цвят от екрана беше отворено
 	This system has no screen color sampler	Тази система няма инструмент за взимане на цвят от екрана
@@ -4878,6 +4924,7 @@ theme	Appearance	Външен вид
 
 # Type › Reset Tracking and Kerning
 	Reset Tracking and Kerning	Нулиране на разредката и кернинга
+	Reset Horizontal Scale	Нулиране на хоризонталния мащаб
 @msg	span must be "object" or "selection", got {v}	span трябва да е "object" или "selection", а не {v}
 @msg	span: "selection" places a `gradient`, not a swatch	span: "selection" поставя `gradient`, а не мостра
 @msg	span: "selection" places a gradient: give `gradient`	span: "selection" поставя градиент: задайте `gradient`
@@ -4914,3 +4961,23 @@ theme	Appearance	Външен вид
 # View › Hide Template / Show Template
 	Hide Template	Скриване на шаблона
 	Show Template	Показване на шаблона
+
+# User Interface › Accent Color
+	Accent Color	Цвят на акцента
+	Amber	Кехлибарен
+	Coral	Коралов
+	Violet	Виолетов
+	Sketch	Скица
+	Halftone Pattern…	Полутонов шаблон…
+	Halftone Pattern	Полутонов шаблон
+	Pattern Type	Тип шаблон
+	Dot	Точка
+# User Interface › Color Scheme
+	Color Scheme	Цветова схема
+	Modern	Модерна
+
+# Symbol Options › Export Type
+	Export Type:	Тип на експортиране:
+	Movie Clip	Филмов клип
+@msg	name is empty	името е празно
+@msg	no symbol named `{n}`	няма символ с име `{n}`

@@ -177,6 +177,7 @@
 	Join	Połącz
 	Average…	Uśrednij…
 	Outline Stroke	Obrys konturu
+	Outline Object	Kontur obiektu
 	Offset Path…	Odsuń ścieżkę…
 	Reverse Path Direction	Odwróć kierunek ścieżki
 	Simplify…	Uprość…
@@ -351,6 +352,7 @@
 	Area Text Objects	Obiekty tekstu akapitowego
 	Start Global Edit	Rozpocznij edycję globalną
 	Save Selection…	Zapisz zaznaczenie…
+	Update Selection	Aktualizuj zaznaczenie
 	Edit Selection…	Edytuj zaznaczenie…
 	Effect	Efekt
 	Apply Last Effect	Zastosuj ostatni efekt
@@ -448,6 +450,7 @@
 	Actual Size	Rzeczywisty rozmiar
 	Rotate View	Obróć widok
 	Reset Rotate View	Resetuj obrót widoku
+	Rotate View to Selection	Obróć widok do zaznaczenia
 	Hide Edges	Ukryj krawędzie
 	Show Edges	Pokaż krawędzie
 	Hide Artboards	Ukryj obszary kompozycji
@@ -1493,6 +1496,9 @@ lighting	Light	Światło
 	Updated {} image(s)	Zaktualizowane obrazy: {}
 	Break Link	Zerwij łącze
 	Tolerance:	Tolerancja:
+	Corner Point Angle Threshold:	Próg kąta punktów narożnych:
+	Convert to Straight Lines	Konwertuj na linie proste
+	Show Original Path	Pokaż oryginalną ścieżkę
 	Transparency Options	Opcje przezroczystości
 	Color Mixer (Shift-click the chip)	Mikser kolorów (kliknij próbkę z Shift)
 	Fill: click for swatches, Shift-click for the color mixer	Wypełnienie: kliknij, aby wybrać próbkę, z Shift — mikser kolorów
@@ -1517,6 +1523,14 @@ lighting	Light	Światło
 	Every-line Composer	Kompozytor wielowierszowy
 	First-line Left Indent	Wcięcie pierwszego wiersza
 	Hyphenation…	Dzielenie wyrazów…
+	Words Longer Than:	Wyrazy dłuższe niż:
+	After First:	Po pierwszych:
+	Before Last:	Przed ostatnimi:
+	Hyphen Limit:	Limit łączników:
+	Hyphenation Zone:	Strefa dzielenia:
+	letters	liter
+	hyphens	łączników
+	Hyphenate Capitalized Words	Dziel wyrazy pisane wielką literą
 	Justification…	Justowanie…
 	Justify with last line aligned center	Justuj z ostatnim wierszem do środka
 	Justify with last line aligned right	Justuj z ostatnim wierszem do prawej
@@ -2017,6 +2031,7 @@ lighting	Light	Światło
 	Fidelity:	Wierność:
 	Fill new strokes	Wypełniaj nowe pociągnięcia
 	Keep selected	Zachowaj zaznaczenie
+	Merge only with selection	Scalaj tylko z zaznaczeniem
 	The document has no colour swatches.	Dokument nie zawiera próbek kolorów.
 	Style Name:	Nazwa stylu:
 	Crop To	Kadruj do
@@ -2528,6 +2543,32 @@ lighting	Light	Światło
 	Summary	Podsumowanie
 	Download	Pobierz
 	Export Artboard	Eksportuj obszar kompozycji
+	A File per Object	Jeden plik na obiekt
+	Example: {name}	Przykład: {name}
+	Export Preset:	Ustawienie eksportu:
+	Folders:	Foldery:
+	Insert	Wstaw
+	Nothing is selected. Select the art to export, then open this tab again.	Nic nie zaznaczono. Zaznacz grafikę do eksportu i ponownie otwórz tę kartę.
+	One File of the Selection	Jeden plik z zaznaczenia
+	Start at:	Zacznij od:
+	{n} objects selected	Zaznaczone obiekty: {n}
+	Delete Export Preset	Usuń ustawienie eksportu
+	Export Presets	Ustawienia eksportu
+	Save Export Preset	Zapisz ustawienie eksportu
+	Export Layer	Eksportuj warstwę
+	Export Selection	Eksportuj zaznaczenie
+	All in One Folder	Wszystko w jednym folderze
+	By Size or Row	Według rozmiaru lub wiersza
+	By Format	Według formatu
+	By Artboard or Item	Według obszaru roboczego lub elementu
+	By Item, Then Format	Według elementu, potem formatu
+	Document Name	Nazwa dokumentu
+	Artboard or Item Name	Nazwa obszaru roboczego lub elementu
+	Number (####)	Numer (####)
+	Date (YYYYMMDD)	Data (RRRRMMDD)
+	Date (YYYY-MM-DD)	Data (RRRR-MM-DD)
+	Time (hhmmss)	Godzina (hhmmss)
+	PDF Print	PDF do druku
 	Encoding:	Kodowanie:
 	Line Endings:	Znaki końca wiersza:
 	Text Export Options	Opcje eksportu tekstu
@@ -3313,8 +3354,11 @@ axis	Both	Obie
 	Duplicate Artboard	Powiel obszar kompozycji
 	Area / Path Type	Tekst akapitowy / na ścieżce
 	Decrease Font Size	Zmniejsz rozmiar czcionki
+	Decrease Font Size by Five Steps	Zmniejsz rozmiar czcionki o pięć kroków
 	Increase Font Size	Zwiększ rozmiar czcionki
+	Increase Font Size by Five Steps	Zwiększ rozmiar czcionki o pięć kroków
 	Reset Tracking and Kerning	Resetuj światło i kerning
+	Reset Horizontal Scale	Resetuj skalę poziomą
 	Step Type	Krok tekstu
 	Get Text Range	Pobierz zakres tekstu
 	Punctuation	Interpunkcja
@@ -3815,6 +3859,8 @@ imageTrace	Outline	Kontur
 @msg	cannot split an open path at its end point	nie można podzielić otwartej ścieżki w jej punkcie końcowym
 @msg	closing needs three anchors	zamknięcie wymaga trzech punktów
 @msg	check an asset to export	zaznacz zasób do eksportu
+@msg	check a layer to export	zaznacz warstwę do eksportu
+@msg	select the art to export first	najpierw zaznacz grafikę do eksportu
 @msg	choice must be "merge" or "add", not `{choice}`	wybór musi mieć wartość "merge" lub "add", nie `{choice}`
 @msg	choose a direction to divide in	wybierz kierunek podziału
 @msg	choose a folder to export to	wybierz folder docelowy eksportu
@@ -3926,6 +3972,7 @@ imageTrace	Outline	Kontur
 @msg	no saved presets	brak zapisanych ustawień
 @msg	no saved print preset named `{name}` ({DEFAULT_PRESET} is protected: start a new one from it)	brak zapisanego ustawienia drukowania o nazwie `{name}` ({DEFAULT_PRESET} jest chronione: utwórz na jego podstawie nowe)
 @msg	no saved profiles	brak zapisanych profili
+@msg	no saved selection recalled	nie przywołano zapisanego zaznaczenia
 @msg	no saved selections	brak zapisanych zaznaczeń
 @msg	no saved themes	brak zapisanych motywów
 @msg	no segment {segment} on line {line}	brak segmentu {segment} na linii {line}
@@ -4008,7 +4055,7 @@ imageTrace	Outline	Kontur
 @msg	recovery copy `{file}`: {e}	kopia odzyskiwania `{file}`: {e}
 @msg	resolutions must be between 1 and 2400 ppi	rozdzielczości muszą mieścić się w zakresie od 1 do 2400 ppi
 @msg	result would exceed the canvas (coordinates out of range)	wynik wykroczyłby poza płótno (współrzędne poza zakresem)
-@msg	objects can't be nested more than 32 deep	obiektów nie można zagnieżdżać głębiej niż na 32 poziomy
+@msg	objects can't be nested more than 64 deep	obiektów nie można zagnieżdżać głębiej niż na 64 poziomy
 @msg	the SVG's elements are nested more than {0} deep	elementy SVG są zagnieżdżone głębiej niż na {0} poziomów
 @msg	scale must be a number from {_1} to {_2}, not {_3}	skala musi być liczbą od {_1} do {_2}, nie {_3}
 @msg	scale must be a number from {_1} to {_2}, not {s}	skala musi być liczbą od {_1} do {_2}, nie {s}
@@ -4777,3 +4824,24 @@ mark-style	Japanese	Japońskie
 @msg	open a document with data sets	otwórz dokument z zestawami danych
 @msg	the action has no steps	operacja nie ma kroków
 @msg	{what}: this editor works on one file only	{what}: ten edytor pracuje tylko na jednym pliku
+
+# User Interface › Accent Color
+	Accent Color	Kolor akcentu
+	Amber	Bursztynowy
+	Coral	Koralowy
+	Violet	Fioletowy
+	Pink	Różowy
+	Sketch	Szkic
+	Halftone Pattern…	Wzór rastra…
+	Halftone Pattern	Wzór rastra
+	Pattern Type	Typ wzoru
+	Dot	Kropka
+# User Interface › Color Scheme
+	Color Scheme	Schemat kolorów
+	Modern	Nowoczesny
+
+# Symbol Options › Export Type
+	Export Type:	Typ eksportu:
+	Movie Clip	Klip filmowy
+@msg	name is empty	nazwa jest pusta
+@msg	no symbol named `{n}`	brak symbolu o nazwie `{n}`

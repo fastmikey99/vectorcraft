@@ -4,7 +4,7 @@ members = ["crates/*", "apps/*", "xtask"]
 default-members = ["crates/*", "apps/vectorcraft", "apps/vectorcraft-cli", "xtask"]
 
 [workspace.package]
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.95"
@@ -47,7 +47,7 @@ kurbo = { version = "0.13", features = ["serde"] }
 peniko = "0.6"
 thiserror = "2"
 serde = { version = "1", features = ["derive", "rc"] }
-serde_json = { version = "1", features = ["float_roundtrip"] }
+serde_json = { version = "1", features = ["float_roundtrip", "unbounded_depth"] }
 log = "0.4"
 proptest = "1"
 crc32fast = "1.5"

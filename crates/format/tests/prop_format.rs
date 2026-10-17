@@ -260,3 +260,47 @@ fn saved_selections_from_a_file_are_tidied() {
     v["document"]["saved_selections"] = json!([{"name": 5, "objects": "x"}]);
     assert!(load(&serde_json::to_vec(&v).unwrap()).is_err());
 }
+
+/// The editable tree cap must survive native save/reopen, including the additional JSON
+/// wrappers of clipping groups and opacity-mask art, in plain, compressed and blob formats.
+#[test]
+fn maximum_editable_nesting_roundtrips_without_losing_clips_or_masks() {
+    use std::sync::Arc;
+    use vectorcraft_doc::{Appearance, OpacityMask};
+    use vectorcraft_geom::{Rect, shapes};
+    for kind in ["group", "clip", "mask"] {
+        let mut d = Document::new(100.0, 100.0);
+        let path = |d: &mut Document| Node::path(d.alloc_id(), shapes::rectangle(Rect::new(10.0, 10.0, 90.0, 90.0)), Appearance::default());
+        let mut art = path(&mut d);
+        for _ in 0..vectorcraft_doc::depth::MAX_DEPTH - 2 {
+            art = match kind {
+                "mask" => {
+                    let mut n = path(&mut d);
+                    n.extras_mut().mask = Some(Box::new(OpacityMask::new(art, true)));
+                    n
+                }
+                "clip" => {
+                    let mut clip = path(&mut d);
+                    if let NodeKind::Path { clipping, .. } = &mut clip.kind {
+                        *clipping = true;
+                    }
+                    Node::new(d.alloc_id(), NodeKind::Group { clip: true, children: vec![Arc::new(clip), Arc::new(art)] })
+                }
+                _ => Node::group(d.alloc_id(), vec![Arc::new(art)]),
+            };
+        }
+        let layer = d.layers[0].id;
+        d.insert(Some(layer), 0, art).unwrap();
+        assert!(!d.too_deep(None));
+        for version in [3, 4] {
+            for compress in [false, true] {
+                let opts = SaveOptions { version, compress, ..Default::default() };
+                let bytes = save_with(&d, &opts).unwrap();
+                assert!(sniff(&bytes), "{kind} v{version} compressed={compress}");
+                let back = load_file(&bytes).unwrap();
+                assert!(back.depth_notes.is_empty(), "{kind}: {:?}", back.depth_notes);
+                assert_eq!(back.doc, d, "{kind} v{version} compressed={compress}");
+            }
+        }
+    }
+}

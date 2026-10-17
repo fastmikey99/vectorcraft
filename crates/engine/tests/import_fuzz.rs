@@ -2832,9 +2832,10 @@ fn nested_svg(n: usize) -> String {
 fn deeply_nested_svg_is_refused_or_merged() {
     on_a_small_stack(|| {
         // Within what the reader takes: opened, the groups past the cap merged into the last.
-        let (doc, warnings) = open_deep("deep.svg", nested_svg(40).as_bytes()).expect("40 groups open");
+        let levels = MAX_DEPTH + 8;
+        let (doc, warnings) = open_deep("deep.svg", nested_svg(levels).as_bytes()).expect("groups beyond the editable cap open");
         assert!(merged(&warnings), "{warnings:?}");
-        assert_eq!(paths_in(&doc), 41, "no art is lost");
+        assert_eq!(paths_in(&doc), levels + 1, "no art is lost");
         let (_, warnings) = open_deep("shallow.svg", nested_svg(20).as_bytes()).expect("20 groups open");
         assert!(!merged(&warnings), "{warnings:?}");
         // As deep as the reader goes (on a stack of its own): opened and merged the same.
@@ -3527,7 +3528,7 @@ fn a_native_file_nested_too_deep_is_merged_or_refused() {
         for levels in [100, 50_000] {
             let deep = format!("{}{}{},{}", &text[..at], open.repeat(levels), close.repeat(levels), &text[at..]);
             let e = vectorcraft_engine::cmd::fileio::load("deep.vectorcraft", deep.as_bytes()).err().expect("refused").to_string();
-            assert!(e.contains("nested too deep"), "{levels}: {e}");
+            assert!(e.contains("nested") && e.contains("deep"), "{levels}: {e}");
         }
     });
 }
@@ -3619,8 +3620,10 @@ fn a_symbol_holding_itself_opens_without_the_instance() {
 #[test]
 fn symbols_in_symbols_are_drawn_only_so_deep() {
     on_a_small_stack(|| {
-        // As deep as symbols draw: each one's art as deep as art goes.
-        symbols_survive("symbols at the cap", symbols_document(3, MAX_DEPTH - 2, "none"), true);
+        // Editable depth and aggregate drawing depth have separate budgets.
+        let levels = (vectorcraft_doc::depth::MAX_DRAWN_DEPTH / 3 - 2).min(MAX_DEPTH - 2);
+        symbols_survive("symbols within the drawing cap", symbols_document(3, levels, "none"), true);
+        symbols_survive("editable groups exceeding the aggregate cap", symbols_document(3, MAX_DEPTH - 2, "none"), false);
         symbols_survive("symbols in symbols", symbols_document(40, MAX_DEPTH - 1, "none"), false);
         // A symbol can't be made to hold itself, or one that holds it, by editing either.
         let mut s = vectorcraft_engine::Session::new();

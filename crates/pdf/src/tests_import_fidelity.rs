@@ -661,3 +661,16 @@ fn production_import_rejects_depth_loss() {
     let shallow = one_page("q 50 0 m 100 50 l 50 100 l 0 50 l h W n 1 0 0 rg 0 0 100 100 re f Q", "<< >>", &[]);
     assert!(import_with_report(&shallow, &strict).is_ok());
 }
+
+/// A real production PDF can legitimately require more than the former 32 levels.
+#[test]
+fn production_import_retains_forty_eight_nested_clips() {
+    let levels = 48;
+    let content = format!("{}1 0 0 rg 0 0 100 100 re f{}", "q 50 0 m 100 50 l 50 100 l 0 50 l h W n\n".repeat(levels), " Q".repeat(levels));
+    let bytes = one_page(&content, "<< >>", &[]);
+    let strict = ImportOptions { reject_depth_loss: true, ..Default::default() };
+    let imported = import_with_report(&bytes, &strict).unwrap();
+    assert!(!imported.warnings.contains(&vectorcraft_doc::depth::merged_note()));
+    let clips = all(&imported.document).into_iter().filter(|n| matches!(n.kind, NodeKind::Group { clip: true, .. })).count();
+    assert_eq!(clips, levels);
+}

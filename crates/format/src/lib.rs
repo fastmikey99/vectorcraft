@@ -33,6 +33,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 mod atomic;
+mod json_depth;
 mod legacy;
 mod stream;
 mod unpack;
@@ -530,11 +531,7 @@ pub fn load_info(bytes: &[u8]) -> Result<(Document, FileInfo), FormatError> {
 /// [`load`], with everything else the file carries.
 pub fn load_file(bytes: &[u8]) -> Result<NativeFile, FormatError> {
     let file = unpack::Unpacked::new(bytes)?;
-    // The JSON reader stops at 128 levels (a document's objects use three each).
-    let f: File = serde_json::from_slice(file.json()).map_err(|e| {
-        let why = if e.to_string().contains("recursion limit") { format!("its objects are nested too deep ({e})") } else { e.to_string() };
-        FormatError::NotVectorcraft(why)
-    })?;
+    let f: File = json_depth::read(file.json())?;
     if f.format != EXTENSION && f.format != LEGACY_EXTENSION {
         return Err(FormatError::NotVectorcraft(format!("format is `{}`", f.format)));
     }
@@ -590,7 +587,7 @@ struct Head {
 /// the JSON is kept).
 fn head_member(bytes: &[u8], pick: impl FnOnce(Head) -> Option<Image>) -> Option<Vec<u8>> {
     let file = unpack::Unpacked::new(bytes).ok()?;
-    let head: Head = serde_json::from_slice(file.json()).ok()?;
+    let head: Head = json_depth::read(file.json()).ok()?;
     let img = pick(head)?;
     match img.blob {
         Some(at) => file.entries(&[at]).ok()?.pop().flatten(),
