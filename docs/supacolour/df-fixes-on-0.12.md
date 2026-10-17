@@ -49,3 +49,12 @@ Validation: affected-crate test run passed (119 colour and 323 PDF unit tests,
 plus integrations); affected-crate clippy with `--all-targets -- -D warnings`
 and `cargo fmt --all -- --check` passed. Full commands are recorded below as
 the remaining ports land.
+
+## 3. PNG colour declaration — b4f7f61f
+
+**Ported.** PNG and indexed PNG exports now carry the perceptual sRGB chunk.
+Restored `png_exports_say_their_colours_are_srgb`, also checking resolution
+metadata and successful decoding for both formats.
+
+Validation: engine (2,263 unit tests) and render (305 unit tests), plus their
+integration tests, passed in the affected-crate run. Clippy and fmt passed.
