@@ -36,6 +36,8 @@ pub struct Component {
 #[derive(Clone, Debug, Default)]
 pub struct State {
     pub context: Option<Context>,
+    /// Per-document ink visibility. Never changes the global proof view or saved artwork.
+    pub plates: Option<Vec<String>>,
     pub hidden: BTreeSet<NodeId>,
 }
 #[derive(Clone, Debug)]
@@ -99,12 +101,19 @@ fn configure(s: &mut Session, p: &Value) -> Result<Value> {
         .map_err(|e| bad("production.separations.configure", e.to_string()))?;
     c.validate().map_err(|e| bad("production.separations.configure", e))?;
     let d = s.doc_mut()?;
-    d.production_separations = State { context: Some(c), ..Default::default() };
+    let plates = proof::plates(&d.doc).into_iter().map(|p| p.name).collect();
+    d.production_separations = State { context: Some(c), plates: Some(plates), ..Default::default() };
     d.revision += 1;
-    let mut v = proof::view();
-    v.separations = None;
-    proof::set_view(v);
     list(s, &json!({}))
+}
+
+/// Canvas-only proof configuration: a production preview belongs to this document, not
+/// every open file (and never an export). Retain the user's configured proof profile.
+pub fn active_proof(st: &crate::DocState) -> Option<proof::ProofSetup> {
+    match &st.production_separations.plates {
+        Some(plates) => Some(proof::ProofSetup { separations: Some(plates.clone()), ..proof::view().setup }),
+        None => proof::active_proof(),
+    }
 }
 
 /// Own paints only; descendants are walked separately so selecting a plate does not select
@@ -192,6 +201,12 @@ pub fn rows(s: &Session) -> Vec<Row> {
             }
         }
     });
+    // Reporter supplies file links in recipe layer order. Keep that display order rather
+    // than alphabetising plate names (which puts WP above WHP). Unknown inks remain stable.
+    if let Some(c) = context {
+        result
+            .sort_by_key(|row| if row.name == "CMYK" { 0 } else { c.inks.iter().position(|ink| ink.name == row.name).map_or(usize::MAX, |i| i + 1) });
+    }
     result
 }
 fn list(s: &mut Session, _: &Value) -> Result<Value> {
@@ -203,7 +218,8 @@ fn preview(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "production.separations.preview";
     if p.get("reset").and_then(Value::as_bool) == Some(true) {
         s.doc_mut()?.production_separations.hidden.clear();
-        s.execute("view.separationsPreview", &json!({"on":false}))?;
+        let plates: Vec<_> = proof::plates(&s.doc()?.doc).into_iter().map(|p| p.name).collect();
+        s.doc_mut()?.production_separations.plates = Some(plates);
     } else if let Some(c) = p.get("component") {
         let rs = rows(s);
         let ids = rs
@@ -223,7 +239,12 @@ fn preview(s: &mut Session, p: &Value) -> Result<Value> {
         }
         d.selection.clear();
     } else if let Some(plates) = p.get("plates") {
-        s.execute("view.separationsPreview", &json!({"plates":plates}))?;
+        let all: BTreeSet<_> = proof::plates(&s.doc()?.doc).into_iter().map(|p| p.name).collect();
+        let plates: Vec<String> = serde_json::from_value(plates.clone()).map_err(|e| bad(C, e.to_string()))?;
+        if plates.iter().any(|p| !all.contains(p)) {
+            return Err(bad(C, "Unknown separation"));
+        }
+        s.doc_mut()?.production_separations.plates = Some(plates);
         s.doc_mut()?.selection.clear();
     } else {
         return Err(bad(C, "Choose plates, a component or reset"));
@@ -328,6 +349,80 @@ mod tests {
         assert_eq!(serde_json::to_value(&s.doc().unwrap().doc).unwrap(), before);
         proof::set_view(Default::default());
     }
+    #[test]
+    fn production_rows_follow_recipe_order_without_ink_name_rules() {
+        let _g = crate::tests_colormgmt::GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = fixture();
+        s.execute(
+            "production.separations.configure",
+            &json!({"context": {
+                "label":"Recipe order", "source_layers":[], "inks":[
+                    {"name":"Unknown ink","destination":"Screen","components":[]},
+                    {"name":"Custom 123","destination":"Screen","components":[]},
+                    {"name":"WHP","destination":"Screen","components":[]}
+                ]
+            }}),
+        )
+        .unwrap();
+        let names: Vec<_> = rows(&s).into_iter().map(|r| r.name).collect();
+        assert_eq!(names, ["CMYK", "Unknown ink", "Custom 123", "WHP"]);
+        proof::set_view(Default::default());
+    }
+
+    #[test]
+    fn production_preview_load_and_show_all_keep_the_same_composite_without_editing_art() {
+        let _g = crate::tests_colormgmt::GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        proof::set_view(Default::default());
+        let mut s = fixture();
+        // An opaque plate drawn over artwork reproduces the production-PDF display problem:
+        // ordinary viewing covers the artwork, separation preview honours the overprint.
+        s.execute("swatch.new", &json!({"name":"WP","color":"#d4dc98","spot":true})).unwrap();
+        let id = s.execute("shape.rectangle", &json!({"x":0,"y":0,"width":100,"height":100})).unwrap()["id"].as_u64().unwrap();
+        s.execute("paint.setFill", &json!({"ids":[id],"swatch":"WP"})).unwrap();
+        s.execute("paint.setStroke", &json!({"ids":[id],"none":true})).unwrap();
+        let d = s.doc_mut().unwrap();
+        let n = std::sync::Arc::make_mut(&mut d.doc).node_mut(NodeId(id)).unwrap();
+        for item in &mut n.appearance.items {
+            *item.overprint_mut() = true;
+        }
+        d.mark_saved();
+        let before = serde_json::to_value(&s.doc().unwrap().doc).unwrap();
+        let mut renderer = vectorcraft_render::Renderer::new();
+        renderer.threads = 0;
+        let render = |renderer: &mut vectorcraft_render::Renderer, s: &Session| {
+            renderer
+                .render(
+                    &s.doc().unwrap().doc,
+                    100,
+                    100,
+                    vectorcraft_geom::Affine::IDENTITY,
+                    &vectorcraft_render::RenderOptions {
+                        proof: active_proof(s.doc().unwrap()),
+                        overprint_preview: proof::overprint_preview_on(),
+                        ..Default::default()
+                    },
+                )
+                .pixel(50, 50)
+        };
+        let ordinary = render(&mut renderer, &s);
+        configure(&mut s);
+        let initial = render(&mut renderer, &s);
+        assert_ne!(initial, ordinary, "load must not present the covering powder plate");
+        let all = s.doc().unwrap().production_separations.plates.clone().unwrap();
+        s.execute("production.separations.preview", &json!({"plates":["WHP"]})).unwrap();
+        assert_ne!(render(&mut renderer, &s), initial);
+        s.execute("production.separations.preview", &json!({"reset":true})).unwrap();
+        assert_eq!(s.doc().unwrap().production_separations.plates, Some(all.clone()));
+        assert!(proof::view().separations.is_none(), "production preview must not leak into other documents");
+        assert_eq!(render(&mut renderer, &s), initial);
+        // Returning each eye to visible produces the same image as Show all.
+        s.execute("production.separations.preview", &json!({"plates":all})).unwrap();
+        assert_eq!(render(&mut renderer, &s), initial);
+        assert_eq!(serde_json::to_value(&s.doc().unwrap().doc).unwrap(), before);
+        assert!(!s.doc().unwrap().is_dirty());
+        proof::set_view(Default::default());
+    }
+
     #[test]
     fn production_separations_rejects_invalid_context_without_replacing_existing_context() {
         let _g = crate::tests_colormgmt::GLOBAL.lock().unwrap_or_else(|e| e.into_inner());

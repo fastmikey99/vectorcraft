@@ -182,3 +182,16 @@ ready replies must not reopen the document. Context is supplied on each host ope
 it is not embedded as production recipe authority in the PDF. Named object groups
 persist in native documents; public PDF import cannot reconstruct group roles that
 were flattened or omitted by an exporter.
+
+### Production preview and floating panels (2026-10-17)
+
+Host configuration starts the ink composite immediately, with visibility stored on
+that document rather than in the global proof settings. Show all restores every
+plate and component using that same separation-preview mode; it does not return
+to ordinary PDF painting, where an opaque top powder plate can hide the artwork.
+The recipe-provided ink order is retained within the production panel. These are
+view settings only: PDF geometry, stacking, ink names and saved output are unchanged.
+Shared docking now supplies opaque panel and tab backgrounds to floating groups.
+Regression coverage compares actual composite pixels across load, ink isolation
+and Show all, verifies the source document stays unchanged, and inspects the
+floating panel's painted background.
