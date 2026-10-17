@@ -311,6 +311,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     };
     let production_proof = vectorcraft_engine::cmd::production_separations::active_proof(st);
     let production_knockout = vectorcraft_engine::cmd::production_separations::knockout(st);
+    let production_overprint = vectorcraft_engine::cmd::production_separations::overprint_preview(st);
     // Placed documents' bitmaps are being made: draw again when they are ready.
     if vectorcraft_render::placed_document::busy() {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(30));
@@ -346,7 +347,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         let opts = vectorcraft_render::RenderOptions { outline: app.ui.view.outline, background: None, artboards: false, ..Default::default() };
         let opts = vectorcraft_render::RenderOptions {
             proof: production_proof,
-            overprint_preview: vectorcraft_render::proof::overprint_preview_on(),
+            overprint_preview: production_overprint,
             knockout_separations: production_knockout,
             trim: app.ui.view.trim_view,
             hide_templates: !app.ui.view.templates,

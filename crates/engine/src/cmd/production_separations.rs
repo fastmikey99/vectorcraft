@@ -127,6 +127,13 @@ pub fn knockout(st: &crate::DocState) -> bool {
     st.production_separations.plates.is_some() && !st.production_separations.overprint
 }
 
+/// [`vectorcraft_render::RenderOptions::overprint_preview`] for this document: while the
+/// production preview owns it, the panel's checkbox alone decides (the global View →
+/// Overprint Preview / Separations Preview belong to ordinary documents).
+pub fn overprint_preview(st: &crate::DocState) -> bool {
+    if st.production_separations.plates.is_some() { st.production_separations.overprint } else { proof::overprint_preview_on() }
+}
+
 /// Own paints only; descendants are walked separately so selecting a plate does not select
 /// a mixed-ink parent group. Images/meshes without a named swatch belong to composite art.
 fn own_inks(doc: &Document, n: &Node) -> BTreeSet<String> {
@@ -227,8 +234,15 @@ fn list(s: &mut Session, _: &Value) -> Result<Value> {
 }
 fn preview(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "production.separations.preview";
-    if let Some(on) = p.get("overprint").and_then(Value::as_bool) {
-        s.doc_mut()?.production_separations.overprint = on;
+    let overprint = match p.get("overprint") {
+        None => None,
+        Some(v) => Some(v.as_bool().ok_or_else(|| bad(C, "overprint must be true or false"))?),
+    };
+    if overprint.is_some() && p.get("reset").is_none() && p.get("component").is_none() && p.get("plates").is_none() {
+        let all: Vec<_> = proof::plates(&s.doc()?.doc).into_iter().map(|p| p.name).collect();
+        let d = s.doc_mut()?;
+        // Turning it on or off starts the production preview if nothing else has yet.
+        d.production_separations.plates.get_or_insert(all);
     } else if p.get("reset").and_then(Value::as_bool) == Some(true) {
         s.doc_mut()?.production_separations.hidden.clear();
         let plates: Vec<_> = proof::plates(&s.doc()?.doc).into_iter().map(|p| p.name).collect();
@@ -261,6 +275,9 @@ fn preview(s: &mut Session, p: &Value) -> Result<Value> {
         s.doc_mut()?.selection.clear();
     } else {
         return Err(bad(C, "Choose plates, a component, overprint or reset"));
+    }
+    if let Some(on) = overprint {
+        s.doc_mut()?.production_separations.overprint = on;
     }
     s.doc_mut()?.revision += 1;
     ok()
@@ -411,7 +428,7 @@ mod tests {
                     vectorcraft_geom::Affine::IDENTITY,
                     &vectorcraft_render::RenderOptions {
                         proof: active_proof(s.doc().unwrap()),
-                        overprint_preview: proof::overprint_preview_on(),
+                        overprint_preview: overprint_preview(s.doc().unwrap()),
                         knockout_separations: knockout(s.doc().unwrap()),
                         ..Default::default()
                     },
@@ -433,6 +450,10 @@ mod tests {
         assert!(s.doc().unwrap().production_separations.overprint);
         s.execute("production.separations.preview", &json!({"overprint":false})).unwrap();
         assert_eq!(render(&mut renderer, &s), covered);
+        // The global Separations Preview (which implies overprinting) doesn't override the box.
+        proof::set_view(proof::ProofView { separations: Some(vec!["WP".into()]), overprint: true, ..Default::default() });
+        assert_eq!(render(&mut renderer, &s), covered);
+        proof::set_view(Default::default());
         s.execute("production.separations.preview", &json!({"overprint":true})).unwrap();
         let all = s.doc().unwrap().production_separations.plates.clone().unwrap();
         s.execute("production.separations.preview", &json!({"plates":["WHP"]})).unwrap();
@@ -445,6 +466,27 @@ mod tests {
         s.execute("production.separations.preview", &json!({"plates":all})).unwrap();
         assert_eq!(render(&mut renderer, &s), initial);
         assert_eq!(serde_json::to_value(&s.doc().unwrap().doc).unwrap(), before);
+        assert!(!s.doc().unwrap().is_dirty());
+        proof::set_view(Default::default());
+    }
+
+    #[test]
+    fn production_overprint_combines_with_other_preview_changes_and_starts_the_preview() {
+        let _g = crate::tests_colormgmt::GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        proof::set_view(Default::default());
+        let mut s = fixture();
+        // Unconfigured document: the checkbox alone starts the production preview.
+        assert!(s.doc().unwrap().production_separations.plates.is_none());
+        s.execute("production.separations.preview", &json!({"overprint":true})).unwrap();
+        assert!(s.doc().unwrap().production_separations.plates.is_some());
+        assert!(overprint_preview(s.doc().unwrap()) && !knockout(s.doc().unwrap()));
+        // Combined with another change, both apply; an invalid one applies neither.
+        s.execute("production.separations.preview", &json!({"overprint":false,"plates":["WHP"]})).unwrap();
+        assert_eq!(s.doc().unwrap().production_separations.plates, Some(vec!["WHP".to_string()]));
+        assert!(knockout(s.doc().unwrap()));
+        assert!(s.execute("production.separations.preview", &json!({"overprint":true,"plates":["Nope"]})).is_err());
+        assert!(!s.doc().unwrap().production_separations.overprint);
+        assert!(s.execute("production.separations.preview", &json!({"overprint":"yes"})).is_err());
         assert!(!s.doc().unwrap().is_dirty());
         proof::set_view(Default::default());
     }
