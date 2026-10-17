@@ -28,7 +28,6 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         widgets::dim_label(ui, tl!("No document open."));
         return;
     };
-    let context = st.production_separations.context.clone();
     let hidden = st.production_separations.hidden.clone();
     let selected = st.selection.objects.clone();
     let rows = rows(app, ui.ctx());
@@ -101,14 +100,6 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
                 });
             }
         });
-    }
-    widgets::divider(ui);
-    widgets::dim_label(ui, tl!("Eyes change preview only. All artwork is saved."));
-    widgets::dim_label(ui, tl!("Existing groups only."));
-    if let Some(context) = context {
-        widgets::dim_label(ui, &context.label);
-    } else {
-        widgets::dim_label(ui, tl!("No recipe context."));
     }
 }
 

@@ -138,3 +138,21 @@ fn production_context_is_validated_before_replacing_the_file_and_installed_befor
     assert!(results.lock().unwrap()[1].is_ok());
     assert!(!app.session.active().unwrap().is_dirty());
 }
+
+#[test]
+fn reopening_a_separation_keeps_its_docked_panel_in_place() {
+    use vectorcraft_engine::cmd::production_separations::Context;
+    let (mut app, _, host) = single();
+    app.run("window.panel.dock", serde_json::json!({"panel":"productionSeparations", "onto":"properties"})).unwrap();
+    let layout = serde_json::to_value(&app.ui.docking).unwrap();
+    host.lock().unwrap().push(HostOpen {
+        name: "docked.svg".into(),
+        bytes: SQUARE.to_vec(),
+        print_production: false,
+        separations: Some(Context { label: "Reporter".into(), ..Default::default() }),
+    });
+    app.drain_inbox();
+    assert_eq!(app.ui.open_panel, None, "a docked panel must not also pop out over the artwork");
+    assert_eq!(serde_json::to_value(&app.ui.docking).unwrap(), layout);
+    assert_eq!(titles(&app), ["docked.svg"]);
+}
