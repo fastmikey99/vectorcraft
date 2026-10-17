@@ -80,7 +80,13 @@ pub fn show(app: &mut VectorcraftApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
     let q = app.ui.palette_query.to_lowercase();
     let entries = entries(ctx, crate::i18n::current());
-    let matches: Vec<&Entry> = entries.iter().filter(|e| q.split_whitespace().all(|w| e.haystack.contains(w))).take(14).collect();
+    let single = app.services.single_document;
+    let matches: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| !(single && menus::blocked_in_single_document(&e.id)))
+        .filter(|e| q.split_whitespace().all(|w| e.haystack.contains(w)))
+        .take(14)
+        .collect();
     let mut run: Option<String> = None;
     // The highlighted result (#1757): Up and Down move it (wrapping), the pointer over a result
     // takes it, and a new query starts again from the first.

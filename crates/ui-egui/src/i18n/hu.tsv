@@ -4899,3 +4899,4 @@ imageTrace	Outline	Körvonal
 @msg	choose a source folder	válasszon forrásmappát
 @msg	open a document with data sets	nyisson meg egy adatkészleteket tartalmazó dokumentumot
 @msg	the action has no steps	a műveletnek nincsenek lépései
+@msg	{what}: this editor works on one file only	{what}: ez a szerkesztő csak egy fájllal dolgozik

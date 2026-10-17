@@ -1817,6 +1817,26 @@ fn effect_item_label(id: &str, p: &Value) -> Option<String> {
     (!shown.is_empty()).then(|| shown.to_string())
 }
 
+/// Commands that create, open or close a document, which a single-document editor
+/// ([`crate::Services::single_document`]) neither runs nor shows.
+pub fn blocked_in_single_document(id: &str) -> bool {
+    matches!(
+        id,
+        "file.new"
+            | "file.newDialog"
+            | "file.newFromTemplate"
+            | "document.open"
+            | "file.open"
+            | "file.clearRecent"
+            | "file.reveal"
+            | "file.close"
+            | "file.closeAll"
+            | "file.recovery.restore"
+            | "app.home"
+            | "app.quit"
+    ) || id.starts_with("file.openRecent")
+}
+
 /// Menu slots that are left out while they have nothing to show (unused saved views, recent files,
 /// User Defined swatch and graphic style libraries).
 fn hidden_when_disabled(id: &str) -> bool {
@@ -1890,7 +1910,8 @@ fn recent_slot<'a>(app: &'a VectorcraftApp, id: &str) -> Option<&'a String> {
 /// another stands in for ([`swapped_out`]).
 pub fn shown_state(app: &VectorcraftApp, id: &str, p: &Value) -> Option<(bool, Option<bool>)> {
     let en = enabled(app, id);
-    if (!en && hidden_when_disabled(id)) || swapped_out(app, id) {
+    let left_out = hidden_when_disabled(id) || (app.services.single_document && blocked_in_single_document(id));
+    if (!en && left_out) || swapped_out(app, id) {
         return None;
     }
     Some((en, checked(app, id, p)))
@@ -1935,7 +1956,9 @@ pub fn entry<'a>(app: &VectorcraftApp, it: &'a Item) -> Option<Entry<'a>> {
     Some(match it {
         Item::Sep => Entry::Sep,
         Item::Header(h) => Entry::Header(t(h)),
-        Item::Sub(label, children) => Entry::Sub(t(label), children),
+        // A submenu none of whose items show is left out too.
+        Item::Sub(label, children) if shows_any(app, children) => Entry::Sub(t(label), children),
+        Item::Sub(..) => return None,
         Item::Todo(label, sc) => Entry::Item(Row {
             command: None,
             source: label,
@@ -2060,7 +2083,7 @@ pub(crate) fn waits_for_ime(app: &VectorcraftApp, id: &str) -> bool {
 }
 
 pub fn enabled(app: &VectorcraftApp, id: &str) -> bool {
-    if waits_for_ime(app, id) {
+    if waits_for_ime(app, id) || (app.services.single_document && blocked_in_single_document(id)) {
         return false;
     }
     if let Some(c) = vectorcraft_engine::find_command(id) {
@@ -3057,6 +3080,15 @@ fn menu_body(app: &VectorcraftApp, ui: &mut egui::Ui, items: &[Item], clicked: &
 
 /// `items` as menu buttons; with `checks`, items that can be on or off show a check mark (or the
 /// room for one).
+/// Does any of `items` show (a separator or header alone doesn't count)?
+fn shows_any(app: &VectorcraftApp, items: &[Item]) -> bool {
+    items.iter().any(|it| match it {
+        Item::Sep | Item::Header(_) => false,
+        Item::Sub(_, children) => shows_any(app, children),
+        it => entry(app, it).is_some(),
+    })
+}
+
 fn render_items(app: &VectorcraftApp, ui: &mut egui::Ui, items: &[Item], checks: bool, clicked: &mut Option<(String, Value)>) {
     let t = Tokens::get(ui.ctx());
     for e in items.iter().filter_map(|it| entry(app, it)) {
@@ -3127,7 +3159,8 @@ pub(crate) fn home_key(app: &VectorcraftApp) -> (Option<u64>, usize) {
 /// and Preferences › General › Show The Home Screen When No Documents Are Open is on (#394). Off,
 /// an app with no document shows an empty window, and the Home button still opens the screen.
 pub(crate) fn home_showing(app: &VectorcraftApp) -> bool {
-    app.ui.home.is_some() || (app.session.active().is_none() && app.session.prefs.show_home_screen)
+    // A single-document editor has no Home screen: its New and Open don't apply.
+    !app.services.single_document && (app.ui.home.is_some() || (app.session.active().is_none() && app.session.prefs.show_home_screen))
 }
 
 /// What a menu click runs: items whose label ends with "…" and that carry default params open a

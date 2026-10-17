@@ -4988,13 +4988,18 @@ dependencies = [
 name = "vectorcraft-web"
 version = "0.11.0"
 dependencies = [
+ "craft-pdf",
  "eframe",
  "egui",
  "js-sys",
  "log",
  "rfd",
+ "serde_json",
+ "vectorcraft-color",
+ "vectorcraft-doc",
  "vectorcraft-engine",
  "vectorcraft-format",
+ "vectorcraft-geom",
  "vectorcraft-text",
  "vectorcraft-ui-egui",
  "wasm-bindgen",

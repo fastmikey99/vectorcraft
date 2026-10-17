@@ -132,6 +132,9 @@ pub fn open_document(app: &mut VectorcraftApp, name: &str, bytes: &[u8], path: O
 /// A document just opened (`r`: `document.open`'s result): the views follow, the status bar says
 /// what didn't come in as it was, and missing links are asked about.
 pub(crate) fn opened(app: &mut VectorcraftApp, r: &Value) {
+    if let Some(report) = &app.services.host_open_result {
+        report(Ok(()));
+    }
     app.sync_views();
     if let Some(w) = r["warnings"].as_array().filter(|w| !w.is_empty()) {
         app.status(format!("Opened with {} note(s): {}", w.len(), w[0].as_str().unwrap_or_default()));
@@ -170,6 +173,9 @@ pub fn open_dialog(app: &mut VectorcraftApp) -> Result<(), String> {
 /// A file the user asked to open (File › Open, Open Recent, the Home screen, a drop, the Finder)
 /// couldn't be: say so in a dialog as well as the status bar, which is easily missed (#861).
 pub fn report_open_error(app: &mut VectorcraftApp, name: &str, e: &str) {
+    if let Some(report) = &app.services.host_open_result {
+        report(Err(e.to_string()));
+    }
     app.status(format!("Couldn't open {name}: {e}"));
     let message = crate::i18n::fmt(tl!("Can't open “{name}”."), &[("name", name)]);
     dialogs::confirm::tell(app, &message, &crate::i18n::message(crate::i18n::current(), e));

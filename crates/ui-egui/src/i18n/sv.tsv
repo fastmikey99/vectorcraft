@@ -4889,3 +4889,4 @@ theme	Appearance	Utseende
 @msg	this is a PostScript file (an .ai saved in an older format or without PDF compatibility, or an EPS file), not a PDF: File › Open and File › Place read it as EPS	det här är en PostScript-fil (en .ai sparad i ett äldre format eller utan PDF-kompatibilitet, eller en EPS-fil), inte en PDF: Fil › Öppna och Fil › Placera läser den som EPS
 @msg	this system has no screen color sampler	det här systemet saknar färghämtning från skärmen
 @msg	the image can't be read as a texture	bilden kan inte läsas som en textur
+@msg	{what}: this editor works on one file only	{what}: den här redigeraren arbetar bara med en fil

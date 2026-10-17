@@ -4488,3 +4488,4 @@ theme	Appearance	Giao diện
 @msg	choose a source folder	hãy chọn thư mục nguồn
 @msg	open a document with data sets	hãy mở một tài liệu có tập dữ liệu
 @msg	the action has no steps	hành động không có bước nào
+@msg	{what}: this editor works on one file only	{what}: trình soạn thảo này chỉ làm việc với một tệp

@@ -4849,3 +4849,4 @@ mark-style	Japanese	Japonesas
 	Color Panel Options	Opções do Painel Cor
 @msg	`mode` must be grayscale, rgb, hsb, cmyk or websafe	`mode` deve ser grayscale, rgb, hsb, cmyk ou websafe
 @msg	the image can't be read as a texture	a imagem não pode ser lida como textura
+@msg	{what}: this editor works on one file only	{what}: este editor trabalha com um único arquivo

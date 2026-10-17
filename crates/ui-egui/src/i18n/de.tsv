@@ -4468,3 +4468,4 @@ theme	Appearance	Erscheinungsbild
 @msg	choose a source folder	wählen Sie einen Quellordner
 @msg	open a document with data sets	öffnen Sie ein Dokument mit Datensätzen
 @msg	the action has no steps	die Aktion hat keine Schritte
+@msg	{what}: this editor works on one file only	{what}: Dieser Editor bearbeitet nur eine Datei

@@ -4549,3 +4549,4 @@ lighting	Light	ライト
 @msg	choose a source folder	ソースフォルダーを選択してください
 @msg	open a document with data sets	データセットのあるドキュメントを開いてください
 @msg	the action has no steps	アクションにステップがありません
+@msg	{what}: this editor works on one file only	{what}: このエディターで扱えるファイルは 1 つだけです

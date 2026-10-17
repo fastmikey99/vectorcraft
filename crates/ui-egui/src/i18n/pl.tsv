@@ -4776,3 +4776,4 @@ mark-style	Japanese	Japońskie
 @msg	choose a source folder	wybierz folder źródłowy
 @msg	open a document with data sets	otwórz dokument z zestawami danych
 @msg	the action has no steps	operacja nie ma kroków
+@msg	{what}: this editor works on one file only	{what}: ten edytor pracuje tylko na jednym pliku

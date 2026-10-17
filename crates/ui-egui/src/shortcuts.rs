@@ -88,6 +88,25 @@ pub(crate) fn all_shortcuts() -> Vec<(KeyboardShortcut, &'static str, serde_json
     v
 }
 
+/// Is a press of `key` with `m` one of the editor's command shortcuts in effect (user overrides
+/// included)? The web build asks before the browser acts on the same keys: Ctrl+2 locks the
+/// selection here, and must not also switch the browser to its second tab. The set is built once
+/// per change to the shortcuts or the plug-ins.
+pub fn is_bound(key: Key, m: Modifiers) -> bool {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    type BoundShortcuts = ((u64, u64), HashSet<String>);
+    static BOUND: Mutex<Option<BoundShortcuts>> = Mutex::new(None);
+    let Some(chord) = crate::shortcut_editor::chord_from_event(key, m) else { return false };
+    let stamp = (crate::shortcut_editor::GENERATION.load(std::sync::atomic::Ordering::Relaxed), crate::menus::plugin_revision());
+    let mut bound = BOUND.lock().unwrap_or_else(|e| e.into_inner());
+    if bound.as_ref().is_none_or(|(s, _)| *s != stamp) {
+        let set = all_shortcuts().iter().map(|(sc, ..)| crate::shortcut_editor::format(sc)).collect();
+        *bound = Some((stamp, set));
+    }
+    bound.as_ref().is_some_and(|(_, set)| set.contains(&chord))
+}
+
 /// On a Mac, Cmd+, opens Settings as in every Mac app (#663), beside Preferences' own shortcut,
 /// unless a command or a user's shortcut already took it.
 fn settings_chord(v: &mut Vec<(KeyboardShortcut, &'static str, serde_json::Value)>, mac: bool) {
@@ -1163,5 +1182,23 @@ mod tests {
                 assert!(parse(c.2).is_some(), "{} has unparsable shortcut {}", c.0, c.2);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests_bound {
+    use egui::{Key, Modifiers};
+
+    use super::is_bound;
+
+    /// Lock (Cmd+2) and Hide (Cmd+3) are the editor's, as Illustrator's: the web build keeps the
+    /// browser from also switching tabs on them. A chord nothing uses isn't claimed.
+    #[test]
+    fn the_editors_command_shortcuts_are_bound_and_others_arent() {
+        assert!(is_bound(Key::Num2, Modifiers::COMMAND), "Lock");
+        assert!(is_bound(Key::Num3, Modifiers::COMMAND), "Hide");
+        assert!(is_bound(Key::G, Modifiers::COMMAND), "Group");
+        assert!(!is_bound(Key::Num9, Modifiers::COMMAND | Modifiers::ALT | Modifiers::SHIFT), "nothing uses it");
+        assert!(!is_bound(Key::Num2, Modifiers::NONE), "a bare digit isn't a command shortcut here");
     }
 }

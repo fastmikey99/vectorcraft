@@ -452,3 +452,13 @@ Validation: all nine `cargo xtask ci` stages passed against the published pin,
 including the immutable PDF dependency gate and all 23 wasm crates. Homebrew Rust
 used `RUSTC_BOOTSTRAP=1 CARGO_UNSTABLE_BUILD_STD=std,panic_abort`. The strict WE
 Dark/Light probe also passed with the CLI built against this published revision.
+
+### WEB.H1 — Reporter embed bridge (17 October 2026)
+
+Port the existing same-origin single-document bridge onto the current web shell,
+retaining pointer input, parent-owned preferences, image-only export, transformed
+image replacement and undo. Hybrid hosts negotiate production PDF import and an
+explicit source-preserving export; open completion and refused exports are reported
+to the parent. The parent owns persistence and production release. See
+`docs/web-embed.md` and the native bridge/UI tests. No parity score increase or
+production qualification is claimed by this integration alone.
