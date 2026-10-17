@@ -30,11 +30,12 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     };
     let hidden = st.production_separations.hidden.clone();
     let selected = st.selection.objects.clone();
+    let visible_plates = st.production_separations.plates.clone();
     let rows = rows(app, ui.ctx());
     let t = Tokens::get(ui.ctx());
     let view = proof::view();
     let all: Vec<String> = rows.iter().flat_map(|r| r.plates.clone()).collect();
-    let shown = view.separations.as_ref().unwrap_or(&all);
+    let shown = visible_plates.as_ref().or(view.separations.as_ref()).unwrap_or(&all);
     ui.horizontal(|ui| {
         widgets::dim_label(ui, tl!("Preview"));
         if widgets::flat_button(ui, tl!("Show all"), 76.0).clicked() {

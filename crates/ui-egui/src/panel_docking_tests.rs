@@ -614,3 +614,24 @@ fn the_window_menu_item_hides_a_shown_panel_and_shows_it_again() {
     app.run("window.panel", json!({"panel":"properties"})).unwrap();
     assert!(shown(&app), "without the menu's toggle the command only shows the panel");
 }
+
+#[test]
+fn floating_production_panel_has_an_opaque_background_over_the_canvas() {
+    let mut app = app();
+    app.run("file.new", json!({})).unwrap();
+    app.run("window.panel.float", json!({"panel":"productionSeparations","x":80,"y":100,"width":310,"height":420})).unwrap();
+    let h = harness(app, vec2(1280.0, 800.0));
+    let point = egui::pos2(180.0, 400.0);
+    let panel = crate::theme::Tokens::get(&h.ctx).panel;
+    assert_eq!(panel.a(), 255);
+    let mut pending: Vec<_> = h.output().shapes.iter().map(|shape| &shape.shape).collect();
+    let mut opaque_panel = false;
+    while let Some(shape) = pending.pop() {
+        match shape {
+            egui::Shape::Rect(rect) if rect.rect.contains(point) && rect.fill == panel => opaque_panel = true,
+            egui::Shape::Vec(shapes) => pending.extend(shapes),
+            _ => {}
+        }
+    }
+    assert!(opaque_panel, "floating content must paint its own panel fill, not expose the canvas");
+}
