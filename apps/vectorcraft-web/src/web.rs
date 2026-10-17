@@ -154,7 +154,7 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
                         app
                     }
                 };
-                Ok(Box::new(WebShell { app: Some(app), host, canvas: page, loss, prefs_saved: None, prefs_checked: 0.0 }))
+                Ok(Box::new(WebShell { app: Some(app), host, canvas: page, loss, prefs: crate::prefs::Sync::default() }))
             }),
         )
         .await;
@@ -400,18 +400,13 @@ struct WebShell {
     loss: GraphicsLoss,
     /// The preferences and workspace last written to the browser's storage ([`PREFS_KEY`]), and
     /// when they were last compared with the app's (ms since the epoch).
-    prefs_saved: Option<String>,
-    prefs_checked: f64,
+    prefs: crate::prefs::Sync,
 }
 
 /// Where the preferences and the workspace (the interface's state, as the desktop app keeps them
 /// in its preferences file) live in the browser's storage, shared by the site's tabs. Embedded
 /// (`?host=parent`) they go to the page instead (`vectorcraft:prefs`), which keeps them per person.
 const PREFS_KEY: &str = "vectorcraft-prefs";
-/// How often the app's preferences are compared with the stored ones (ms). Browsers don't say
-/// reliably when a tab closes, so they are written as they change rather than on the way out.
-const PREFS_EVERY_MS: f64 = 2000.0;
-
 /// The stored preferences and workspace (`saved`), when there are any, put back (as the desktop app
 /// does at start-up); then the preferences applied to the session.
 fn restore_prefs(app: &mut VectorcraftApp, saved: Option<String>) {
@@ -423,41 +418,30 @@ fn restore_prefs(app: &mut VectorcraftApp, saved: Option<String>) {
     vectorcraft_ui_egui::prefs_dialog::restore(app);
 }
 
-/// The app's preferences and workspace as stored.
-fn prefs_json(app: &VectorcraftApp) -> Option<String> {
-    let mut ui = app.ui.clone();
-    ui.engine_prefs = app.session.prefs.to_json();
-    serde_json::to_string(&ui).ok()
-}
-
 impl WebShell {
-    /// Every [`PREFS_EVERY_MS`]: write the preferences and workspace when they changed (embedded:
-    /// hand them to the page). Preferences the page handed back are put on first.
-    fn save_prefs(&mut self) {
+    /// Apply parent-owned preferences before processing this frame's input.
+    fn restore_host_prefs(&mut self) {
         if let (Some(bridge), Some(app)) = (&self.host.bridge, &mut self.app)
             && let Some(text) = bridge.take_prefs()
         {
             restore_prefs(app, Some(text.clone()));
             // What the page holds already: not handed back unless it changes.
-            self.prefs_saved = prefs_json(app).or(Some(text));
+            self.prefs.saved = crate::prefs::json(app).or(Some(text));
         }
-        let now = js_sys::Date::now();
-        if now - self.prefs_checked < PREFS_EVERY_MS {
-            return;
-        }
-        self.prefs_checked = now;
-        let Some(json) = self.app.as_ref().and_then(prefs_json) else { return };
-        if self.prefs_saved.as_deref() == Some(json.as_str()) {
-            return;
-        }
+    }
+
+    /// Snapshot only after UI commands (including Preferences OK) have committed.
+    fn save_prefs(&mut self) {
+        let Some(app) = &mut self.app else { return };
+        let Some(json) = self.prefs.pending(app, js_sys::Date::now()) else { return };
         if let Some(bridge) = &self.host.bridge {
             if bridge.post_prefs(&json) {
-                self.prefs_saved = Some(json);
+                self.prefs.saved = Some(json);
             }
             return;
         }
         match local_storage().and_then(|s| s.set_item(PREFS_KEY, &json).map_err(js_err)) {
-            Ok(()) => self.prefs_saved = Some(json),
+            Ok(()) => self.prefs.saved = Some(json),
             // Best effort, as on the desktop: the next change tries again.
             Err(e) => log::warn!("vectorcraft-web: couldn't store the preferences: {e}"),
         }
@@ -489,6 +473,7 @@ impl eframe::App for WebShell {
         if let Some(why) = self.loss.take() {
             self.restart(&why);
         }
+        self.restore_host_prefs();
         let Some(app) = &mut self.app else { return };
         let pasted = self.host.pasted.borrow_mut().flavour.take();
         if let Some((f, held)) = pasted {
@@ -520,7 +505,6 @@ impl eframe::App for WebShell {
             }
         }
         app.logic(ctx);
-        self.save_prefs();
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
@@ -538,6 +522,7 @@ impl eframe::App for WebShell {
                 bridge.report_dirty(app);
             }
         }
+        self.save_prefs();
     }
 }
 

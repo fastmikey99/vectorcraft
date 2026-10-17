@@ -27,6 +27,8 @@ mod operations;
 #[cfg(any(target_arch = "wasm32", test))]
 mod pencil;
 #[cfg(any(target_arch = "wasm32", test))]
+mod prefs;
+#[cfg(any(target_arch = "wasm32", test))]
 mod protocol;
 #[cfg(target_arch = "wasm32")]
 mod web;

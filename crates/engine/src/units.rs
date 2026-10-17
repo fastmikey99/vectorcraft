@@ -2,7 +2,7 @@
 //!
 //! General (rulers, positions, sizes, dialog distances, canvas readouts) is the active document's
 //! units, so they travel with the file: Document Setup (`document.setUnits`) changes them, and
-//! Preferences ▸ Units ▸ General changes them too and is also the units new documents start in (and
+//! Preferences ▸ Units ▸ General changes their display without a content edit and is also the units new documents start in (and
 //! the unit shown while no document is open). Stroke (weights, dashes) and Type (sizes, leading,
 //! baseline shift) are application preferences. Typed values with a unit ("5 mm", "12 pt") work in
 //! any unit.

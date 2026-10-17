@@ -21,19 +21,27 @@ fn units(s: &Session) -> Unit {
 }
 
 #[test]
-fn preferences_general_sets_the_open_documents_units_as_one_undo_step() {
+fn preferences_general_sets_display_units_without_a_content_edit() {
     let mut s = session();
-    assert_eq!(s.general_unit(), Unit::Points);
+    s.doc_mut().unwrap().mark_saved();
     let undo = s.doc().unwrap().history.undo.len();
     s.execute("prefs.set", &json!({"key": "unitsGeneral", "value": "Millimeters"})).unwrap();
     assert_eq!((units(&s), s.general_unit(), s.default_units()), (Unit::Millimeters, Unit::Millimeters, Unit::Millimeters));
-    assert_eq!(s.doc().unwrap().history.undo.len(), undo + 1);
-    // Setting it again (the Preferences dialog's OK sends every value) adds no step.
-    s.execute("prefs.set", &json!({"values": {"unitsGeneral": "millimeters", "keyboardIncrement": 2}})).unwrap();
-    assert_eq!(s.doc().unwrap().history.undo.len(), undo + 1);
+    assert_eq!(s.doc().unwrap().history.undo.len(), undo);
+    assert!(!s.doc().unwrap().is_dirty());
+    s.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 10, "height": 10})).unwrap();
+    s.execute("prefs.set", &json!({"values": {"unitsGeneral": "inches", "gridlineEvery": 36}})).unwrap();
+    assert!(s.doc().unwrap().is_dirty(), "preferences must not mark artwork saved");
     s.execute("edit.undo", &json!({})).unwrap();
-    assert_eq!(units(&s), Unit::Points);
-    assert_eq!(s.prefs.units_general, "millimeters", "undo is the document's; the preference stays");
+    assert!(!s.doc().unwrap().is_dirty(), "undo returns to the saved content");
+    assert_eq!(units(&s), Unit::Inches);
+    s.execute("prefs.set", &json!({"values": {"unitsGeneral": "millimeters", "gridlineEvery": 18}})).unwrap();
+    s.execute("edit.redo", &json!({})).unwrap();
+    assert!(s.doc().unwrap().is_dirty());
+    assert_eq!(units(&s), Unit::Millimeters);
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert!(!s.doc().unwrap().is_dirty());
+    assert_eq!(s.doc().unwrap().doc.grid.spacing, 18.0);
 }
 
 #[test]
