@@ -31,9 +31,15 @@ use vectorcraft_doc::{Document, Node, NodeId, Shared};
 
 use crate::RenderOptions;
 
-/// Whether overprinting shows: Overprint Preview, or Separations Preview (which implies it).
+/// Whether separations show: Separations Preview.
+fn separations(opts: &RenderOptions) -> bool {
+    opts.proof.as_ref().is_some_and(|p| p.separations.is_some())
+}
+
+/// Whether overprinting shows: Overprint Preview, or Separations Preview (which implies it unless
+/// [`RenderOptions::knockout_separations`]).
 pub(crate) fn overprints(opts: &RenderOptions) -> bool {
-    opts.overprint_preview || opts.proof.as_ref().is_some_and(|p| p.separations.is_some())
+    opts.overprint_preview || (separations(opts) && !opts.knockout_separations)
 }
 
 fn plate_color(doc: &Document, c: &Cms, proof: &ProofSetup, visible: &[String], color: &Color, link: Link) -> Color {
@@ -78,6 +84,7 @@ pub(crate) struct Prepared {
 /// What [`prepare`] reads besides the art.
 #[derive(PartialEq)]
 struct Inputs {
+    multiply: bool,
     discard_white: bool,
     plates: Option<Plates>,
 }
@@ -109,6 +116,8 @@ impl PartialEq for Plates {
 /// print it ([`plate_color`]).
 struct How<'a> {
     doc: &'a Document,
+    /// Overprinting fills and strokes multiply ([`overprints`]).
+    multiply: bool,
     discard_white: bool,
     /// Separations Preview: the color settings, the proof setup and the visible plates.
     plates: Option<(&'a Cms, &'a ProofSetup, &'a [String])>,
@@ -118,12 +127,14 @@ impl How<'_> {
     /// Whether [`Self::apply`] can change `n`: with Separations Preview any node, else a node with
     /// an overprinting fill or stroke.
     fn changes(&self, n: &Node) -> bool {
-        self.plates.is_some() || n.appearance.items.iter().any(|i| i.overprint())
+        self.plates.is_some() || (self.multiply && n.appearance.items.iter().any(|i| i.overprint()))
     }
 
     /// Change the fills, strokes and other colors of node `a`, which holds no members.
     fn apply(&self, a: &mut Arc<Node>) {
-        multiply_overprints(a, self.discard_white);
+        if self.multiply {
+            multiply_overprints(a, self.discard_white);
+        }
         if let Some((c, proof, visible)) = self.plates {
             map_node_colors(Arc::make_mut(a), &mut |col, sw| plate_color(self.doc, c, proof, visible, col, sw));
         }
@@ -135,13 +146,15 @@ impl How<'_> {
 /// symbol art and member that is still the node its kept art was made from is drawn from that art,
 /// with its `Arc`. `kept` then holds this frame's art, or nothing when neither preview is on.
 pub(crate) fn prepare<'a>(doc: &'a Document, opts: &RenderOptions, kept: &mut Option<Prepared>) -> Cow<'a, Document> {
-    if !overprints(opts) {
+    let multiply = overprints(opts);
+    if !multiply && !separations(opts) {
         *kept = None;
         return Cow::Borrowed(doc);
     }
     let seps = opts.proof.as_ref().and_then(|p| p.separations.as_ref().map(|s| (p, s)));
     let c = cms::active();
     let inputs = Inputs {
+        multiply,
         discard_white: doc.setup.discard_white_overprint,
         plates: seps.map(|(proof, _)| Plates {
             proof: proof.clone(),
@@ -153,7 +166,7 @@ pub(crate) fn prepare<'a>(doc: &'a Document, opts: &RenderOptions, kept: &mut Op
         }),
     };
     let earlier = kept.take().filter(|k| k.inputs == inputs);
-    let how = How { doc, discard_white: inputs.discard_white, plates: seps.map(|(proof, visible)| (&*c, proof, visible.as_slice())) };
+    let how = How { doc, multiply, discard_white: inputs.discard_white, plates: seps.map(|(proof, visible)| (&*c, proof, visible.as_slice())) };
     let none = (vec![], vec![]);
     let (layers, art) = earlier.as_ref().map_or((&none, &none), |k| (&k.layers, &k.art));
     let made_layers = prepare_list(&doc.layers, &layers.0, &layers.1, &how);

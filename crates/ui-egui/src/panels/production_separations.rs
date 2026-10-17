@@ -31,6 +31,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     let hidden = st.production_separations.hidden.clone();
     let selected = st.selection.objects.clone();
     let visible_plates = st.production_separations.plates.clone();
+    let overprint = st.production_separations.overprint;
     let rows = rows(app, ui.ctx());
     let t = Tokens::get(ui.ctx());
     let view = proof::view();
@@ -42,6 +43,9 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
             run(app, "production.separations.preview", json!({"reset":true}));
         }
     });
+    if widgets::check(ui, "Overprint Preview", overprint, true) {
+        run(app, "production.separations.preview", json!({"overprint": !overprint}));
+    }
     for destination in [Some(Destination::Indigo), Some(Destination::Screen), None] {
         let group: Vec<_> = rows.iter().filter(|r| r.destination == destination).collect();
         if group.is_empty() {
