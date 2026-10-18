@@ -97,7 +97,8 @@ pub fn inks(doc: &Document, c: &Cms, color: &Color, link: Link, intent: Intent) 
 /// Visits one colour: the colour, its swatch link and its tint, all of which it may change.
 pub type ColorVisitor<'a> = dyn FnMut(&mut Color, &mut Option<String>, &mut f32) + 'a;
 
-fn visit_paint(p: &mut Paint, f: &mut ColorVisitor) {
+/// Visit every colour of one paint (solid, gradient stops) with its swatch link and tint.
+pub fn visit_paint(p: &mut Paint, f: &mut ColorVisitor) {
     match p {
         Paint::Solid { color, swatch, tint } => f(color, swatch, tint),
         Paint::Gradient(g) => {

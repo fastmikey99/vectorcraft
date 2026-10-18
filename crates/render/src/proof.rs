@@ -25,6 +25,7 @@ use std::sync::{Arc, RwLock, Weak};
 use vectorcraft_color::cms::{self, Cms, PROCESS_PLATES};
 pub use vectorcraft_color::cms::{Intent, ProofSetup, ProofTarget};
 use vectorcraft_color::{Color, Swatch, SwatchGroup};
+use vectorcraft_doc::inks::visit_paint;
 pub use vectorcraft_doc::inks::{Inks, Link, Plate, inks, map_document_colors, map_node_colors, plates, spot_color};
 use vectorcraft_doc::overprint::multiply_overprints;
 use vectorcraft_doc::{Document, Node, NodeId, Shared};
@@ -134,9 +135,40 @@ impl How<'_> {
     fn apply(&self, a: &mut Arc<Node>) {
         if self.multiply {
             multiply_overprints(a, self.discard_white);
+        } else if let Some((c, proof, visible)) = self.plates {
+            self.drop_hidden_plate_paints(a, c, proof, visible);
         }
         if let Some((c, proof, visible)) = self.plates {
             map_node_colors(Arc::make_mut(a), &mut |col, sw| plate_color(self.doc, c, proof, visible, col, sw));
+        }
+    }
+}
+
+impl How<'_> {
+    /// Separations without overprinting ([`RenderOptions::knockout_separations`]): a fill or
+    /// stroke that puts no ink on any visible plate is left out, so hiding a plate shows what is
+    /// under it instead of a paper-white shape covering it. Fills and strokes with ink on a
+    /// visible plate still cover what is under them.
+    fn drop_hidden_plate_paints(&self, a: &mut Arc<Node>, c: &Cms, proof: &ProofSetup, visible: &[String]) {
+        let prints = |paint: &vectorcraft_color::Paint| {
+            let (mut any, mut ink) = (false, false);
+            visit_paint(&mut paint.clone(), &mut |col, swatch, tint| {
+                any = true;
+                let i = inks(self.doc, c, col, swatch.as_deref().map(|s| (s, *tint)), proof.intent);
+                ink |= visible.iter().any(|p| i.on_plate(p) > 0.0);
+            });
+            !any || ink
+        };
+        if a.appearance.items.iter().all(|it| !it.visible() || prints(it.paint())) {
+            return;
+        }
+        for it in &mut Arc::make_mut(a).appearance.items {
+            if it.visible() && !prints(it.paint()) {
+                match it {
+                    vectorcraft_doc::AppearanceItem::Fill(l) => l.visible = false,
+                    vectorcraft_doc::AppearanceItem::Stroke(l) => l.visible = false,
+                }
+            }
         }
     }
 }
