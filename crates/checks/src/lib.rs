@@ -18,7 +18,10 @@ pub mod prepare_edits;
 pub mod program;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod raster;
+#[cfg(not(target_arch = "wasm32"))]
+mod raster_images;
 pub mod recipe;
+mod specification;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

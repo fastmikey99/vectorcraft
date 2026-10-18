@@ -28,6 +28,7 @@ pub struct PrintPaintSource {
 }
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PageOrder {
+    pub sample_cost: usize,
     pub images: Vec<crate::PrintImageUse>,
     pub layers: Vec<Option<usize>>,
     pub source_indices: Vec<usize>,
@@ -47,6 +48,9 @@ pub struct PrintOrder {
     pub issues: BTreeSet<String>,
 }
 pub fn print_order(bytes: &[u8]) -> Result<PrintOrder, PdfError> {
+    print_order_with_cost(bytes, 0)
+}
+fn print_order_with_cost(bytes: &[u8], initial_sample_cost: usize) -> Result<PrintOrder, PdfError> {
     let pdf = crate::pages::open_with_options(bytes, None, &craft_pdf::OpenOptions { max_input_bytes: 256 * 1024 * 1024, ..Default::default() })?;
     let mut ocgs = Ocgs::read(&pdf);
     let mut report = PrintOrder { images: vec![], layers: vec![], pages: vec![], source_indices: vec![], sources: vec![], issues: BTreeSet::new() };
@@ -55,6 +59,7 @@ pub fn print_order(bytes: &[u8]) -> Result<PrintOrder, PdfError> {
     }
     let mut count = 0usize;
     let mut images = 0usize;
+    let mut sample_cost = initial_sample_cost;
     for page in pdf.pages().iter() {
         if page.raw().get::<craft_pdf::syntax::object::Object<'_>>(b"Annots").is_some() {
             report.issues.insert("Annotation print appearances require direct census".into());
@@ -62,8 +67,12 @@ pub fn print_order(bytes: &[u8]) -> Result<PrintOrder, PdfError> {
         if page.raw().get::<craft_pdf::syntax::object::Dict<'_>>(b"Group").is_some() {
             report.issues.insert("Page transparency group colour space requires compositing reconciliation".into());
         }
-        let result = scan_print_order(page, &mut ocgs, pdf.decode_limits().max_decoded_stream())?;
+        let result = scan_print_order(page, &mut ocgs, pdf.decode_limits().max_decoded_stream(), sample_cost)?;
         count += result.layers.len();
+        sample_cost = result.sample_cost;
+        if sample_cost > crate::image_samples::SAMPLE_BUDGET {
+            return Err(PdfError::Unsupported("Image decoded sample budget exceeded across pages".into()));
+        }
         images += result.images.len();
         if images > crate::print_image::MAX_IMAGES {
             return Err(PdfError::Unsupported("Print-image use budget exceeded".into()));
@@ -89,4 +98,20 @@ pub fn print_order(bytes: &[u8]) -> Result<PrintOrder, PdfError> {
         report.issues.insert("Duplicate PDF layer names cannot establish unique routing".into());
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    #[test]
+    fn document_sample_budget_preserves_earlier_uses_and_later_errors() {
+        use vectorcraft_testkit::pdf::{PdfPage, first_extra, pdf_with};
+        let mut page = PdfPage::new(100.0, 100.0, "/Im Do");
+        page.resources = format!("/XObject << /Im {} 0 R >>", first_extra(5));
+        let im = "<< /Length 1 /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray >>\nstream\nx\nendstream";
+        let bytes = pdf_with(&vec![page; 5], &[im], None);
+        let audit = print_order_with_cost(&bytes, crate::image_samples::SAMPLE_BUDGET - 8).unwrap();
+        assert_eq!(audit.images.iter().filter(|p| p[0].samples.is_some()).count(), 2);
+        assert_eq!(audit.images.iter().filter(|p| p[0].sample_error.as_ref().is_some_and(|s| s.contains("budget"))).count(), 3);
+    }
 }

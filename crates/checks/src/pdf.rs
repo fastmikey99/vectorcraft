@@ -449,6 +449,7 @@ pub fn check(request: &Request, bytes: &[u8]) -> Result<Report, String> {
         crate::measure::check(request, &plan, &c, &mut report)?;
     }
     crate::ordering::check(request, bytes, &c, &mut report)?;
+    crate::specification::check(request, bytes, &mut report)?;
     Ok(report)
 }
 

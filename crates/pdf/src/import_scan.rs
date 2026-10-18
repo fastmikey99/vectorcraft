@@ -383,6 +383,7 @@ struct State {
     spaces: [PrintColorSpace; 2],
     matrix: Option<vectorcraft_geom::Affine>,
     clip_context: bool,
+    image_compositing_unresolved: bool,
 }
 
 /// A marked-content tag as [`Scan::tags`] keeps it: its FNV-1a hash (the tags are only compared,
@@ -533,6 +534,14 @@ impl Walker<'_, '_> {
         let state = self.state();
         let description = crate::print_image::describe(stream, res, inline);
         if let Some(order) = &mut self.out.print_order {
+            let remaining = crate::image_samples::SAMPLE_BUDGET.saturating_sub(order.sample_cost);
+            let mut budget = remaining;
+            let decoded = crate::image_samples::decode(stream, res, inline, &description, &mut budget);
+            order.sample_cost += remaining - budget;
+            let (samples, sample_error) = match decoded {
+                Ok(samples) => (Some(samples), None),
+                Err(error) => (None, Some(error)),
+            };
             order.issues.insert("Image sample, mask and compositing coverage requires independent reconciliation".into());
             order.issues.extend(description.issues.iter().cloned());
             if description.optional_content {
@@ -542,6 +551,9 @@ impl Walker<'_, '_> {
                 order.issues.insert("Image placement transform is unresolved".into());
             }
             order.images.push(crate::PrintImageUse {
+                samples,
+                sample_error,
+                compositing_unresolved: state.image_compositing_unresolved,
                 layer: self.layers.last().copied().flatten(),
                 before_path: order.layers.len(),
                 inline,
@@ -879,6 +891,15 @@ impl Walker<'_, '_> {
                         // Without `/op`, `/OP` sets both.
                         s.fill = d.get::<bool>(b"op").or(stroke).unwrap_or(s.fill);
                         s.nonzero = d.get::<u8>(b"OPM").map_or(s.nonzero, |m| m != 0);
+                        s.image_compositing_unresolved |=
+                            [b"ca".as_slice(), b"CA", b"BM", b"SMask", b"TR", b"TR2", b"BG", b"BG2", b"UCR", b"UCR2", b"HT", b"RI", b"AIS"]
+                                .iter()
+                                .any(|k| d.contains_key(k));
+                    }
+                }
+                TypedInstruction::RenderingIntent(_) => {
+                    if let Some(s) = self.states.last_mut() {
+                        s.image_compositing_unresolved = true;
                     }
                 }
                 TypedInstruction::FillPathEvenOdd(_) | TypedInstruction::FillPathNonZero(_) | TypedInstruction::FillPathNonZeroCompatibility(_) => {
@@ -1046,7 +1067,7 @@ fn embeds_glyphs(f: &Dict<'_>) -> bool {
 /// found are noted in `fonts` (their cache key → base font name, and whether the file carries its
 /// glyphs).
 pub(crate) fn scan_page(page: &Page<'_>, ocgs: &mut Ocgs, all_on: bool, fonts: &mut FontNames, max_form_bytes: usize) -> Result<Scan, PdfError> {
-    let scan = walk_page(page, ocgs, all_on, fonts, max_form_bytes, false).out;
+    let scan = walk_page(page, ocgs, all_on, fonts, max_form_bytes, None).out;
     if scan.cut { Err(incomplete_content()) } else { Ok(scan) }
 }
 
@@ -1056,7 +1077,7 @@ fn walk_page<'w, 'p>(
     all_on: bool,
     fonts: &'w mut FontNames,
     max_form_bytes: usize,
-    record_order: bool,
+    sample_cost: Option<usize>,
 ) -> Walker<'w, 'p> {
     let off = if all_on { HashSet::new() } else { ocgs.off.clone() };
     let mut w = Walker {
@@ -1070,7 +1091,10 @@ fn walk_page<'w, 'p>(
         ops: 0,
         max_ops: max_ops(),
         max_form_bytes,
-        out: Scan { print_order: record_order.then(Default::default), ..Default::default() },
+        out: Scan {
+            print_order: sample_cost.map(|sample_cost| crate::print_order::PageOrder { sample_cost, ..Default::default() }),
+            ..Default::default()
+        },
         hidden_form: false,
         states: vec![State { matrix: Some(vectorcraft_geom::Affine::IDENTITY), ..Default::default() }],
         text: TextOverprint::None,
@@ -1095,7 +1119,7 @@ fn walk_page<'w, 'p>(
 /// sequence)? Its art couldn't be told apart by group once every group is on.
 pub(crate) fn hides_forms(page: &Page<'_>, ocgs: &mut Ocgs, max_form_bytes: usize) -> Result<bool, PdfError> {
     let mut fonts = HashMap::new();
-    let walk = walk_page(page, ocgs, false, &mut fonts, max_form_bytes, false);
+    let walk = walk_page(page, ocgs, false, &mut fonts, max_form_bytes, None);
     if walk.out.cut { Err(incomplete_content()) } else { Ok(walk.hidden_form) }
 }
 
@@ -1143,9 +1167,14 @@ fn trailer_at(bytes: &[u8], at: usize) -> Option<&[u8]> {
 }
 
 /// Actual content-stream ordering, before editable layer aggregation.
-pub(crate) fn scan_print_order(page: &Page<'_>, ocgs: &mut Ocgs, max_form_bytes: usize) -> Result<crate::print_order::PageOrder, PdfError> {
+pub(crate) fn scan_print_order(
+    page: &Page<'_>,
+    ocgs: &mut Ocgs,
+    max_form_bytes: usize,
+    sample_cost: usize,
+) -> Result<crate::print_order::PageOrder, PdfError> {
     let mut fonts = HashMap::new();
-    let scan = walk_page(page, ocgs, true, &mut fonts, max_form_bytes, true).out;
+    let scan = walk_page(page, ocgs, true, &mut fonts, max_form_bytes, Some(sample_cost)).out;
     if scan.cut {
         return Err(incomplete_content());
     }

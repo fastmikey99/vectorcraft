@@ -1,6 +1,6 @@
 # Recipe-driven production checks
 
-Status: 18 October 2026, implementation in progress. This is not a qualified production-release checker. Existing parity scores and estimates are unchanged.
+Status: 19 October 2026, implementation in progress. This is not a qualified production-release checker. Existing parity scores and estimates are unchanged.
 
 `vectorcraft-checks` provides a shared, headless Rust contract and measurement core. The editor exposes it through `production.checks.configure`, `production.checks.run`, cancellation and finding selection. The Checks panel shows the full obligation denominator, expected and measured evidence, unresolved work, validity and page-local finding locations. Preview visibility cannot change a request's obligations.
 
@@ -49,3 +49,27 @@ Raw image accounting records each image use reached through page/form inline or 
 Physical coverage selects process paint across the complete observed PDF, independently of OCG names. Exact technical inks stay on their declared physical plates; an unaccounted named ink or multiple possible process/source destinations yields Incomplete instead of selecting a convenient layer. File-layer placement remains a separate obligation.
 
 The web bridge retains the latest exported document and reports validity by its check/export token. Hosts can track results while another panel run is pending or fails, and while saved-byte verification is in progress. Edits make the report stale; Undo to the retained snapshot restores only provisional validity. See [the host protocol](web-embed.md#asynchronous-separation-checks). Production conformity still requires the unfinished feature and independent-runtime qualification.
+
+
+## HC.10 — explicit page and output-intent requirements (19 October 2026)
+
+The `page_specification` acceptance fact supplies version 1, `units: "mm"`, the exact job and baseline identities, a nonnegative tolerance and all five page boxes, rotation and UserUnit for each output page. Boxes are absolute PDF user-space coordinates, y up, in physical millimetres; they are not fitted to the observed artwork. Boundary uncertainty remains Incomplete. Page dictionaries alone cannot pass placement: every physical output must agree with the recipe construction and the original preparation must be freshly replayed.
+
+The operator-approved `pdf_metadata` fact supplies version 1, exact job/baseline bindings and exact ordered `catalog_intents` / `page_intents` lists. Each intent carries its subtype and nullable embedded-profile SHA-256. A null value explicitly requires absence; an empty list requires an explicitly present empty array. This checks profile identity, not ICC validity, colour conversion or PDF/X conformance. External profiles, unreadable dictionaries and exceeded budgets remain unresolved. No production facts or acceptance limits have been added. Reporter displays archived job criteria for explicit review and retains the exact criteria with the authenticated preparation decision. Browsers submit only the reviewed digest; the server re-derives the criteria, and both server and Rust require operator provenance. Numeric recipe acceptance cannot supply these structured keys. Invalid unreviewed upstream candidates produce a notice and leave the criteria unresolved.
+
+This closes the worker implementation of the specified page and output-intent facets. Broader image/mask/colour qualification, minimum features and production requirements remain in progress. Candidate source and Fable disposition are retained in the private completion evidence directory.
+
+
+## HC.11 — source image samples and independent image-only prediction (19 October 2026)
+
+Bounded decoding retains physical image-use transforms and source ink samples for direct Gray/CMYK, Indexed palettes, and named Separation/DeviceN channels. Decode arrays, row padding, 1/2/4/8/16-bit samples, matching-resolution gray soft masks, explicit one-bit masks and colour-key masks are measured without an RGB preview conversion. The inventory hashes all ink/alpha samples while keeping packed storage out of report JSON. Unsupported codecs, colour substitutions, masks and over-budget content remain explicit. Indexed images use at most eight-bit indices with default/reversed Decode; fractional mappings and 16-bit colour-key masks remain unresolved after pinned-interpreter disagreements. One sample-work budget spans all pages.
+
+The native image-only predictor reconciles source samples with hashed independent tiffsep planes, accounting for CropBox/MediaBox, rotation, UserUnit and each image transform. It preserves an uncertainty envelope around sample boundaries and refuses unresolved clipping, interpolation, profiles, graphics states, repeated fractional-alpha stacks or mixed vector/image pages. Pixel and sample-evaluation budgets apply before full plane decoding. Actual interpreter regressions cover masks, rotation and units at two resolutions and detect deliberately changed pixels.
+
+This is a feature-specific measurement path, not runtime qualification or a prepared raster mask. Full source continuity and mixed compositing remain open; successful sample decoding cannot close those obligations.
+
+## HC.12 — compact production-size samples (19 October 2026)
+
+Source rows, Decode values, palettes and masks remain packed; individual ink/alpha values are evaluated in binary64 when needed. The normalized v1 sample hash keeps the same meaning across this storage change. A cumulative 256 Mi sample-work ceiling covers decoding, normalized evaluations and palette storage across the document; unsupported or over-budget content remains Incomplete. A four-million-pixel CMYK image plus gray soft mask retains 20 MB of sample bytes instead of 160 MB of floating-point tone/alpha arrays, without rounding its fractional Decode endpoints. Compressed sample and palette streams are checked beyond the declared length so a truncated prefix cannot masquerade as a complete stream. This removes a storage limitation; it does not qualify masks, colour conversion, interpolation or mixed compositing.
+
+Unfiltered inline-image sample length is separated from the EI delimiter using dimensions; leading/trailing whitespace-valued pixels are retained. Direct 2/4/16-bit and inline regressions run without an interpreter. The original synthetic interpreter matrix includes raw and ASCIIHex inline images at two resolutions. Fuzz coverage exercises raw image sample and page-metadata entry points alongside the existing importer tests.

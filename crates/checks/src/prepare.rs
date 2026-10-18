@@ -165,7 +165,8 @@ pub fn verify_into_report(request: &crate::Request, bytes: &[u8], report: &mut c
             producer: "checks/original-reread-1".into(),
             detail: "Fresh original decode and immutable region artifact comparison".into(),
         }],
-    )
+    )?;
+    crate::specification::finalize_placement(report)
 }
 
 #[cfg(test)]

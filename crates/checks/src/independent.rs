@@ -263,7 +263,11 @@ pub fn verify(request: &crate::Request, bytes: &[u8], config: &Configuration, ou
         let mut configuration = config.clone();
         configuration.dpi *= multiplier;
         let rendering = render(&configuration, bytes, &output.join(format!("dpi-{}", configuration.dpi)))?;
-        let comparison = crate::raster::compare(&census, &rendering, tolerance)?;
+        let comparison = if census.raw_audit.as_ref().is_some_and(|a| a.image_use_count > 0 && a.path_paint_count == 0) {
+            crate::raster_images::compare(bytes, &rendering, tolerance)?
+        } else {
+            crate::raster::compare(&census, &rendering, tolerance)?
+        };
         renderings.push(rendering);
         comparisons.push(comparison);
     }

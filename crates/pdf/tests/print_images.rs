@@ -154,3 +154,311 @@ fn pattern_images_cannot_masquerade_as_a_complete_empty_image_census() {
     assert!(audit.images[0].is_empty());
     assert!(audit.issues.iter().any(|s| s.contains("nested composited paint census")));
 }
+#[test]
+fn raw_gray_rows_decode_with_padding_and_keep_white_as_zero_ink() {
+    let bytes = pdf(
+        "/Im Do",
+        "/XObject << /Im 5 0 R >>",
+        &[stream("/Type /XObject /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 1 /ColorSpace /DeviceGray /Filter /ASCIIHexDecode", "4080>")],
+    );
+    let audit = print_order(&bytes).unwrap();
+    let samples = audit.images[0][0].samples.as_ref().unwrap();
+    assert_eq!(samples.colourants, ["Black"]);
+    assert_eq!(tones(samples), [1.0, 0.0, 0.0, 1.0]);
+    assert_eq!(alphas(samples), [1.0, 1.0, 1.0, 1.0]);
+    // Published v1 digest layout, independently evaluated from the four expected tones.
+    assert_eq!(samples.sample_sha256, "896ec645ec8a5e1a522fd40a434c6650314bfe95bc7fa4a0c89a503ea1b0011b");
+    assert!(audit.issues.iter().any(|s| s.contains("coverage requires independent")));
+}
+#[test]
+fn indexed_lookup_is_source_ink_and_decode_can_reverse_indices() {
+    let bytes = pdf(
+        "/Im Do",
+        "/XObject << /Im 5 0 R >>",
+        &[stream(
+            "/Type /XObject /Subtype /Image /Width 2 /Height 1 /BitsPerComponent 1 /ColorSpace [/Indexed /DeviceCMYK 1 <ff00000000ff0000>] /Decode [1 0] /Filter /ASCIIHexDecode",
+            "40>",
+        )],
+    );
+    let audit = print_order(&bytes).unwrap();
+    let samples = audit.images[0][0].samples.as_ref().unwrap();
+    assert_eq!(tones(samples), [0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+    assert!(!samples.direct_cmyk);
+}
+#[test]
+fn soft_mask_samples_and_color_key_masks_are_not_image_rectangles() {
+    for (mask, extra) in [
+        (
+            "/SMask 6 0 R",
+            Some(stream(
+                "/Type /XObject /Subtype /Image /Width 2 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /ASCIIHexDecode",
+                "00ff>",
+            )),
+        ),
+        ("/Mask [0 0]", None),
+    ] {
+        let mut objects = vec![stream(
+            &format!("/Type /XObject /Subtype /Image /Width 2 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray {mask} /Filter /ASCIIHexDecode"),
+            "00ff>",
+        )];
+        objects.extend(extra);
+        let bytes = pdf("/Im Do", "/XObject << /Im 5 0 R >>", &objects);
+        let audit = print_order(&bytes).unwrap();
+        let samples = audit.images[0][0].samples.as_ref().unwrap();
+        assert_eq!(tones(samples), [1.0, 0.0]);
+        assert_eq!(alphas(samples), [0.0, 1.0]);
+        assert_eq!((samples.minimum_alpha, samples.maximum_alpha), (0.0, 1.0));
+    }
+}
+#[test]
+fn explicit_mask_decode_and_named_zero_components_survive() {
+    let bytes = pdf(
+        "/Im Do",
+        "/XObject << /Im 5 0 R >>",
+        &[
+            stream(
+                "/Type /XObject /Subtype /Image /Width 2 /Height 1 /BitsPerComponent 8 /ColorSpace [/DeviceN [/Cyan /Original#20ink] /DeviceCMYK 7 0 R] /Mask 6 0 R /Filter /ASCIIHexDecode",
+                "00ffff00>",
+            ),
+            stream("/Type /XObject /Subtype /Image /Width 2 /Height 1 /ImageMask true /Decode [1 0] /Filter /ASCIIHexDecode", "40>"),
+            "<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 0 0 1] /N 1 >>".into(),
+        ],
+    );
+    let audit = print_order(&bytes).unwrap();
+    let samples = audit.images[0][0].samples.as_ref().unwrap();
+    assert_eq!(samples.colourants, ["Cyan", "Original ink"]);
+    assert_eq!(tones(samples), [0.0, 1.0, 1.0, 0.0]);
+    assert_eq!(alphas(samples), [0.0, 1.0]);
+    assert!(!samples.direct_cmyk);
+}
+#[test]
+fn invalid_masks_samples_and_budgets_never_become_empty_coverage() {
+    for extra in ["/Decode [0]", "/Mask [0 300]", "/Mask 99 0 R", "/SMask 99 0 R", "/SMaskInData 1"] {
+        let bytes = pdf(
+            "/Im Do",
+            "/XObject << /Im 5 0 R >>",
+            &[stream(
+                &format!(
+                    "/Type /XObject /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray {extra} /Filter /ASCIIHexDecode"
+                ),
+                "ff>",
+            )],
+        );
+        let audit = print_order(&bytes).unwrap();
+        let image = &audit.images[0][0];
+        assert!(image.samples.is_none(), "{extra}");
+        assert!(image.sample_error.is_some(), "{extra}");
+    }
+}
+
+#[test]
+fn unqualified_index_depth_and_invalid_stencil_decode_are_unresolved() {
+    let bytes = pdf(
+        "/Im Do",
+        "/XObject << /Im 5 0 R >>",
+        &[stream(
+            "/Subtype /Image /Width 1 /Height 1 /BitsPerComponent 16 /ColorSpace [/Indexed /DeviceGray 1 <00ff>] /Filter /ASCIIHexDecode",
+            "0000>",
+        )],
+    );
+    assert!(print_order(&bytes).unwrap().images[0][0].sample_error.as_ref().unwrap().contains("16-bit"));
+    for decode in ["[0 0.5]", "[0.5 1]", "[-1 1]"] {
+        let bytes = pdf(
+            "/Im Do",
+            "/XObject << /Im 5 0 R >>",
+            &[
+                image("/ColorSpace /DeviceGray /Mask 6 0 R"),
+                stream(&format!("/Subtype /Image /Width 1 /Height 1 /ImageMask true /Decode {decode}"), "x"),
+            ],
+        );
+        assert!(print_order(&bytes).unwrap().images[0][0].sample_error.as_ref().unwrap().contains("binary Decode"));
+    }
+}
+#[test]
+fn soft_mask_default_gray_and_explicit_oversize_are_unresolved() {
+    let bytes = pdf(
+        "/Im Do",
+        "/XObject << /Im 5 0 R >> /ColorSpace << /DefaultGray /DeviceRGB >>",
+        &[
+            stream("/Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceCMYK /SMask 6 0 R", "xxxx"),
+            image("/ColorSpace /DeviceGray"),
+        ],
+    );
+    assert!(print_order(&bytes).unwrap().images[0][0].sample_error.as_ref().unwrap().contains("DefaultGray"));
+    let bytes = pdf(
+        "/Im Do",
+        "/XObject << /Im 5 0 R >>",
+        &[stream("/Subtype /Image /Width 300000000 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray", "x")],
+    );
+    assert!(print_order(&bytes).unwrap().images[0][0].sample_error.as_ref().unwrap().contains("budget"));
+}
+#[test]
+fn image_compositing_state_restores_after_graphics_pop() {
+    for content in ["q /GS gs /Im Do Q /Im Do", "q /Perceptual ri /Im Do Q /Im Do"] {
+        for gs in ["/BM /Multiply", "/SMask /None"] {
+            let bytes = pdf(content, &format!("/XObject << /Im 5 0 R >> /ExtGState << /GS << {gs} >> >>"), &[image("/ColorSpace /DeviceGray")]);
+            let audit = print_order(&bytes).unwrap();
+            assert!(audit.images[0][0].compositing_unresolved);
+            assert!(!audit.images[0][1].compositing_unresolved);
+        }
+    }
+}
+
+#[test]
+fn fractional_indexed_decode_is_unresolved_instead_of_a_false_tonal_failure() {
+    let bytes = pdf(
+        "/Im Do",
+        "/XObject << /Im 5 0 R >>",
+        &[stream(
+            "/Subtype /Image /Width 2 /Height 2 /BitsPerComponent 4 /ColorSpace [/Indexed /DeviceCMYK 3 <ff00000000ff00000000ff00000000ff>] /Decode [0 3] /Filter /ASCIIHexDecode",
+            "2378>",
+        )],
+    );
+    assert!(print_order(&bytes).unwrap().images[0][0].sample_error.as_ref().unwrap().contains("Fractional Indexed Decode"));
+}
+
+#[test]
+fn sixteen_bit_color_key_mask_is_unresolved_instead_of_a_false_tonal_failure() {
+    let bytes = pdf(
+        "/Im Do",
+        "/XObject << /Im 5 0 R >>",
+        &[stream(
+            "/Subtype /Image /Width 2 /Height 2 /BitsPerComponent 16 /ColorSpace /DeviceGray /Mask [0 0] /Filter /ASCIIHexDecode",
+            "0000000100ffffff>",
+        )],
+    );
+    assert!(print_order(&bytes).unwrap().images[0][0].sample_error.as_ref().unwrap().contains("16-bit colour-key"));
+}
+
+fn tones(samples: &vectorcraft_pdf::PrintImageSamples) -> Vec<f64> {
+    (0..samples.width as usize * samples.height as usize)
+        .flat_map(|pixel| (0..samples.colourants.len()).map(move |channel| samples.tone(pixel, channel).unwrap()))
+        .collect()
+}
+fn alphas(samples: &vectorcraft_pdf::PrintImageSamples) -> Vec<f64> {
+    (0..samples.width as usize * samples.height as usize).map(|pixel| samples.alpha(pixel).unwrap()).collect()
+}
+#[test]
+fn production_sized_cmyk_stays_packed_without_losing_decode_precision() {
+    let pixels = 2000 * 2000;
+    let bytes = pdf(
+        "/Im Do",
+        "/XObject << /Im 5 0 R >>",
+        &[
+            stream(
+                "/Subtype /Image /Width 2000 /Height 2000 /BitsPerComponent 8 /ColorSpace /DeviceCMYK /Decode [0.123456789012345 0.876543210987654 0 1 0 1 0 1] /SMask 6 0 R",
+                &"x".repeat(pixels * 4),
+            ),
+            stream("/Subtype /Image /Width 2000 /Height 2000 /BitsPerComponent 8 /ColorSpace /DeviceGray", &"x".repeat(pixels)),
+        ],
+    );
+    let audit = print_order(&bytes).unwrap();
+    let s = audit.images[0][0].samples.as_ref().unwrap();
+    assert_eq!(s.retained_sample_bytes(), pixels * 5);
+    let expected = 0.123456789012345 + (120.0 / 255.0) * (0.876543210987654 - 0.123456789012345);
+    assert_eq!(s.tone(0, 0).unwrap(), expected);
+    assert_eq!(s.tone(pixels - 1, 0).unwrap(), expected);
+    assert_eq!(s.alpha(pixels - 1).unwrap(), 120.0 / 255.0);
+    assert!(s.tone(pixels, 0).is_err());
+    assert!(s.tone(0, 4).is_err());
+    assert!(s.alpha(pixels).is_err());
+}
+
+#[test]
+fn compressed_images_and_palettes_cannot_be_accepted_as_truncated_prefixes() {
+    use std::io::Write;
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(&[0, 255, 64]).unwrap();
+    let hex: String = encoder.finish().unwrap().iter().map(|b| format!("{b:02x}")).collect();
+    let data = format!("{hex}>");
+    let bytes = pdf(
+        "/Im Do",
+        "/XObject << /Im 5 0 R >>",
+        &[stream("/Subtype /Image /Width 2 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter [/ASCIIHexDecode /FlateDecode]", &data)],
+    );
+    assert!(print_order(&bytes).unwrap().images[0][0].sample_error.as_ref().unwrap().contains("length"));
+    let bytes = pdf(
+        "/Im Do",
+        "/XObject << /Im 5 0 R >>",
+        &[
+            stream("/Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace [/Indexed /DeviceGray 1 6 0 R]", "x"),
+            stream("/Filter [/ASCIIHexDecode /FlateDecode]", &data),
+        ],
+    );
+    assert!(print_order(&bytes).unwrap().images[0][0].sample_error.as_ref().unwrap().contains("length"));
+}
+
+#[test]
+fn inline_gray_samples_decode_without_the_ei_separator() {
+    for (data, first, second) in [("Az", 65.0, 122.0), ("A ", 65.0, 32.0), (" A", 32.0, 65.0)] {
+        for separator in [" ", "\r\n"] {
+            let bytes = pdf(&format!("BI /W 2 /H 1 /BPC 8 /CS /G ID {data}{separator}EI"), "", &[]);
+            let audit = print_order(&bytes).unwrap();
+            let image = &audit.images[0][0];
+            assert!(image.sample_error.is_none(), "{:?}", image.sample_error);
+            assert_eq!(tones(image.samples.as_ref().unwrap()), [1.0 - first / 255.0, 1.0 - second / 255.0]);
+        }
+    }
+    let short = pdf("BI /W 3 /H 1 /BPC 8 /CS /G ID A EI", "", &[]);
+    assert!(print_order(&short).unwrap().images[0][0].sample_error.as_ref().unwrap().contains("shorter"));
+    for data in ["A", "AzX"] {
+        let bytes = pdf(&format!("BI /W 2 /H 1 /BPC 8 /CS /G ID {data} EI"), "", &[]);
+        assert!(print_order(&bytes).unwrap().images[0][0].samples.is_none());
+    }
+}
+
+#[test]
+fn packed_two_four_and_sixteen_bit_rows_keep_padding_and_source_precision() {
+    for (bits, width, height, data, want) in [
+        (2, 3, 2, "1be7>", vec![1.0, 1.0 - 1.0 / 3.0, 1.0 - 2.0 / 3.0, 0.0, 1.0 - 2.0 / 3.0, 1.0 - 1.0 / 3.0]),
+        (4, 3, 2, "012ffed9>", vec![1.0, 1.0 - 1.0 / 15.0, 1.0 - 2.0 / 15.0, 0.0, 1.0 - 14.0 / 15.0, 1.0 - 13.0 / 15.0]),
+        (16, 1, 2, "0001abcd>", vec![1.0 - 1.0 / 65535.0, 1.0 - 43981.0 / 65535.0]),
+    ] {
+        let bytes = pdf(
+            "/Im Do",
+            "/XObject << /Im 5 0 R >>",
+            &[stream(
+                &format!("/Subtype /Image /Width {width} /Height {height} /BitsPerComponent {bits} /ColorSpace /DeviceGray /Filter /ASCIIHexDecode"),
+                data,
+            )],
+        );
+        let audit = print_order(&bytes).unwrap();
+        let s = audit.images[0][0].samples.as_ref().unwrap();
+        assert_eq!(tones(s), want, "{bits}-bit");
+    }
+}
+#[test]
+fn refused_lossy_codec_does_not_spend_a_decode_budget_it_never_uses() {
+    let bytes = pdf(
+        "/Big Do /Small Do",
+        "/XObject << /Big 5 0 R /Small 6 0 R >>",
+        &[
+            stream("/Subtype /Image /Width 8192 /Height 8192 /BitsPerComponent 8 /ColorSpace /DeviceCMYK /Filter /DCTDecode", "not a JPEG"),
+            image("/ColorSpace /DeviceGray"),
+        ],
+    );
+    let audit = print_order(&bytes).unwrap();
+    assert!(audit.images[0][0].sample_error.as_ref().unwrap().contains("compression"));
+    assert!(audit.images[0][1].samples.is_some());
+}
+#[test]
+fn compressed_stream_cut_midway_never_yields_complete_samples() {
+    use std::io::Write;
+    let original: Vec<u8> = (0..1024).map(|i| (i % 256) as u8).collect();
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(&original).unwrap();
+    let mut compressed = encoder.finish().unwrap();
+    compressed.truncate(compressed.len() / 2);
+    let hex: String = compressed.iter().map(|b| format!("{b:02x}")).collect();
+    let bytes = pdf(
+        "/Im Do",
+        "/XObject << /Im 5 0 R >>",
+        &[stream(
+            "/Subtype /Image /Width 256 /Height 4 /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter [/ASCIIHexDecode /FlateDecode]",
+            &format!("{hex}>"),
+        )],
+    );
+    let audit = print_order(&bytes).unwrap();
+    assert!(audit.images[0][0].samples.is_none());
+    assert!(audit.images[0][0].sample_error.is_some());
+}

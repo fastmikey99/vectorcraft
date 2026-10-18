@@ -7,6 +7,10 @@ use serde::Serialize;
 pub(crate) const MAX_IMAGES: usize = 4096;
 #[derive(Clone, Debug, Serialize)]
 pub struct PrintImageUse {
+    /// Decoded source-space samples; unresolved compositing remains separately reported.
+    pub samples: Option<crate::PrintImageSamples>,
+    pub sample_error: Option<String>,
+    pub compositing_unresolved: bool,
     pub layer: Option<usize>,
     /// Number of preceding path-paint events on this page; image order is the list order.
     pub before_path: usize,
