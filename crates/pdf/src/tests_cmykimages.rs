@@ -162,6 +162,35 @@ fn close(a: &[u8], b: &[u8], tolerance: u8) -> bool {
 }
 
 #[test]
+fn indexed_cmyk_keeps_palette_inks_decode_row_padding_and_alpha() {
+    let palette = [0, 0, 0, 0, 10, 20, 30, 40, 255, 0, 99, 0, 0, 255, 0, 17];
+    // Three pixels per row: two-bit samples have two padding bits on each row.
+    let image = "/Width 3 /Height 2 /ColorSpace [/Indexed /DeviceCMYK 3 6 0 R] /BitsPerComponent 2 /Decode [3 0] /SMask 7 0 R";
+    let mask = stream("/Type /XObject /Subtype /Image /Width 3 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8", &[0, 51, 102, 153, 204, 255]);
+    let input = pdf_with_images(&[(image.into(), vec![0b00011011, 0b11100111])], &[stream("", &palette), mask]);
+    let imported = import_with_report(&input, &ImportOptions::default()).unwrap();
+    assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+    let expected: Vec<u8> = [3, 2, 1, 0, 1, 2].into_iter().flat_map(|i| palette[i * 4..i * 4 + 4].iter().copied()).collect();
+    for doc in [&imported.document, &import(&export(&imported.document, &PdfOptions::default()).unwrap()).unwrap()] {
+        let images = masked(doc);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].0.cmyk().unwrap().data, expected);
+        assert!(images[0].1.is_some(), "opacity mask retained");
+    }
+}
+
+#[test]
+fn indexed_cmyk_string_palette_clamps_indices_and_reports_short_tables() {
+    let dict = "/Width 3 /Height 1 /ColorSpace [/Indexed /DeviceCMYK 1 <000000000a141e28>] /BitsPerComponent 8";
+    let input = pdf_with_images(&[(dict.into(), vec![0, 1, 255])], &[]);
+    let doc = import(&input).unwrap();
+    assert_eq!(blobs(&doc)[0].cmyk().unwrap().data, [0, 0, 0, 0, 10, 20, 30, 40, 10, 20, 30, 40]);
+    let input = pdf_with_images(&[(dict.replace("000000000a141e28", "00000000"), vec![0, 1, 255])], &[]);
+    let result = import_with_report(&input, &ImportOptions::default()).unwrap();
+    assert!(result.warnings.iter().any(|w| w.contains(crate::import_image::UNREAD)));
+}
+
+#[test]
 fn a_cmyk_jpeg_passes_through_open_and_every_pdf_export() {
     // The issue's file: a DeviceCMYK JPEG (Adobe's inverted samples, Decode [1 0 …]) beside a
     // DeviceCMYK fill.

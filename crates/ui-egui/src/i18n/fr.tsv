@@ -5017,3 +5017,16 @@ theme	Appearance	Apparence
 	Unassigned	Non attribué
 @msg	Invalid separation context or too many entries	Contexte de séparation invalide ou trop d’entrées
 @msg	Invalid or duplicate separation name/component	Nom de séparation ou composant invalide ou en double
+
+# Hybrid separation checks
+	Checks	Vérifications
+	Configure Separation Checks	Configurer les vérifications des séparations
+	Check Separations	Vérifier les séparations
+	Cancel Separation Checks	Annuler les vérifications des séparations
+	Separation Check Results	Résultats de vérification des séparations
+	Inspect Separation Finding	Examiner le constat de séparation
+@msg	Check cancelled	Vérification annulée
+@msg	Check worker state unavailable	État du processus de vérification indisponible
+@msg	Internal checker failure: {e}	Erreur interne de vérification : {e}
+	Receive Separation Check Results	Recevoir les résultats de vérification des séparations
+@msg	Service check export exceeds the 64 MiB upload budget	L’export pour vérification dépasse la limite de téléversement de 64 MiB

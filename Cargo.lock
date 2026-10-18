@@ -4580,6 +4580,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "vectorcraft-checks"
+version = "0.12.0"
+dependencies = [
+ "image",
+ "serde",
+ "serde_json",
+ "sha2",
+ "vectorcraft-color",
+ "vectorcraft-doc",
+ "vectorcraft-effects",
+ "vectorcraft-geom",
+ "vectorcraft-pathops",
+ "vectorcraft-pdf",
+]
+
+[[package]]
 name = "vectorcraft-cli"
 version = "0.12.0"
 dependencies = [
@@ -4664,6 +4680,7 @@ dependencies = [
  "vectorcraft-affinity",
  "vectorcraft-brush",
  "vectorcraft-cad",
+ "vectorcraft-checks",
  "vectorcraft-color",
  "vectorcraft-doc",
  "vectorcraft-eps",
@@ -4996,6 +5013,7 @@ dependencies = [
  "log",
  "rfd",
  "serde_json",
+ "vectorcraft-checks",
  "vectorcraft-color",
  "vectorcraft-doc",
  "vectorcraft-engine",

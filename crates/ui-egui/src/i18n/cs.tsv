@@ -5018,3 +5018,16 @@ mark-style	Japanese	Japonské
 	Unassigned	Nepřiřazeno
 @msg	Invalid separation context or too many entries	Neplatný kontext separace nebo příliš mnoho položek
 @msg	Invalid or duplicate separation name/component	Neplatný nebo duplicitní název separace či součásti
+
+# Hybrid separation checks
+	Checks	Kontroly
+	Configure Separation Checks	Nastavit kontroly separací
+	Check Separations	Zkontrolovat separace
+	Cancel Separation Checks	Zrušit kontroly separací
+	Separation Check Results	Výsledky kontroly separací
+	Inspect Separation Finding	Prohlédnout nález separace
+@msg	Check cancelled	Kontrola zrušena
+@msg	Check worker state unavailable	Stav kontrolního procesu není dostupný
+@msg	Internal checker failure: {e}	Interní chyba kontroly: {e}
+	Receive Separation Check Results	Přijmout výsledky kontroly separací
+@msg	Service check export exceeds the 64 MiB upload budget	Export pro kontrolu překračuje limit nahrávání 64 MiB

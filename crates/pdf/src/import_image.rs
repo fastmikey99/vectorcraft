@@ -78,6 +78,9 @@ fn decode_ranges(d: &Dict<'_>, count: usize) -> Vec<(f32, f32)> {
 /// `Err` (a warning) when it is one that is read as RGB.
 pub(crate) fn cmyk(st: &Stream<'_>, width: u32, height: u32) -> Result<Option<ImageBlob>, &'static str> {
     let d = st.dict();
+    if let Some(blob) = indexed_cmyk(st, width, height)? {
+        return Ok(Some(blob));
+    }
     let Some(channels) = channels(d) else { return Ok(None) };
     let count = channels.len();
     let ranges = decode_ranges(d, count);
@@ -135,6 +138,58 @@ pub(crate) fn cmyk(st: &Stream<'_>, width: u32, height: u32) -> Result<Option<Im
         }
     }
     Ok(Some(blob))
+}
+
+/// Expand an Indexed DeviceCMYK palette without a preview RGB conversion. PDF samples
+/// are MSB-first, rows are byte-padded, and Decode maps indices before hival clamping.
+fn indexed_cmyk(st: &Stream<'_>, width: u32, height: u32) -> Result<Option<ImageBlob>, &'static str> {
+    let d = st.dict();
+    let Some(space) = d.get::<Array<'_>>(key(d, b"ColorSpace", b"CS")) else { return Ok(None) };
+    let mut items = space.flex_iter();
+    if !items.next::<Name<'_>>().is_some_and(|n| matches!(n.as_ref(), b"Indexed" | b"I"))
+        || !items.next::<Name<'_>>().is_some_and(|n| matches!(n.as_ref(), b"DeviceCMYK" | b"CMYK"))
+    {
+        return Ok(None);
+    }
+    let high = items.next::<u32>().filter(|n| *n <= 255).ok_or(UNREAD)? as usize;
+    let palette = items
+        .next::<Stream<'_>>()
+        .and_then(|s| s.decoded().ok().map(|b| b.into_owned()))
+        .or_else(|| items.next::<craft_pdf::syntax::object::String<'_>>().map(|s| s.to_vec()))
+        .ok_or(UNREAD)?;
+    if palette.len() < (high + 1) * 4 {
+        return Err(UNREAD);
+    }
+    let bpc = d.get::<u8>(key(d, b"BitsPerComponent", b"BPC")).ok_or(UNREAD)?;
+    let count = u64::from(width) * u64::from(height);
+    if !matches!(bpc, 1 | 2 | 4 | 8) || count == 0 || count > MAX_CMYK_PIXELS {
+        return Err(UNREAD);
+    }
+    let max = (1_u16 << bpc) - 1;
+    let (lo, hi) = if let Some(decode) = d.get::<Array<'_>>(key(d, b"Decode", b"D")) {
+        let values: Vec<f64> = decode.iter::<f64>().collect();
+        match values.as_slice() {
+            [lo, hi] if lo.is_finite() && hi.is_finite() => (*lo, *hi),
+            _ => return Err(UNREAD),
+        }
+    } else {
+        (0.0, f64::from(max))
+    };
+    let params = ImageDecodeParams { is_indexed: true, bpc: Some(bpc), num_components: Some(1), target_dimension: None, width, height };
+    let decoded = st.decoded_image(&params).map_err(|_| UNREAD)?;
+    let row_bytes = (u64::from(width) * u64::from(bpc)).div_ceil(8) as usize;
+    let raw = decoded.data.get(..row_bytes * height as usize).ok_or(UNREAD)?;
+    let mut inks = Vec::with_capacity(count as usize * 4);
+    for row in raw.chunks_exact(row_bytes) {
+        for x in 0..width as usize {
+            let bit = x * usize::from(bpc);
+            let byte = row.get(bit / 8).ok_or(UNREAD)?;
+            let sample = (u16::from(*byte) >> (8 - usize::from(bpc) - bit % 8)) & max;
+            let index = (lo + f64::from(sample) / f64::from(max) * (hi - lo)).clamp(0.0, high as f64).round() as usize;
+            inks.extend_from_slice(palette.get(index * 4..index * 4 + 4).ok_or(UNREAD)?);
+        }
+    }
+    Inks::new(width, height, inks).and_then(|i| ImageBlob::cmyk_tiff(&i)).map(Some).ok_or(UNREAD)
 }
 
 /// Does the image carry its own transparency (a soft mask, a stencil mask or a colour key)?

@@ -239,6 +239,8 @@ pub(crate) struct Scan {
     pub paints: Vec<bool>,
     /// Overprint mode of each path paint, parallel to paints.
     pub paint_zero: Vec<bool>,
+    /// Optional production audit; ordinary editable imports allocate no event log.
+    pub print_order: Option<crate::print_order::PageOrder>,
     /// How the text shown before each of [`Self::paints`] (since the one before it) overprints,
     /// and last the text after them all: one more entry than `paints`.
     pub texts: Vec<TextOverprint>,
@@ -439,6 +441,8 @@ struct Walker<'w, 'p> {
     xref: &'p craft_pdf::syntax::xref::XRef,
     fonts: &'w mut FontNames,
     visible: Vec<bool>,
+    layers: Vec<Option<usize>>,
+    marked_floor: usize,
     ops: usize,
     max_ops: usize,
     max_form_bytes: usize,
@@ -466,11 +470,17 @@ impl Walker<'_, '_> {
     fn begin(&mut self, on: bool) {
         let v = self.is_visible() && on;
         self.visible.push(v);
+        if self.out.print_order.is_some() {
+            self.layers.push(self.layers.last().copied().flatten());
+        }
     }
 
     /// Enter optional content `d` (object `id`): a group, or a membership dictionary whose policy
     /// decides from its groups.
     fn begin_oc(&mut self, d: &Dict<'_>, id: Option<ObjectIdentifier>) {
+        if !d.get::<Name<'_>>(b"Type").is_some_and(|t| matches!(t.as_ref(), b"OCG" | b"OCMD")) {
+            self.order_issue("Invalid optional-content dictionary cannot establish print order");
+        }
         let membership = id.is_none() || d.get::<Name<'_>>(b"Type").is_some_and(|t| t.as_ref() == b"OCMD");
         let on = match id {
             Some(id) if !membership => !self.off.contains(&id),
@@ -490,6 +500,32 @@ impl Walker<'_, '_> {
             }
         };
         self.begin(on);
+        if self.out.print_order.is_some() {
+            let group = id.and_then(|id| self.ocgs.group_of(d, id, self.xref));
+            if membership {
+                self.order_issue("Optional-content membership print state requires verification");
+            }
+            if let Some(layer) = self.layers.last_mut() {
+                *layer = group;
+            }
+        }
+    }
+    fn order_issue(&mut self, issue: &str) {
+        if let Some(order) = &mut self.out.print_order {
+            order.issues.insert(issue.into());
+        }
+    }
+    fn order_mark(&mut self) {
+        if !self.is_visible() {
+            return;
+        }
+        if let Some(order) = &mut self.out.print_order {
+            if order.layers.len() >= 50_000 {
+                self.out.cut = true;
+                return;
+            }
+            order.layers.push(self.layers.last().copied().flatten());
+        }
     }
 
     fn state(&self) -> State {
@@ -520,6 +556,7 @@ impl Walker<'_, '_> {
         let s = self.state();
         let on = if stroke { s.stroke } else { s.fill };
         self.overprinting(on);
+        self.order_mark();
         let k = self.out.paints.len();
         self.out.paints.push(on);
         self.out.paint_zero.push(!s.nonzero);
@@ -530,6 +567,7 @@ impl Walker<'_, '_> {
 
     /// The interpreter shows text.
     fn shown(&mut self) {
+        self.order_issue("Text rendering mode and glyph paint order require direct text census");
         if !self.is_visible() {
             return;
         }
@@ -614,7 +652,19 @@ impl Walker<'_, '_> {
         // left saved when it ends.
         let saved = self.states.len();
         self.save();
+        let marked = self.layers.len();
+        let outer = self.out.print_order.is_some().then(|| (self.visible.clone(), self.layers.clone()));
+        let floor = self.marked_floor;
+        self.marked_floor = marked;
         self.walk_ops(&mut iter, res, depth);
+        if self.out.print_order.is_some() && self.layers.len() != marked {
+            self.order_issue("Unbalanced form marked content cannot establish print order");
+            if let Some((visible, layers)) = outer {
+                self.layers = layers;
+                self.visible = visible;
+            }
+        }
+        self.marked_floor = floor;
         self.out.cut |= !blank_tail(data.get(iter.committed()..).unwrap_or_default());
         self.states.truncate(saved);
     }
@@ -669,6 +719,9 @@ impl Walker<'_, '_> {
 
     fn walk_ops(&mut self, iter: &mut TypedIter<'_>, res: &Resources<'_>, depth: u32) {
         while let Some(op) = iter.next() {
+            if self.out.cut {
+                return;
+            }
             self.ops += 1;
             if self.ops > self.max_ops || self.out.tags.len() >= MAX_TAGS {
                 self.out.cut = true;
@@ -690,6 +743,9 @@ impl Walker<'_, '_> {
                             self.ocgs.group_of(&d, id, self.xref)
                         }
                         None => {
+                            if bdc.0.as_ref() == b"OC" {
+                                self.order_issue("Unresolved optional-content property cannot establish print order");
+                            }
                             self.begin(true);
                             None
                         }
@@ -701,7 +757,11 @@ impl Walker<'_, '_> {
                     self.out.tags.push((tag_key(bmc.0.as_ref()), None));
                 }
                 TypedInstruction::EndMarkedContent(_) => {
+                    if self.layers.len() <= self.marked_floor {
+                        self.order_issue("Unmatched marked-content end cannot establish print order");
+                    }
                     self.visible.pop();
+                    self.layers.pop();
                 }
                 TypedInstruction::SaveState(_) => self.save(),
                 TypedInstruction::RestoreState(_) => self.restore(),
@@ -736,6 +796,8 @@ impl Walker<'_, '_> {
                         self.set_pattern(false, ink);
                         self.painted(false);
                         self.restore();
+                    } else {
+                        self.order_issue("Missing shading resource cannot establish print completeness");
                     }
                 }
                 TypedInstruction::ColorSpaceNonStroke(cs) => {
@@ -771,13 +833,18 @@ impl Walker<'_, '_> {
                 | TypedInstruction::ShowTexts(_)
                 | TypedInstruction::NextLineAndShowText(_)
                 | TypedInstruction::ShowTextWithParameters(_) => self.shown(),
+                TypedInstruction::InlineImage(_) => self.order_issue("Inline image requires direct image paint census"),
                 TypedInstruction::XObject(x) => {
                     if !self.is_visible() {
                         continue;
                     }
-                    let Some(s) = res.get_x_object(x.0) else { continue };
+                    let Some(s) = res.get_x_object(x.0) else {
+                        self.order_issue("Missing XObject cannot establish print completeness");
+                        continue;
+                    };
                     let d = s.dict();
                     if d.get::<Name<'_>>(b"Subtype").as_deref() != Some(b"Form") || d.get::<[f32; 4]>(b"BBox").is_none() {
+                        self.order_issue("Image or unrecognised XObject requires direct paint census");
                         continue;
                     }
                     if depth >= MAX_DEPTH {
@@ -818,6 +885,7 @@ impl Walker<'_, '_> {
                     }
                     if oc.is_some() {
                         self.visible.pop();
+                        self.layers.pop();
                     }
                 }
                 _ => {}
@@ -848,11 +916,18 @@ fn embeds_glyphs(f: &Dict<'_>) -> bool {
 /// found are noted in `fonts` (their cache key → base font name, and whether the file carries its
 /// glyphs).
 pub(crate) fn scan_page(page: &Page<'_>, ocgs: &mut Ocgs, all_on: bool, fonts: &mut FontNames, max_form_bytes: usize) -> Result<Scan, PdfError> {
-    let scan = walk_page(page, ocgs, all_on, fonts, max_form_bytes).out;
+    let scan = walk_page(page, ocgs, all_on, fonts, max_form_bytes, false).out;
     if scan.cut { Err(incomplete_content()) } else { Ok(scan) }
 }
 
-fn walk_page<'w, 'p>(page: &Page<'p>, ocgs: &'w mut Ocgs, all_on: bool, fonts: &'w mut FontNames, max_form_bytes: usize) -> Walker<'w, 'p> {
+fn walk_page<'w, 'p>(
+    page: &Page<'p>,
+    ocgs: &'w mut Ocgs,
+    all_on: bool,
+    fonts: &'w mut FontNames,
+    max_form_bytes: usize,
+    record_order: bool,
+) -> Walker<'w, 'p> {
     let off = if all_on { HashSet::new() } else { ocgs.off.clone() };
     let mut w = Walker {
         ocgs,
@@ -860,10 +935,12 @@ fn walk_page<'w, 'p>(page: &Page<'p>, ocgs: &'w mut Ocgs, all_on: bool, fonts: &
         xref: page.xref(),
         fonts,
         visible: vec![],
+        layers: vec![],
+        marked_floor: 0,
         ops: 0,
         max_ops: max_ops(),
         max_form_bytes,
-        out: Scan::default(),
+        out: Scan { print_order: record_order.then(Default::default), ..Default::default() },
         hidden_form: false,
         states: vec![State::default()],
         text: TextOverprint::None,
@@ -872,6 +949,9 @@ fn walk_page<'w, 'p>(page: &Page<'p>, ocgs: &'w mut Ocgs, all_on: bool, fonts: &
         inks_cut: false,
     };
     w.page(page);
+    if !w.layers.is_empty() {
+        w.order_issue("Unbalanced marked content cannot establish print order");
+    }
     w.inks_cut |= !w.out.text_inks.set(w.out.paints.len(), w.text_inks.map(RunInk::ink));
     if w.inks_cut {
         w.out.inks.clear();
@@ -884,7 +964,7 @@ fn walk_page<'w, 'p>(page: &Page<'p>, ocgs: &'w mut Ocgs, all_on: bool, fonts: &
 /// sequence)? Its art couldn't be told apart by group once every group is on.
 pub(crate) fn hides_forms(page: &Page<'_>, ocgs: &mut Ocgs, max_form_bytes: usize) -> Result<bool, PdfError> {
     let mut fonts = HashMap::new();
-    let walk = walk_page(page, ocgs, false, &mut fonts, max_form_bytes);
+    let walk = walk_page(page, ocgs, false, &mut fonts, max_form_bytes, false);
     if walk.out.cut { Err(incomplete_content()) } else { Ok(walk.hidden_form) }
 }
 
@@ -929,4 +1009,14 @@ fn trailer_at(bytes: &[u8], at: usize) -> Option<&[u8]> {
     let open = from + rest.get(from..)?.windows(2).position(|w| w == b"<<")?;
     let d = Dict::from_bytes(rest.get(open..)?)?;
     Some(d.data())
+}
+
+/// Actual content-stream ordering, before editable layer aggregation.
+pub(crate) fn scan_print_order(page: &Page<'_>, ocgs: &mut Ocgs, max_form_bytes: usize) -> Result<crate::print_order::PageOrder, PdfError> {
+    let mut fonts = HashMap::new();
+    let scan = walk_page(page, ocgs, true, &mut fonts, max_form_bytes, true).out;
+    if scan.cut {
+        return Err(incomplete_content());
+    }
+    scan.print_order.ok_or_else(incomplete_content)
 }

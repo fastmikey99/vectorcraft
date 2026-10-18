@@ -4970,3 +4970,16 @@ effect	Points	Σημεία
 	Unassigned	Μη αντιστοιχισμένο
 @msg	Invalid separation context or too many entries	Μη έγκυρο πλαίσιο διαχωρισμού ή πάρα πολλές καταχωρίσεις
 @msg	Invalid or duplicate separation name/component	Μη έγκυρο ή διπλό όνομα διαχωρισμού ή στοιχείο
+
+# Hybrid separation checks
+	Checks	Έλεγχοι
+	Configure Separation Checks	Ρύθμιση ελέγχων διαχωρισμών
+	Check Separations	Έλεγχος διαχωρισμών
+	Cancel Separation Checks	Ακύρωση ελέγχων διαχωρισμών
+	Separation Check Results	Αποτελέσματα ελέγχου διαχωρισμών
+	Inspect Separation Finding	Επιθεώρηση ευρήματος διαχωρισμού
+@msg	Check cancelled	Ο έλεγχος ακυρώθηκε
+@msg	Check worker state unavailable	Η κατάσταση της διεργασίας ελέγχου δεν είναι διαθέσιμη
+@msg	Internal checker failure: {e}	Εσωτερικό σφάλμα ελέγχου: {e}
+	Receive Separation Check Results	Λήψη αποτελεσμάτων ελέγχου διαχωρισμών
+@msg	Service check export exceeds the 64 MiB upload budget	Η εξαγωγή για έλεγχο υπερβαίνει το όριο μεταφόρτωσης των 64 MiB

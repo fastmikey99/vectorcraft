@@ -199,3 +199,13 @@ Shared docking now supplies opaque panel and tab backgrounds to floating groups.
 Regression coverage compares actual composite pixels across load, ink isolation
 and Show all, verifies the source document stays unchanged, and inspects the
 floating panel's painted background.
+
+## Asynchronous separation checks
+
+A build advertising `separationChecks` accepts `vectorcraft:checks {id, request}` to configure the current document without reopening it. The request is the versioned immutable recipe/job/preparation contract; it is limited to 16 MiB. A successful configuration answers `vectorcraft:checks-configured {id}`. A null request clears the context and cancels its pending work.
+
+A build advertising `separationCheckService` also connects the Checks panel to the host's verification service. Check exports a frozen document snapshot using the Separation Roundtrip preset and source-colour preservation. It sends `vectorcraft:check {id, bytes}` with a transferred ArrayBuffer, limited to 64 MiB. This is a check request, not a save or download; it does not mark the document clean. The host submits those exact bytes and returns `vectorcraft:check-result {id, report}` or `{id, error}` on the same origin. Results are limited to 32 MiB and revalidated against every immutable input and the complete locally enumerated obligation catalogue.
+
+The persistent service may assign its own run UUID; the one-use bridge ID correlates the response to the frozen snapshot. Editing remains available and marks a returned snapshot stale. Cancel or reconfiguration sends `vectorcraft:check-cancel {id}`; the host must abort its request and discard late completion. The bridge rejects old IDs and expires a pending service response after 180 seconds. Local findings remain provisional: the bridge does not issue independent qualification receipts or a production release.
+
+The editor sends `vectorcraft:check-validity {run_id, validity}` when the active report becomes stale or returns to its checked snapshot. Hosts must match `run_id` before changing their report badge; this event can report only `stale` or `provisional`, never production approval.

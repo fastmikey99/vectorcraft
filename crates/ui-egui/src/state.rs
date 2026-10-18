@@ -148,6 +148,7 @@ pub const ICON_PANELS: &[(&str, &str, &str)] = &[
     ("navigator", "Navigator", "map"),
     ("separations", "Separations Preview", "printer"),
     ("productionSeparations", "Production Separations", "printer"),
+    ("productionChecks", "Checks", "check"),
     ("imageTrace", "Image Trace", "image"),
     ("magicWand", "Magic Wand", "wand-sparkles"),
     (crate::panels::flattener_preview::ID, "Flattener Preview", "eye"),

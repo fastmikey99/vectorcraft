@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 vectorcraft-engine = { workspace = true }
+vectorcraft-checks = { workspace = true }
 vectorcraft-ui-egui = { workspace = true }
 vectorcraft-format = { workspace = true }
 vectorcraft-text = { workspace = true }

@@ -17,7 +17,7 @@ fn single() -> (VectorcraftApp, Inbox, HostInbox) {
 }
 
 fn hand(app: &mut VectorcraftApp, inbox: &HostInbox, name: &str, bytes: &[u8]) {
-    inbox.lock().unwrap().push(HostOpen { name: name.to_string(), bytes: bytes.to_vec(), print_production: false, separations: None });
+    inbox.lock().unwrap().push(HostOpen { name: name.to_string(), bytes: bytes.to_vec(), print_production: false, separations: None, checks: None });
     app.drain_inbox();
 }
 
@@ -118,6 +118,7 @@ fn production_context_is_validated_before_replacing_the_file_and_installed_befor
         name: "invalid.svg".into(),
         bytes: CIRCLE.to_vec(),
         print_production: false,
+        checks: None,
         separations: Some(Context::default()),
     });
     app.drain_inbox();
@@ -128,6 +129,7 @@ fn production_context_is_validated_before_replacing_the_file_and_installed_befor
         name: "configured.svg".into(),
         bytes: CIRCLE.to_vec(),
         print_production: false,
+        checks: None,
         separations: Some(context.clone()),
     });
     app.drain_inbox();
@@ -149,6 +151,7 @@ fn reopening_a_separation_keeps_its_docked_panel_in_place() {
         name: "docked.svg".into(),
         bytes: SQUARE.to_vec(),
         print_production: false,
+        checks: None,
         separations: Some(Context { label: "Reporter".into(), ..Default::default() }),
     });
     app.drain_inbox();

@@ -66,6 +66,7 @@ mod post;
 mod preserve;
 mod presets;
 mod print;
+mod print_order;
 mod settings;
 mod streams;
 mod syntax;
@@ -79,6 +80,7 @@ pub use pages::{PageInfo, PdfInfo, has_illustrator_data, illustrator_data, info,
 pub use post::{THUMBNAIL_SIZE, Thumbnail};
 pub use presets::*;
 pub use print::*;
+pub use print_order::{PrintOrder, print_order};
 pub use settings::*;
 
 use vectorcraft_doc::Document;

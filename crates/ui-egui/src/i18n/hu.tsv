@@ -4985,3 +4985,16 @@ imageTrace	Outline	Körvonal
 	Unassigned	Nincs hozzárendelve
 @msg	Invalid separation context or too many entries	Érvénytelen színkivonati környezet vagy túl sok bejegyzés
 @msg	Invalid or duplicate separation name/component	Érvénytelen vagy ismétlődő színkivonatnév vagy összetevő
+
+# Hybrid separation checks
+	Checks	Ellenőrzések
+	Configure Separation Checks	Színkivonat-ellenőrzések beállítása
+	Check Separations	Színkivonatok ellenőrzése
+	Cancel Separation Checks	Színkivonat-ellenőrzések megszakítása
+	Separation Check Results	Színkivonat-ellenőrzés eredményei
+	Inspect Separation Finding	Színkivonati megállapítás vizsgálata
+@msg	Check cancelled	Ellenőrzés megszakítva
+@msg	Check worker state unavailable	Az ellenőrzési folyamat állapota nem érhető el
+@msg	Internal checker failure: {e}	Belső ellenőrzési hiba: {e}
+	Receive Separation Check Results	Színkivonat-ellenőrzési eredmények fogadása
+@msg	Service check export exceeds the 64 MiB upload budget	Az ellenőrzéshez exportált fájl meghaladja a 64 MiB-os feltöltési korlátot

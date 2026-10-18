@@ -4974,3 +4974,16 @@ theme	Appearance	Utseende
 	Unassigned	Ej tilldelad
 @msg	Invalid separation context or too many entries	Ogiltig separationskontext eller för många poster
 @msg	Invalid or duplicate separation name/component	Ogiltigt eller dubblerat separationsnamn eller komponent
+
+# Hybrid separation checks
+	Checks	Kontroller
+	Configure Separation Checks	Konfigurera separationskontroller
+	Check Separations	Kontrollera separationer
+	Cancel Separation Checks	Avbryt separationskontroller
+	Separation Check Results	Resultat från separationskontroll
+	Inspect Separation Finding	Granska separationsanmärkning
+@msg	Check cancelled	Kontrollen avbröts
+@msg	Check worker state unavailable	Kontrollprocessens status är inte tillgänglig
+@msg	Internal checker failure: {e}	Internt kontrollfel: {e}
+	Receive Separation Check Results	Ta emot resultat från separationskontrollen
+@msg	Service check export exceeds the 64 MiB upload budget	Exporten för kontroll överskrider uppladdningsgränsen på 64 MiB

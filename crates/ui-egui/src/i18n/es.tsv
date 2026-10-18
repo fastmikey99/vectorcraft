@@ -4960,3 +4960,16 @@ mark-style	Japanese	Japonesas
 	Unassigned	Sin asignar
 @msg	Invalid separation context or too many entries	Contexto de separación no válido o demasiadas entradas
 @msg	Invalid or duplicate separation name/component	Nombre de separación o componente no válido o duplicado
+
+# Hybrid separation checks
+	Checks	Comprobaciones
+	Configure Separation Checks	Configurar comprobaciones de separaciones
+	Check Separations	Comprobar separaciones
+	Cancel Separation Checks	Cancelar comprobaciones de separaciones
+	Separation Check Results	Resultados de comprobación de separaciones
+	Inspect Separation Finding	Inspeccionar hallazgo de separación
+@msg	Check cancelled	Comprobación cancelada
+@msg	Check worker state unavailable	Estado del proceso de comprobación no disponible
+@msg	Internal checker failure: {e}	Error interno de comprobación: {e}
+	Receive Separation Check Results	Recibir resultados de comprobación de separaciones
+@msg	Service check export exceeds the 64 MiB upload budget	La exportación para la comprobación supera el límite de carga de 64 MiB

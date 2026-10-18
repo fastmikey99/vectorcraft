@@ -13,8 +13,11 @@ use crate::boolean::{Arrangement, DEFAULT_PRECISION, Tidy, all_contours_to_path,
 const STROKE_TOL: f64 = 1e-3;
 
 fn stroke_bez(bp: &BezPath, width: f64, cap: Cap, join: Join, miter_limit: f64) -> BezPath {
+    stroke_bez_with(bp, width, cap, join, miter_limit, STROKE_TOL)
+}
+fn stroke_bez_with(bp: &BezPath, width: f64, cap: Cap, join: Join, miter_limit: f64, precision: f64) -> BezPath {
     let style = Stroke::new(width).with_join(join).with_caps(cap).with_miter_limit(miter_limit.max(1.0));
-    close_all(&kurbo::stroke(bp.iter(), &style, &StrokeOpts::default(), STROKE_TOL))
+    close_all(&kurbo::stroke(bp.iter(), &style, &StrokeOpts::default(), precision))
 }
 
 /// kurbo's stroker may leave the outline of an open path without a final `ClosePath`.
@@ -84,6 +87,17 @@ pub fn offset_path(path: &PathData, delta: f64, join: Join, miter_limit: f64) ->
 /// [`offset_path`] gives an empty path (which is also the right answer for an inset larger than
 /// the shapes, so callers that must tell the two apart use this).
 pub fn try_offset_path(path: &PathData, delta: f64, join: Join, miter_limit: f64) -> Result<PathData, crate::PathOpsError> {
+    offset_impl(path, delta, join, miter_limit, STROKE_TOL, true)
+}
+/// Retain small contours and avoid refitting for evidence measurements. The caller supplies
+/// numerical stroke precision separately from manufacturing acceptance.
+pub fn try_offset_path_for_measurement(path: &PathData, delta: f64, precision: f64) -> Result<PathData, crate::PathOpsError> {
+    if !precision.is_finite() || precision <= 0.0 {
+        return Err(crate::PathOpsError::NonFinite);
+    }
+    offset_impl(path, delta, Join::Round, 4.0, precision, false)
+}
+fn offset_impl(path: &PathData, delta: f64, join: Join, miter_limit: f64, precision: f64, tidy: bool) -> Result<PathData, crate::PathOpsError> {
     if !delta.is_finite() {
         return Err(crate::PathOpsError::NonFinite);
     }
@@ -94,9 +108,9 @@ pub fn try_offset_path(path: &PathData, delta: f64, join: Join, miter_limit: f64
     let open: Vec<SubPath> = path.subpaths.iter().filter(|s| !s.closed && s.anchors.len() > 1).cloned().collect();
     let d = delta.abs();
     let fill = fill_bezpath(&closed);
-    let ring = if d > 0.0 { stroke_bez(&closed.to_bezpath(), 2.0 * d, Cap::Butt, join, miter_limit) } else { BezPath::new() };
+    let ring = if d > 0.0 { stroke_bez_with(&closed.to_bezpath(), 2.0 * d, Cap::Butt, join, miter_limit, precision) } else { BezPath::new() };
     let open_bp = if d > 0.0 && !open.is_empty() {
-        stroke_bez(&PathData::new(open).to_bezpath(), 2.0 * d, Cap::Butt, join, miter_limit)
+        stroke_bez_with(&PathData::new(open).to_bezpath(), 2.0 * d, Cap::Butt, join, miter_limit, precision)
     } else {
         BezPath::new()
     };
@@ -145,10 +159,14 @@ pub fn try_offset_path(path: &PathData, delta: f64, join: Join, miter_limit: f64
         })
         .collect();
     if !spurious.contains(&true) {
-        return Ok(all_contours_to_path(&c, &Tidy::free(DEFAULT_PRECISION)));
+        return Ok(if tidy {
+            all_contours_to_path(&c, &Tidy::free(DEFAULT_PRECISION))
+        } else {
+            crate::boolean::raw_contours_to_path(&c, (0..c.contours().count()).map(ContourIdx))
+        });
     }
     let keep = (0..spurious.len()).filter(|&i| !has_marked_ancestor(&c, i, &spurious)).map(ContourIdx);
-    Ok(contours_to_path(&c, keep, &Tidy::free(DEFAULT_PRECISION)))
+    Ok(if tidy { contours_to_path(&c, keep, &Tidy::free(DEFAULT_PRECISION)) } else { crate::boolean::raw_contours_to_path(&c, keep) })
 }
 
 fn has_marked_ancestor(c: &Contours, mut i: usize, marked: &[bool]) -> bool {

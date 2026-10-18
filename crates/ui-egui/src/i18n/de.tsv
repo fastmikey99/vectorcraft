@@ -4555,3 +4555,16 @@ theme	Appearance	Erscheinungsbild
 	Unassigned	Nicht zugewiesen
 @msg	Invalid separation context or too many entries	Ungültiger Farbauszugskontext oder zu viele Einträge
 @msg	Invalid or duplicate separation name/component	Ungültiger oder doppelter Farbauszugsname bzw. Komponente
+
+# Hybrid separation checks
+	Checks	Prüfungen
+	Configure Separation Checks	Farbauszugsprüfungen konfigurieren
+	Check Separations	Farbauszüge prüfen
+	Cancel Separation Checks	Farbauszugsprüfungen abbrechen
+	Separation Check Results	Ergebnisse der Farbauszugsprüfung
+	Inspect Separation Finding	Prüfbefund des Farbauszugs ansehen
+@msg	Check cancelled	Prüfung abgebrochen
+@msg	Check worker state unavailable	Status des Prüfprozesses nicht verfügbar
+@msg	Internal checker failure: {e}	Interner Prüfungsfehler: {e}
+	Receive Separation Check Results	Ergebnisse der Farbauszugsprüfung empfangen
+@msg	Service check export exceeds the 64 MiB upload budget	Der Export zur Prüfung überschreitet das Upload-Limit von 64 MiB
