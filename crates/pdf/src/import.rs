@@ -200,6 +200,7 @@ fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_p
     let incomplete_sink = incomplete.clone();
     let settings = InterpreterSettings {
         preserve_path_geometry: true,
+        preserve_clip_paths: opts.preserve_clip_paths,
         warning_sink: Arc::new(move |w| {
             let msg = match w {
                 InterpreterWarning::UnsupportedFont => "a font could not be read; its text was skipped",
@@ -225,6 +226,7 @@ fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_p
     doc.layers.clear();
     let taken: Vec<String> = doc.swatches_iter().map(|s| s.name.clone()).chain(doc.swatch_groups.iter().map(|g| g.name.clone())).collect();
     let mut b = Builder::new(doc.peek_next_id(), Colors::new(&pdf, taken.clone()), opts.text_as, route);
+    b.preserve_clip_paths = opts.preserve_clip_paths;
     // The art of a group that is off (drawn as `all_on` turned it on) or doesn't print mustn't
     // show or print on its page's layer.
     b.unsure = route && ocgs.list.iter().any(|g| (all_on && !g.on) || !g.print);
@@ -279,6 +281,9 @@ fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_p
             return Err(crate::import_scan::incomplete_content());
         }
         let mut parts = b.end_page();
+        if b.clip_budget_exceeded {
+            return Err(PdfError::Parse("Verification clip retention budget exceeded".into()));
+        }
         // A PDF-compatible `.ai` (the editor's private data next to the PDF art).
         let ai = crate::pages::has_private_data(page);
         if ai {
@@ -296,7 +301,8 @@ fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_p
         }
         // Viewers show a page through its crop box, so art reaching past it (a mock-up backdrop
         // around the page, say) never showed. A clip to the page box that the file states is
-        // dropped as redundant (by hayro and by `push_clip_path`), so restore the box here:
+        // normally dropped as redundant. Verification retains explicit clips and measures
+        // their painted children, not the clip outline. Restore the page box when needed:
         // each object reaching past it keeps its own clip, which Fit to Artwork Bounds and
         // `CropTo::Bounding` then respect.
         // Supacolour print policy: the CropBox is what prints, even for PDF-compatible
@@ -306,7 +312,8 @@ fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_p
         let mut clipped = false;
         for (_, art) in &mut parts {
             for n in art.iter_mut() {
-                if n.visual_bounds().is_some_and(|r| !contains(page_box, r)) {
+                let painted = if opts.preserve_clip_paths { verification_painted_bounds(n) } else { n.visual_bounds() };
+                if painted.is_some_and(|r| !contains(page_box, r)) {
                     let clip = Arc::new(b.clip_node(&shown.to_path(0.1), FillRule::NonZero));
                     *n = Arc::new(Node::new(b.id(), NodeKind::Group { children: vec![clip, n.clone()], clip: true }));
                     clipped = true;
@@ -799,6 +806,10 @@ struct Saved {
 }
 
 struct Builder<'p> {
+    preserve_clip_paths: bool,
+    retained_clip_units: usize,
+    retained_clip_groups: usize,
+    clip_budget_exceeded: bool,
     colors: Colors<'p>,
     next: u64,
     stack: Vec<Frame>,
@@ -967,9 +978,35 @@ fn bounds(nodes: &[Arc<Node>]) -> Option<Rect> {
     nodes.iter().try_fold(None, |acc, n| n.visual_bounds().map(|b| Some(acc.map_or(b, |a: Rect| a.union(b)))))?
 }
 
+/// Verification clips do not paint their own outlines. Keep the page-crop test
+/// conservative for painted/effected containers, and intersect ordinary clip
+/// bounds with the art they actually constrain (including nested clips).
+fn verification_painted_bounds(node: &Node) -> Option<Rect> {
+    match &node.kind {
+        NodeKind::Group { children, clip } if node.appearance.items.is_empty() && node.appearance.effects.is_empty() => {
+            if *clip {
+                let mask = children.first()?;
+                if !mask.appearance.items.is_empty() || !mask.appearance.effects.is_empty() {
+                    return node.visual_bounds();
+                }
+                let art = children.iter().skip(1).filter_map(|n| verification_painted_bounds(n)).reduce(|a, b| a.union(b))?;
+                let intersection = mask.geometric_bounds()?.intersect(art);
+                (intersection.width() > 0.0 && intersection.height() > 0.0).then_some(intersection)
+            } else {
+                children.iter().filter_map(|n| verification_painted_bounds(n)).reduce(|a, b| a.union(b))
+            }
+        }
+        _ => node.visual_bounds(),
+    }
+}
+
 impl<'p> Builder<'p> {
     fn new(next: u64, colors: Colors<'p>, text_as: TextAs, route: bool) -> Self {
         Self {
+            preserve_clip_paths: false,
+            retained_clip_units: 0,
+            retained_clip_groups: 0,
+            clip_budget_exceeded: false,
             colors,
             next,
             stack: vec![],
@@ -1133,18 +1170,33 @@ impl<'p> Builder<'p> {
     /// Add `n` to the open frame; `group`: the optional content group it was drawn in, if it
     /// knows one (else the current one).
     fn emit(&mut self, n: Arc<Node>, group: Option<usize>) {
+        self.emit_at(n, group.or(self.current_group()));
+    }
+
+    /// Emit a child whose optional-content identity was already captured. An
+    /// explicit ungrouped child must not inherit a later marked-content scope.
+    fn emit_at(&mut self, n: Arc<Node>, group: Option<usize>) {
         let root = self.stack.len() == 1;
-        let current = self.current_group();
         let Some(f) = self.stack.last_mut() else { return };
         f.children.push(n);
         // A frame's art goes where its first art was drawn (a clip can end in a later group).
         if root {
-            self.root_groups.push(group.or(current));
+            self.root_groups.push(group);
         } else {
-            f.child_groups.push(group.or(current));
+            f.child_groups.push(group);
             if f.group.is_none() {
-                f.group = group.or(current);
+                f.group = group;
             }
+        }
+    }
+
+    fn emit_frame_children(&mut self, children: Vec<Arc<Node>>, groups: Vec<Option<usize>>, fallback: Option<usize>) {
+        if self.preserve_clip_paths {
+            for (child, group) in children.into_iter().zip(groups.into_iter().chain(std::iter::repeat(fallback))) {
+                self.emit_at(child, group);
+            }
+        } else {
+            grouped(children, groups, fallback).for_each(|(child, group)| self.emit(child, group));
         }
     }
 
@@ -1222,18 +1274,59 @@ impl<'p> Builder<'p> {
         let node = match f.kind {
             FrameKind::Root => None,
             FrameKind::Skip => {
-                grouped(f.children, f.child_groups, group).for_each(|(c, g)| self.emit(c, g));
+                self.emit_frame_children(f.children, f.child_groups, group);
                 None
             }
             FrameKind::Clip(clip) => {
                 let noop = clip.path_data().map(|p| p.to_bezpath()).filter(is_rectangle).map(|p| p.bounding_box().inflate(0.01, 0.01));
                 if f.children.is_empty() {
                     None
-                } else if noop.is_some_and(|r| bounds(&f.children).is_some_and(|b| contains(r, b))) {
+                } else if self.preserve_clip_paths {
+                    // A clip applies independently to every child. Retain one
+                    // copy per adjacent OCG run so its first child's layer does
+                    // not absorb later layers or explicitly ungrouped artwork.
+                    let mut runs: Vec<(Option<usize>, Vec<Arc<Node>>)> = vec![];
+                    for (child, child_group) in f.children.into_iter().zip(f.child_groups.into_iter().chain(std::iter::repeat(group))) {
+                        if let Some((last_group, children)) = runs.last_mut()
+                            && *last_group == child_group
+                        {
+                            children.push(child);
+                        } else {
+                            runs.push((child_group, vec![child]));
+                        }
+                    }
+                    // Count anchors AND subpaths before copying: alternating
+                    // OCGs must not amplify one large clip without a bound. The
+                    // counters span the complete document, including nested clips.
+                    let units = clip
+                        .path_data()
+                        .map_or(250_001, |p| p.subpaths.iter().fold(0usize, |n, sub| n.saturating_add(1).saturating_add(sub.anchors.len())));
+                    self.retained_clip_units = self.retained_clip_units.saturating_add(units.saturating_mul(runs.len()));
+                    self.retained_clip_groups = self.retained_clip_groups.saturating_add(runs.len());
+                    if self.clip_budget_exceeded || self.retained_clip_units > 250_000 || self.retained_clip_groups > 16_384 {
+                        // Keep one original clip without further copies while the
+                        // interpreter unwinds. The whole import is then refused;
+                        // fallback layer attribution can never become evidence.
+                        self.clip_budget_exceeded = true;
+                        let mut children = vec![Arc::new(*clip)];
+                        children.extend(runs.into_iter().flat_map(|(_, children)| children));
+                        Some(Node::new(self.id(), NodeKind::Group { children, clip: true }))
+                    } else {
+                        for (child_group, children) in runs {
+                            let mut clipped = vec![Arc::new(self.reid(&clip))];
+                            clipped.extend(children);
+                            let node = Node::new(self.id(), NodeKind::Group { children: clipped, clip: true });
+                            self.emit_at(Arc::new(node), child_group);
+                        }
+                        None
+                    }
+                } else if !self.preserve_clip_paths && noop.is_some_and(|r| bounds(&f.children).is_some_and(|b| contains(r, b))) {
                     // A rectangle around all of its art (a form's box) clips nothing.
                     grouped(f.children, f.child_groups, group).for_each(|(c, g)| self.emit(c, g));
                     None
-                } else if let Some(shape) = gradient_shape(&clip, &f.children) {
+                } else if !self.preserve_clip_paths
+                    && let Some(shape) = gradient_shape(&clip, &f.children)
+                {
                     // One path, so tools such as the Shape Builder see the shape, not its box (#1304).
                     Some(shape)
                 } else {
@@ -1257,7 +1350,7 @@ impl<'p> Builder<'p> {
                 if children.is_empty() {
                     None
                 } else if plain {
-                    grouped(children, f.child_groups, group).for_each(|(c, g)| self.emit(c, g));
+                    self.emit_frame_children(children, f.child_groups, group);
                     None
                 } else if let [only] = children.as_slice()
                     && !only.is_container()
@@ -1909,7 +2002,8 @@ impl<'a> Device<'a> for Builder<'_> {
         // Clips that contain the whole page do nothing visible; don't create groups for them. Only
         // a polygon that really covers it counts: a diamond touching the page edges has the page
         // as its bounding box but cuts its corners away (#1542).
-        let redundant = clip_path.path.elements().len() <= 6
+        let redundant = !self.preserve_clip_paths
+            && clip_path.path.elements().len() <= 6
             && self.page.area() > 0.0
             && vectorcraft_geom::hit::polygon_covers_rect(&clip_path.path, self.page, 0.01);
         let kind = if redundant { FrameKind::Skip } else { FrameKind::Clip(Box::new(self.clip_node(&clip_path.path, fill_rule(clip_path.fill)))) };

@@ -809,7 +809,7 @@ dependencies = [
 [[package]]
 name = "craft-pdf"
 version = "0.1.0"
-source = "git+https://github.com/fastmikey99/craft-libs?rev=6f322f53d6f73c937b4347a146e911f037d16752#6f322f53d6f73c937b4347a146e911f037d16752"
+source = "git+https://github.com/fastmikey99/craft-libs?rev=bbf9f87ff696ccbf2cfe7e9e3a59a8e15e18e096#bbf9f87ff696ccbf2cfe7e9e3a59a8e15e18e096"
 dependencies = [
  "hayro-interpret",
  "hayro-syntax",
@@ -1777,7 +1777,7 @@ dependencies = [
 [[package]]
 name = "hayro-interpret"
 version = "0.7.0"
-source = "git+https://github.com/fastmikey99/craft-libs?rev=6f322f53d6f73c937b4347a146e911f037d16752#6f322f53d6f73c937b4347a146e911f037d16752"
+source = "git+https://github.com/fastmikey99/craft-libs?rev=bbf9f87ff696ccbf2cfe7e9e3a59a8e15e18e096#bbf9f87ff696ccbf2cfe7e9e3a59a8e15e18e096"
 dependencies = [
  "bitflags 2.13.2",
  "hayro-cmap",
@@ -1795,7 +1795,7 @@ dependencies = [
 [[package]]
 name = "hayro-jbig2"
 version = "0.3.0"
-source = "git+https://github.com/fastmikey99/craft-libs?rev=6f322f53d6f73c937b4347a146e911f037d16752#6f322f53d6f73c937b4347a146e911f037d16752"
+source = "git+https://github.com/fastmikey99/craft-libs?rev=bbf9f87ff696ccbf2cfe7e9e3a59a8e15e18e096#bbf9f87ff696ccbf2cfe7e9e3a59a8e15e18e096"
 dependencies = [
  "fearless_simd",
  "hayro-ccitt",
@@ -1819,7 +1819,7 @@ checksum = "885c5ef0654933139a9b9546fc2c69e18d37f38aa2520f079092b1be18f1fcaa"
 [[package]]
 name = "hayro-syntax"
 version = "0.7.2"
-source = "git+https://github.com/fastmikey99/craft-libs?rev=6f322f53d6f73c937b4347a146e911f037d16752#6f322f53d6f73c937b4347a146e911f037d16752"
+source = "git+https://github.com/fastmikey99/craft-libs?rev=bbf9f87ff696ccbf2cfe7e9e3a59a8e15e18e096#bbf9f87ff696ccbf2cfe7e9e3a59a8e15e18e096"
 dependencies = [
  "flate2",
  "hayro-ccitt",
@@ -2219,7 +2219,7 @@ dependencies = [
 [[package]]
 name = "krilla"
 version = "0.8.2"
-source = "git+https://github.com/fastmikey99/craft-libs?rev=6f322f53d6f73c937b4347a146e911f037d16752#6f322f53d6f73c937b4347a146e911f037d16752"
+source = "git+https://github.com/fastmikey99/craft-libs?rev=bbf9f87ff696ccbf2cfe7e9e3a59a8e15e18e096#bbf9f87ff696ccbf2cfe7e9e3a59a8e15e18e096"
 dependencies = [
  "base64 0.22.1",
  "bumpalo",

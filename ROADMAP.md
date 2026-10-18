@@ -278,3 +278,7 @@ pass. No broader lossless claim or parity score change is made. Customer
 files remain local and uncommitted.
 
 Revision evidence, 18 October 2026 — checker review fixes: physical process coverage includes paint outside the declared OCG; ambiguous process/source destinations remain Incomplete. Export-token snapshot validity follows edits and Undo independently of panel run replacement, including saved-byte checks. See [production checker documentation](docs/production-checks.md). No parity score, milestone completion or estimate change; raster, profile and independent runtime qualification remain open.
+
+### 19 October 2026: HC.17 verification clip context
+
+Verification callers retain explicit enclosing/page-wide clips and Form BBoxes through the shared interpreter pinned to `bbf9f87ff696ccbf2cfe7e9e3a59a8e15e18e096`. Adjacent layer runs preserve attribution, clip-copy amplification is bounded, and crop warnings follow painted children. Default editing import is unchanged. This is engineering coverage, with no parity score increase or production qualification claim. See `docs/production-checks.md`.

@@ -436,7 +436,12 @@ pub fn check(request: &Request, bytes: &[u8]) -> Result<Report, String> {
     }
     let imported = match vectorcraft_pdf::import_with_report(
         bytes,
-        &vectorcraft_pdf::ImportOptions { reject_depth_loss: true, text_as: vectorcraft_pdf::TextAs::Outlines, ..Default::default() },
+        &vectorcraft_pdf::ImportOptions {
+            preserve_clip_paths: true,
+            reject_depth_loss: true,
+            text_as: vectorcraft_pdf::TextAs::Outlines,
+            ..Default::default()
+        },
     ) {
         Ok(imported) => imported,
         Err(error) => {
@@ -476,6 +481,18 @@ pub fn check(request: &Request, bytes: &[u8]) -> Result<Report, String> {
             })
             .collect();
         if !import_complete || c.budget_exhausted || c.unresolved_layers.contains(&link.pdf_layer) {
+            continue;
+        }
+        if !c.paint_order_verified {
+            for facet in ["layer", "identity", "overprint"] {
+                report.record(
+                    &format!("file/{}/{facet}", link.key),
+                    Status::Incomplete,
+                    "Raw PDF and decoded layer attribution could not be reconciled",
+                    json!({"layer":link.pdf_layer}),
+                    evidence.clone(),
+                )?;
+            }
             continue;
         }
         if !matching.is_empty() {
@@ -620,6 +637,34 @@ pub(crate) mod tests {
         let bytes = fixture(true, "Exact#20ink", "q 0 0 5 5 re W n 0 0 15 15 re f Q", None);
         let report = report_for(&bytes);
         assert_eq!(report.findings.iter().find(|f| f.obligation.key == "file/output/overprint").unwrap().status, Status::Pass);
+    }
+    #[test]
+    fn enclosing_clip_cannot_move_a_named_ink_into_another_pdf_layer() {
+        for clip in ["0 0 100 100 re", "5 5 90 90 re"] {
+            let stream = format!("q {clip} W n /OC /A BDC 1 0 0 0 k 10 10 10 10 re f EMC /OC /B BDC /Ink cs 1 scn 30 30 10 10 re f EMC Q");
+            let bytes = objects_pdf(&[
+                "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [6 0 R 7 0 R] /D << /Order [6 0 R 7 0 R] /ON [6 0 R 7 0 R] >> >> >>".into(),
+                "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /ColorSpace << /Ink [/Separation /Exact#20ink /DeviceCMYK 5 0 R] >> /Properties << /A 6 0 R /B 7 0 R >> >> /Contents 4 0 R >>".into(),
+                format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
+                "<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 1 0 0] /N 1 >>".into(),
+                "<< /Type /OCG /Name (Layer) >>".into(),
+                "<< /Type /OCG /Name (Other) >>".into(),
+            ]);
+            let report = report_for(&bytes);
+            for facet in ["layer", "identity"] {
+                assert_ne!(report.findings.iter().find(|f| f.obligation.key == format!("file/output/{facet}")).unwrap().status, Status::Pass);
+            }
+            let imported =
+                vectorcraft_pdf::import_with_report(&bytes, &vectorcraft_pdf::ImportOptions { preserve_clip_paths: true, ..Default::default() })
+                    .unwrap();
+            let mut c = census(&imported.document);
+            crate::ordering::try_reconcile(&bytes, &mut c).unwrap();
+            assert_eq!(c.paints.len(), 2);
+            assert_eq!(c.paints[0].layer, "Layer");
+            assert_eq!(c.paints[1].layer, "Other");
+            assert_eq!(c.paints[1].ink.as_deref(), Some("Exact ink"));
+        }
     }
     #[test]
     fn nested_evenodd_clipping_retains_the_hole_and_actual_coverage() {

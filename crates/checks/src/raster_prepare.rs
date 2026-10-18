@@ -28,19 +28,25 @@ pub fn capture(bytes: &[u8], draft: &mut Draft, native_images: usize, import_iss
     if native_images > 1000 {
         return Err("Raster preparation source count exceeds the decision replay budget".into());
     }
-    if native_images == 0 || import_issues.iter().any(|s| s != PAGE_METADATA_NOTE) {
+    if native_images == 0 {
         return Ok(false);
+    }
+    if !draft.baseline.regions.is_empty() || !draft.geometry.regions.is_empty() {
+        return Err("Existing prepared paint regions require mixed-source reconciliation and cannot be replaced by image masks".into());
+    }
+    if import_issues.iter().any(|s| s != PAGE_METADATA_NOTE) {
+        return Err("Original import diagnostics prevent complete raster-source accounting".into());
     }
     let order = vectorcraft_pdf::print_order(bytes).map_err(|e| e.to_string())?;
     if order.pages.iter().any(|p| !p.is_empty())
         || order.images.iter().map(Vec::len).sum::<usize>() != native_images
         || order.issues.iter().any(|s| s != "Image sample, mask and compositing coverage requires independent reconciliation")
     {
-        return Ok(false);
+        return Err("Raw image-only source census, paint count or graphics context could not be reconciled".into());
     }
     let info = vectorcraft_pdf::production_info(bytes).map_err(|e| e.to_string())?;
     if info.pages.len() != order.images.len() {
-        return Ok(false);
+        return Err("Raw image pages differ from the production page inventory".into());
     }
     let mut sources = BTreeMap::new();
     let mut previews = BTreeMap::new();
@@ -50,31 +56,31 @@ pub fn capture(bytes: &[u8], draft: &mut Draft, native_images: usize, import_iss
         let [cx0, cy0, cx1, cy1] = metadata.crop_mm;
         let [x0, y0, x1, y1] = [mx0.max(cx0), my0.max(cy0), mx1.min(cx1), my1.min(cy1)];
         if x0 >= x1 || y0 >= y1 {
-            return Ok(false);
+            return Err("Raster source has an empty physical page crop".into());
         }
         let page_xf = match metadata.rotation {
             0 => Affine::new([1.0, 0.0, 0.0, -1.0, -x0, y1]),
             90 => Affine::new([0.0, 1.0, 1.0, 0.0, -y0, -x0]),
             180 => Affine::new([-1.0, 0.0, 0.0, 1.0, x1, -y0]),
             270 => Affine::new([0.0, -1.0, -1.0, 0.0, y1, x1]),
-            _ => return Ok(false),
+            _ => return Err("Raster source page rotation is unsupported".into()),
         } * Affine::scale(metadata.user_unit * 25.4 / 72.0);
         let size = if matches!(metadata.rotation, 90 | 270) { [y1 - y0, x1 - x0] } else { [x1 - x0, y1 - y0] };
         let page_bounds = Rect::new(0.0, 0.0, size[0], size[1]);
         for (index, image) in images.iter().enumerate() {
-            if image.clip_context
-                || image.overprint
-                || image.compositing_unresolved
-                || image.description.optional_content
-                || image.description.interpolate
-            {
-                return Ok(false);
+            if image.clip_context {
+                return Err("Clipped raster preparation requires a retained and reviewed mask/clip boundary".into());
             }
-            let (Some(samples), Some(matrix)) = (&image.samples, image.matrix) else { return Ok(false) };
+            if image.overprint || image.compositing_unresolved || image.description.optional_content || image.description.interpolate {
+                return Err("Raster source overprint, compositing, optional content or interpolation remains unresolved".into());
+            }
+            let samples =
+                image.samples.as_ref().ok_or_else(|| image.sample_error.clone().unwrap_or("Raster source samples are unavailable".into()))?;
+            let matrix = image.matrix.ok_or("Raster source transform is unavailable")?;
             let count = (samples.width as usize).checked_mul(samples.height as usize).ok_or("Raster preparation dimensions overflow")?;
             pixels_total = pixels_total.saturating_add(count);
             if count == 0 || pixels_total > 1_048_576 {
-                return Ok(false);
+                return Err("Raster preparation exceeds the cumulative 1,048,576-pixel budget or has empty dimensions".into());
             }
             let mut bits = vec![0u8; count.div_ceil(8)];
             for at in 0..count {
@@ -92,7 +98,7 @@ pub fn capture(bytes: &[u8], draft: &mut Draft, native_images: usize, import_iss
             // Cropping the image needs a separately retained clip; the initial subset refuses it.
             let bounds = transform.transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(samples.width), f64::from(samples.height)));
             if bounds.x0 < page_bounds.x0 || bounds.y0 < page_bounds.y0 || bounds.x1 > page_bounds.x1 || bounds.y1 > page_bounds.y1 {
-                return Ok(false);
+                return Err("Raster source extends outside the physical page crop; explicit clipping preparation is required".into());
             }
             let mask = Mask {
                 source_sha256: digest(image)?,
@@ -232,6 +238,17 @@ mod tests {
         let capture = crate::prepare::capture(&image("ffffffff80ffffffff"), "capture".into(), "job".into()).unwrap();
         assert!(capture.raster_sources.is_empty());
         assert!(!capture.diagnostics.is_empty());
+    }
+    #[test]
+    fn existing_prepared_regions_cannot_be_replaced_by_a_new_raster_census() {
+        let bytes = image("ffffffff00ffffffff");
+        let mut draft = crate::prepare::capture(&bytes, "capture".into(), "job".into()).unwrap();
+        let (id, source) = draft.raster_sources.first_key_value().unwrap();
+        let (id, hash) = (id.clone(), source.mask.source_sha256.clone());
+        apply(&mut draft, &id, &hash, "exact_binary_alpha").unwrap();
+        let before = serde_json::to_value(&draft).unwrap();
+        assert!(capture(&bytes, &mut draft, 1, &[]).unwrap_err().contains("cannot be replaced"));
+        assert_eq!(serde_json::to_value(&draft).unwrap(), before);
     }
     #[test]
     fn raw_page_rotation_units_and_mirroring_place_exact_mask_footprints() {

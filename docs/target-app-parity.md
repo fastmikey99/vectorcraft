@@ -943,3 +943,5 @@ Revision evidence, 18 October 2026 — checker review fixes: physical process co
 - 2026-10-19 HC.15: independent checks retain earlier defects across later interpreter failures, bound flattened geometry and winding work, and regress curved/redundant image clips. Prepared masks, omitted clip contexts and broad runtime qualification remain open; no parity score increase. See `production-checks.md`.
 
 - 2026-10-19 HC.16: explicit binary-alpha mask preparation binds source pixels, placement and operator decisions, with fresh-original replay and separate image paint. Mixed/clipped/fractional-alpha preparation and full production qualification remain open; no parity score increase. See `production-checks.md`.
+
+- 2026-10-19 HC.17: verification import retains enclosing clips/Form BBoxes for bounded independent reconciliation; default editable import stays unchanged. Raster capture now protects existing regions and reports specific refusal causes. Broader clipped preparation/compositing and production qualification remain open; no parity score increase. See `production-checks.md`.

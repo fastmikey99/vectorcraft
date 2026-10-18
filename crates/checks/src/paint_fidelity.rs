@@ -127,7 +127,7 @@ fn visible_knockout(paths: &[(usize, usize, PathData)]) -> Result<(Vec<PathData>
     Ok((result, f64::from(operations) * 0.00001))
 }
 pub fn check(request: &Request, program: &Program, census: &Census, report: &mut Report) -> Result<(), String> {
-    if !census.unresolved.is_empty() || census.budget_exhausted {
+    if !census.paint_order_verified || !census.unresolved.is_empty() || census.budget_exhausted {
         return Ok(());
     }
     let links: Vec<_> = request.recipe.file_links.iter().filter(|l| request.garment.matches(&l.garment)).collect();
@@ -472,7 +472,9 @@ mod tests {
             ("1 0 0 0 k 0 0 10 10 re f", Status::Fail),
         ] {
             let bytes = fixture(content);
-            let c = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+            let mut c = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+            crate::ordering::try_reconcile(&bytes, &mut c).unwrap();
+            assert!(c.paint_order_verified);
             assert!(c.unresolved.is_empty(), "{:?}", c.unresolved);
             let mut r = crate::attribution::tests::request();
             r.acceptance.insert(
@@ -554,6 +556,7 @@ mod tests {
             let bytes = fixture(stream);
             let mut c = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
             crate::ordering::try_reconcile(&bytes, &mut c).unwrap();
+            assert!(c.paint_order_verified);
             assert_eq!(paint_status(&r, &p, &c), expected, "{stream}");
         }
     }
@@ -564,6 +567,7 @@ mod tests {
         let mut c = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
         assert_eq!(paint_status(&r, &p, &c), Status::Incomplete);
         crate::ordering::try_reconcile(&bytes, &mut c).unwrap();
+        assert!(c.paint_order_verified);
         assert_eq!(paint_status(&r, &p, &c), Status::Pass);
         let mut missing = r.clone();
         missing.geometry.as_mut().unwrap().regions.get_mut("original-0").unwrap().source_order = None;
@@ -572,11 +576,13 @@ mod tests {
         assert_eq!(paint_status(&r, &p, &c), Status::Incomplete);
     }
     #[test]
-    fn unknown_output_stack_does_not_blame_hidden_paint() {
+    fn unknown_source_order_does_not_blame_hidden_paint() {
         let (mut r, _) = overlapping();
         r.geometry = None;
         let bytes = fixture("0 0 1 0 k 0 0 20 10 re f 1 0 0 0 k 0 0 10 10 re f 0 1 0 0 k 10 0 10 10 re f");
-        let c = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+        let mut c = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+        crate::ordering::try_reconcile(&bytes, &mut c).unwrap();
+        assert!(c.paint_order_verified);
         assert_eq!(paint_status(&r, &expected(), &c), Status::Incomplete);
     }
     #[test]
@@ -610,11 +616,16 @@ mod tests {
     }
     #[test]
     fn missing_geometry_criteria_or_unspecified_technical_tint_cannot_pass_paint() {
-        let c = crate::pdf::census(&vectorcraft_pdf::import(&fixture("1 0 0 0 k 0 0 10 10 re f 0 1 0 0 k 10 0 10 10 re f")).unwrap());
-        let r = crate::attribution::tests::request();
+        let bytes = fixture("1 0 0 0 k 0 0 10 10 re f 0 1 0 0 k 10 0 10 10 re f");
+        let mut c = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+        crate::ordering::try_reconcile(&bytes, &mut c).unwrap();
+        assert!(c.paint_order_verified);
+        let mut r = crate::attribution::tests::request();
         let mut p = expected();
         for unknown_tint in [false, true] {
             if unknown_tint {
+                r.acceptance = overlapping().0.acceptance;
+                r.identity.measurement_sha256 = crate::digest(&r.acceptance).unwrap();
                 p.outputs.get_mut("output").unwrap()[0].paint = json!({"mode":"output_ink"});
             }
             let mut report = crate::begin(&r).unwrap();
@@ -624,7 +635,10 @@ mod tests {
     }
     #[test]
     fn wrong_paint_on_a_merged_layer_is_not_automatically_blame_for_every_rule() {
-        let c = crate::pdf::census(&vectorcraft_pdf::import(&fixture("1 0 0 rg 0 0 20 10 re f")).unwrap());
+        let bytes = fixture("1 0 0 rg 0 0 20 10 re f");
+        let mut c = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+        crate::ordering::try_reconcile(&bytes, &mut c).unwrap();
+        assert!(c.paint_order_verified);
         let mut r = crate::attribution::tests::request();
         let mut rule = r.recipe.rules[0].clone();
         rule.rule_key = "second".into();

@@ -200,7 +200,12 @@ pub(crate) fn compare(bytes: &[u8], render: &Render, tolerance: Option<f64>) -> 
     let path_census = if order.pages.iter().any(|p| !p.is_empty()) || order.images.iter().flatten().any(|i| i.clip_context) {
         let imported = vectorcraft_pdf::import_with_report(
             bytes,
-            &vectorcraft_pdf::ImportOptions { reject_depth_loss: true, text_as: vectorcraft_pdf::TextAs::Outlines, ..Default::default() },
+            &vectorcraft_pdf::ImportOptions {
+                preserve_clip_paths: true,
+                reject_depth_loss: true,
+                text_as: vectorcraft_pdf::TextAs::Outlines,
+                ..Default::default()
+            },
         )
         .map_err(|e| e.to_string())?;
         let mut census = crate::pdf::census_for_raw_image_prediction(&imported.document);
@@ -784,7 +789,11 @@ mod tests {
                 let result = compare(&bytes, &render, Some(2.0)).unwrap();
                 retain_result(&output, &render, &result, "comparison");
                 if result.status != status {
-                    let imported = vectorcraft_pdf::import_with_report(&bytes, &Default::default()).unwrap();
+                    let imported = vectorcraft_pdf::import_with_report(
+                        &bytes,
+                        &vectorcraft_pdf::ImportOptions { preserve_clip_paths: true, reject_depth_loss: true, ..Default::default() },
+                    )
+                    .unwrap();
                     let c = crate::pdf::census_for_raw_image_prediction(&imported.document);
                     failures.push(format!(
                         "mixed-{name}/{dpi}: {result:?}; expected={status:?}; census={:?}; warnings={:?}",
@@ -925,6 +934,9 @@ mod tests {
         let cases = [
             ("clip-curve", format!("q {circle} {IMAGE} Q"), 0, 1.0, false),
             ("clip-enclosing", format!("q 12 12 48 48 re W n {IMAGE} Q"), 0, 1.0, false),
+            ("clip-page-wide", format!("q 0 0 96 72 re W n {IMAGE} Q"), 0, 1.0, false),
+            ("clip-crop-media", format!("q 0 0 96 72 re W n {IMAGE} Q"), 0, 1.0, false),
+            ("clip-crop-form", "/PlainForm Do".into(), 0, 1.0, false),
             ("clip-form", "/PlainForm Do".into(), 0, 1.0, false),
             ("clip-only", format!("q {clip} {IMAGE} Q"), 0, 1.0, false),
             ("clip-hole", format!("q {hole} {IMAGE} Q"), 0, 1.0, false),
@@ -944,7 +956,7 @@ mod tests {
         ];
         let mut failures = vec![];
         for (name, stream, rotate, unit, mask) in cases {
-            let bytes = mixed_pdf(&stream, rotate, unit, mask, false);
+            let bytes = mixed_pdf(&stream, rotate, unit, mask, name.starts_with("clip-crop-"));
             for dpi in [72, 144] {
                 let output = evidence_directory(&format!("image-{name}"), dpi);
                 let config = crate::independent::Configuration {
@@ -959,12 +971,13 @@ mod tests {
                 let mut render = crate::independent::render(&config, &bytes, &output).unwrap();
                 let result = compare(&bytes, &render, Some(2.0)).unwrap();
                 retain_result(&output, &render, &result, "comparison");
-                let expected = if matches!(name, "clip-enclosing" | "clip-form") { Status::Incomplete } else { Status::Pass };
-                if expected == Status::Incomplete {
-                    assert!(result.issues.iter().any(|s| s.contains("Raw image clipping has no reconciled native boundary")), "{name}: {result:?}");
-                }
+                let expected = Status::Pass;
                 if result.status != expected {
-                    let imported = vectorcraft_pdf::import_with_report(&bytes, &Default::default()).unwrap();
+                    let imported = vectorcraft_pdf::import_with_report(
+                        &bytes,
+                        &vectorcraft_pdf::ImportOptions { preserve_clip_paths: true, reject_depth_loss: true, ..Default::default() },
+                    )
+                    .unwrap();
                     let census = crate::pdf::census_for_raw_image_prediction(&imported.document);
                     failures.push(format!(
                         "{name}/{dpi}: {result:?}; contexts={:?}; warnings={:?}; unresolved={:?}",

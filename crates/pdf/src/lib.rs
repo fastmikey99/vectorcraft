@@ -141,6 +141,9 @@ pub struct ImportOptions {
     /// Refuse artwork exceeding safe nesting limits instead of discarding clips or masks.
     /// Print-production callers must enable this before offering an editable separation.
     pub reject_depth_loss: bool,
+    /// Retain explicit clip paths even when they enclose all visible artwork.
+    /// Verification uses these boundaries to reconcile raw PDF graphics state.
+    pub preserve_clip_paths: bool,
 }
 
 impl Default for ImportOptions {
@@ -155,6 +158,7 @@ impl Default for ImportOptions {
             layers: true,
             uncalibrated_rgb: false,
             reject_depth_loss: false,
+            preserve_clip_paths: false,
         }
     }
 }

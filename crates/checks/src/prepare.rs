@@ -35,7 +35,12 @@ pub fn capture(bytes: &[u8], id: String, job_revision: String) -> Result<Draft, 
     }
     let imported = vectorcraft_pdf::import_with_report(
         bytes,
-        &vectorcraft_pdf::ImportOptions { reject_depth_loss: true, text_as: vectorcraft_pdf::TextAs::Outlines, ..Default::default() },
+        &vectorcraft_pdf::ImportOptions {
+            preserve_clip_paths: true,
+            reject_depth_loss: true,
+            text_as: vectorcraft_pdf::TextAs::Outlines,
+            ..Default::default()
+        },
     )
     .map_err(|e| e.to_string())?;
     let mut census = pdf::census(&imported.document);

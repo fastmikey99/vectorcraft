@@ -1,7 +1,7 @@
 # PDF backend
 
-PDF writing uses `craft-pdf` from `storytold/craft-libs`, pinned to
-`ca50d63b773c99f96e75c77ce5a1d21e7c9cda0d`. Its `write` feature supplies Krilla configuration,
+PDF reading and writing use `craft-pdf` from the `fastmikey99/craft-libs` fork, pinned to
+`bbf9f87ff696ccbf2cfe7e9e3a59a8e15e18e096`. Its `write` feature supplies Krilla configuration,
 metadata construction, fallible font preparation and serialization, and native unwind guards.
 The dependency disables default features and enables `write` and `interpret`.
 The production writer retains Krilla’s raster-image support without its optional text shaper.
@@ -74,3 +74,5 @@ split across scan windows are covered by synthetic regressions; they require the
 incomplete-content error and never return a partial document. The former 256-level lexical
 preflight and its diagnostic are superseded by the parser cap and completion checks.
 The scratch bound does not cover whole-filter fallback decoding or aggregate parser/process memory.
+
+19 October 2026: the HC.17 pin adds opt-in interpreter clip retention for verification. The default rendering optimization is unchanged. Cargo manifest/lock and the immutable `pdf-deps` gate use the same revision; retained-clip budgets and crop behavior are documented in `production-checks.md`.
