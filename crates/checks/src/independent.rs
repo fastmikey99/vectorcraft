@@ -231,6 +231,12 @@ fn plane_name(file: &str) -> Option<(u32, String)> {
     let name = tail.strip_suffix(").tif")?;
     Some((page.parse().ok()?, name.into()))
 }
+#[derive(Debug, Serialize)]
+pub struct ResolutionEvidence {
+    pub dpi: u32,
+    pub rendering_index: Option<usize>,
+    pub comparison_index: usize,
+}
 /// Two resolutions are retained independently. Agreement is evidence, not a substitute for
 /// qualification of the exact runtime configuration and every encountered content feature.
 #[derive(Debug, Serialize)]
@@ -238,8 +244,18 @@ pub struct Verification {
     pub report: crate::Report,
     pub renderings: Vec<Render>,
     pub comparisons: Vec<crate::raster::Comparison>,
+    pub resolutions: Vec<ResolutionEvidence>,
 }
 pub fn verify(request: &crate::Request, bytes: &[u8], config: &Configuration, output: &Path) -> Result<Verification, String> {
+    verify_with_renderer(request, bytes, config, output, render)
+}
+fn verify_with_renderer(
+    request: &crate::Request,
+    bytes: &[u8],
+    config: &Configuration,
+    output: &Path,
+    mut renderer: impl FnMut(&Configuration, &[u8], &Path) -> Result<Render, String>,
+) -> Result<Verification, String> {
     let mut report = crate::pdf::check(request, bytes)?;
     if crate::sha256(bytes) != request.identity.pdf_sha256 {
         return Err("Independent PDF identity mismatch".into());
@@ -256,13 +272,28 @@ pub fn verify(request: &crate::Request, bytes: &[u8], config: &Configuration, ou
     let tolerance = request.acceptance.get("geometry_tolerance_mm").filter(|f| f.evidenced()).and_then(|f| f.value.as_f64());
     let mut renderings = vec![];
     let mut comparisons = vec![];
+    let mut resolutions = vec![];
     if config.dpi > 4800 {
         return Err("Two-resolution verification requires starting resolution at most 4800 DPI".into());
     }
     for multiplier in [1, 2] {
         let mut configuration = config.clone();
         configuration.dpi *= multiplier;
-        let rendering = render(&configuration, bytes, &output.join(format!("dpi-{}", configuration.dpi)))?;
+        let rendering = match renderer(&configuration, bytes, &output.join(format!("dpi-{}", configuration.dpi))) {
+            Ok(rendering) => rendering,
+            Err(reason) => {
+                // A later unavailable resolution must not discard already witnessed
+                // defects or the complete report denominator. No render is fabricated.
+                resolutions.push(ResolutionEvidence { dpi: configuration.dpi, rendering_index: None, comparison_index: comparisons.len() });
+                comparisons.push(crate::raster::Comparison {
+                    status: crate::Status::Incomplete,
+                    uncertainty_mm: 25.4 / f64::from(configuration.dpi.max(1)) * 2.0f64.sqrt() + 0.000002,
+                    planes: vec![],
+                    issues: vec![format!("Independent render at {} DPI did not complete: {reason}", configuration.dpi)],
+                });
+                continue;
+            }
+        };
         let comparison = if census.raw_audit.as_ref().is_some_and(|a| a.image_use_count > 0) {
             crate::raster_images::compare(bytes, &rendering, tolerance)
         } else {
@@ -276,10 +307,11 @@ pub fn verify(request: &crate::Request, bytes: &[u8], config: &Configuration, ou
             planes: vec![],
             issues: vec![format!("Independent comparison could not complete: {reason}")],
         });
+        resolutions.push(ResolutionEvidence { dpi: configuration.dpi, rendering_index: Some(renderings.len()), comparison_index: comparisons.len() });
         renderings.push(rendering);
         comparisons.push(comparison);
     }
-    let measurements = serde_json::json!({"renderings":renderings,"comparisons":comparisons});
+    let measurements = serde_json::json!({"renderings":renderings,"comparisons":comparisons,"resolutions":resolutions});
     let manifest = serde_json::to_vec(&measurements).map_err(|e| e.to_string())?;
     let hash = crate::sha256(&manifest);
     fs::write(output.join("measurements.json"), manifest).map_err(io)?;
@@ -290,7 +322,7 @@ pub fn verify(request: &crate::Request, bytes: &[u8], config: &Configuration, ou
         if failure {
             "Independent per-ink tone disagrees with native print prediction"
         } else {
-            "Independent planes and numerical envelopes measured at two resolutions; runtime/content qualification remains required"
+            "Independent render/comparison evidence retained; incomplete resolutions and runtime/content qualification remain unresolved"
         },
         serde_json::json!({"comparisons":comparisons,"qualified":false}),
         vec![crate::Evidence {
@@ -299,7 +331,7 @@ pub fn verify(request: &crate::Request, bytes: &[u8], config: &Configuration, ou
             detail: "Exact PDF, configuration, tonal planes and comparison manifest retained".into(),
         }],
     )?;
-    Ok(Verification { report, renderings, comparisons })
+    Ok(Verification { report, renderings, comparisons, resolutions })
 }
 
 #[cfg(test)]
@@ -455,6 +487,82 @@ mod runtime_tests {
             assert_eq!(incorrect.status, crate::Status::Fail, "{incorrect:?}");
             assert!(incorrect.planes.iter().any(|p| p.wrong_pixels > 0 && p.first_defect_mm.is_some()));
             assert!(!result.qualified);
+            fs::remove_dir_all(output).unwrap();
+        }
+    }
+    #[test]
+    fn a_later_render_failure_preserves_an_earlier_witnessed_defect() {
+        let Ok(binary) = std::env::var("CHECK_GS_BINARY") else {
+            return;
+        };
+        let bytes = crate::pdf::tests::pdf(true);
+        let mut request = crate::tests::request();
+        request.identity.pdf_sha256 = crate::sha256(&bytes);
+        request.identity.recipe_sha256 = crate::digest(&request.recipe).unwrap();
+        request.acceptance.insert(
+            "geometry_tolerance_mm".into(),
+            crate::preparation::Fact {
+                value: serde_json::json!(2.0),
+                provenance: crate::preparation::Provenance::Operator {
+                    actor: "Synthetic test".into(),
+                    at: "2026-10-19".into(),
+                    decision_id: "Synthetic tolerance only".into(),
+                    evidence_sha256: "e".repeat(64),
+                },
+            },
+        );
+        request.identity.measurement_sha256 = crate::digest(&request.acceptance).unwrap();
+        let config = Configuration {
+            binary: binary.clone().into(),
+            binary_sha256: crate::sha256(&fs::read(&binary).unwrap()),
+            version: "10.07.1".into(),
+            dpi: 72,
+            timeout_ms: 10000,
+            max_output_bytes: 16 * 1024 * 1024,
+            qualification_sha256: None,
+        };
+        for defect in [false, true] {
+            let output = std::env::temp_dir().join(format!(
+                "vc-render-retention-{}-{defect}",
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            ));
+            let mut calls = 0;
+            let verification = verify_with_renderer(&request, &bytes, &config, &output, |configuration, bytes, path| {
+                calls += 1;
+                if calls == 2 {
+                    return Err("Synthetic second-resolution timeout".into());
+                }
+                let mut rendering = render(configuration, bytes, path)?;
+                if defect {
+                    let plane = rendering.planes.iter_mut().find(|p| p.name == "Cyan").unwrap();
+                    let mut image = image::open(&plane.path).unwrap().into_luma8();
+                    for y in 76..85 {
+                        for x in 16..25 {
+                            let p = image.get_pixel_mut(x, y);
+                            p.0[0] = 255 - p.0[0];
+                        }
+                    }
+                    plane.path = path.join("changed-cyan.tif");
+                    image.save(&plane.path).unwrap();
+                    plane.sha256 = crate::sha256(&fs::read(&plane.path).unwrap());
+                }
+                Ok(rendering)
+            })
+            .unwrap();
+            assert_eq!(calls, 2);
+            assert_eq!(verification.renderings.len(), 1);
+            assert_eq!(verification.comparisons.len(), 2);
+            assert_eq!(
+                verification.resolutions.iter().map(|r| (r.dpi, r.rendering_index, r.comparison_index)).collect::<Vec<_>>(),
+                vec![(72, Some(0), 0), (144, None, 1)]
+            );
+            assert_eq!(verification.report.coverage.total, crate::pdf::check(&request, &bytes).unwrap().coverage.total);
+            assert_eq!(verification.comparisons[0].status, if defect { crate::Status::Fail } else { crate::Status::Pass });
+            assert_eq!(verification.comparisons[1].status, crate::Status::Incomplete);
+            let finding = verification.report.findings.iter().find(|f| f.obligation.key == "global/independent").unwrap();
+            assert_eq!(finding.status, if defect { crate::Status::Fail } else { crate::Status::Incomplete });
+            assert!(verification.comparisons[1].issues.iter().any(|s| s.contains("144 DPI") && s.contains("timeout")));
+            assert!(output.join("measurements.json").exists());
             fs::remove_dir_all(output).unwrap();
         }
     }

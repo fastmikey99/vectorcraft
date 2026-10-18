@@ -127,9 +127,29 @@ impl SegmentIndex {
             IndexKind::Branch(a, b) => a.winding(p) + b.winding(p),
         }
     }
+    fn winding_bounded(&self, p: Point, budget: &mut usize) -> Result<i32, String> {
+        *budget = budget.saturating_add(1);
+        if *budget > MAX_EVALUATIONS {
+            return Err("Boundary winding budget exceeded".into());
+        }
+        if p.y < self.bounds.y0 || p.y >= self.bounds.y1 || p.x > self.bounds.x1 {
+            return Ok(0);
+        }
+        match &self.kind {
+            IndexKind::Leaf(segments) => {
+                *budget = budget.saturating_add(segments.len());
+                if *budget > MAX_EVALUATIONS {
+                    return Err("Boundary winding budget exceeded".into());
+                }
+                Ok(self.winding(p))
+            }
+            IndexKind::Branch(a, b) => Ok(a.winding_bounded(p, budget)? + b.winding_bounded(p, budget)?),
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub struct Boundary {
+    retained_segments: usize,
     segments: Vec<Segment>,
     index: SegmentIndex,
     winding_index: SegmentIndex,
@@ -228,6 +248,7 @@ impl Boundary {
             return Err("Positive finite numerical precision in mm required".into());
         }
         let mut rings = vec![];
+        let mut flattened_segments = 0usize;
         let mut maximum = 1.0f64;
         for sub in &path.subpaths {
             if sub.anchors.is_empty() {
@@ -248,11 +269,15 @@ impl Boundary {
             let mut points = vec![first.p];
             for (a, b) in sub.anchors.iter().zip(sub.anchors.iter().cycle().skip(1)).take(sub.anchors.len()) {
                 cubic([a.p, a.h_out, b.h_in, b.p], precision_mm, 0, &mut points)?;
+                if flattened_segments.saturating_add(points.len().saturating_sub(1)) > MAX_SEGMENTS {
+                    return Err("Boundary segment budget exceeded".into());
+                }
             }
             points.dedup();
             if points.len() < 4 {
                 return Err("Degenerate contour cannot establish topology".into());
             }
+            flattened_segments = flattened_segments.saturating_add(points.len().saturating_sub(1));
             rings.push(points);
         }
         let error = precision_mm + 64.0 * f64::EPSILON * maximum;
@@ -308,7 +333,17 @@ impl Boundary {
         let mut visible = std::collections::BTreeSet::new();
         for (i, ring) in rings.iter().enumerate() {
             let p = *ring.first().ok_or("Empty contour")?;
-            let outside: i32 = rings.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, r)| winding(r, p)).sum();
+            let mut outside = 0i32;
+            for (j, other) in rings.iter().enumerate() {
+                if j == i {
+                    continue;
+                }
+                budget = budget.saturating_add(other.len().saturating_sub(1));
+                if budget > MAX_EVALUATIONS {
+                    return Err("Topology winding budget exceeded".into());
+                }
+                outside += winding(other, p);
+            }
             let inside = outside + signs[i];
             let fill = |w: i32| match fill_rule {
                 vectorcraft_geom::FillRule::NonZero => w != 0,
@@ -326,10 +361,12 @@ impl Boundary {
                 _ => {}
             }
         }
+        let winding_segments = segments.len();
         let winding_index = SegmentIndex::new(segments.clone());
         let segments: Vec<_> = segments.into_iter().zip(owners).filter(|(_, (r, _))| visible.contains(r)).map(|(s, _)| s).collect();
         // Keep all rings for the original fill rule's winding; hidden internal edges aren't measured.
-        Ok(Self { index: SegmentIndex::new(segments.clone()), segments, winding_index, error, components, holes })
+        let retained_segments = winding_segments.saturating_add(segments.len().saturating_mul(2));
+        Ok(Self { retained_segments, index: SegmentIndex::new(segments.clone()), segments, winding_index, error, components, holes })
     }
     fn nearest(&self, p: Point, budget: &mut usize) -> Result<(f64, usize), String> {
         let mut best = (f64::INFINITY, 0);
@@ -351,6 +388,17 @@ impl Boundary {
             vectorcraft_geom::FillRule::NonZero => w != 0,
             vectorcraft_geom::FillRule::EvenOdd => w.abs() % 2 == 1,
         }
+    }
+    /// Includes the visible boundary and both spatial-index copies.
+    pub fn retained_segments(&self) -> usize {
+        self.retained_segments
+    }
+    pub fn contains_bounded(&self, p: Point, fill: vectorcraft_geom::FillRule, budget: &mut usize) -> Result<bool, String> {
+        let w = self.winding_index.winding_bounded(p, budget)?;
+        Ok(match fill {
+            vectorcraft_geom::FillRule::NonZero => w != 0,
+            vectorcraft_geom::FillRule::EvenOdd => w.abs() % 2 == 1,
+        })
     }
     /// Conservative pixel-edge envelope: never discard a potentially near curve.
     pub fn near_boundary(&self, p: Point, radius: f64, budget: &mut usize) -> Result<bool, String> {
@@ -644,5 +692,34 @@ mod tests {
         a.subpaths.extend(rectangle(5.0, 5.0, 10.0, 10.0).subpaths);
         assert!(compare(&a, &a, 0.1, 0.001).is_err());
         assert!(compare(&PathData::default(), &a, f64::NAN, 0.001).is_err());
+    }
+    #[test]
+    fn winding_is_bounded_without_changing_holes_or_fill_rules() {
+        let mut path = rectangle(0.0, 0.0, 10.0, 10.0);
+        path.subpaths.extend(rectangle(3.0, 3.0, 4.0, 4.0).subpaths);
+        let boundary = Boundary::new(&path, vectorcraft_geom::FillRule::EvenOdd, 0.000001).unwrap();
+        for (point, expected) in [(Point::new(1.0, 1.0), true), (Point::new(4.0, 4.0), false), (Point::new(11.0, 1.0), false)] {
+            assert_eq!(boundary.contains_bounded(point, vectorcraft_geom::FillRule::EvenOdd, &mut 0).unwrap(), expected);
+        }
+        let mut exhausted = MAX_EVALUATIONS;
+        assert!(
+            boundary
+                .contains_bounded(Point::new(1.0, 1.0), vectorcraft_geom::FillRule::EvenOdd, &mut exhausted)
+                .unwrap_err()
+                .contains("winding budget")
+        );
+        assert_eq!(boundary.retained_segments(), 24);
+    }
+    #[test]
+    fn all_contours_share_flattening_and_topology_work_bounds() {
+        let many = |count| {
+            let mut p = PathData::default();
+            for i in 0..count {
+                p.subpaths.extend(rectangle(i as f64 * 3.0, 0.0, 1.0, 1.0).subpaths);
+            }
+            p
+        };
+        assert!(Boundary::new(&many(MAX_SEGMENTS / 4 + 1), vectorcraft_geom::FillRule::NonZero, 0.000001).unwrap_err().contains("segment budget"));
+        assert!(Boundary::new(&many(2500), vectorcraft_geom::FillRule::NonZero, 0.000001).unwrap_err().contains("Topology winding budget"));
     }
 }

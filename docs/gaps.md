@@ -549,3 +549,5 @@ Page/profile requirements and bounded image-only ink prediction now have impleme
 - HC.13 (19 October 2026): independent prediction now interleaves bounded raw image samples and reconciled solid vector paint in PDF order. Two-resolution mixed-content fixtures cover masks, vector clips, OPM, spot paints and page transforms; unsupported image clips/transparency and production qualification remain open. See [production checks](production-checks.md). Scores and estimates are unchanged.
 
 - 2026-10-19 HC.14: bounded raw-image clip reconciliation adds physical context matching, holes/nested clips and retained uncertainty. Ordinary census, prepared-mask, broader compositing and production qualification gaps remain; no parity score increase. See `production-checks.md`.
+
+- 2026-10-19 HC.15: independent checks retain earlier defects across later interpreter failures, bound flattened geometry and winding work, and regress curved/redundant image clips. Prepared masks, omitted clip contexts and broad runtime qualification remain open; no parity score increase. See `production-checks.md`.

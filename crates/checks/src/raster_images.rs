@@ -100,7 +100,7 @@ impl PaintEvent<'_> {
                     if clip.near_boundary(point, uncertainty, budget)? {
                         return Ok(Err(()));
                     }
-                    if !clip.contains(point, vectorcraft_geom::FillRule::NonZero) {
+                    if !clip.contains_bounded(point, vectorcraft_geom::FillRule::NonZero, budget)? {
                         return Ok(Ok(None));
                     }
                 }
@@ -110,7 +110,7 @@ impl PaintEvent<'_> {
                 if paint.boundary.near_boundary(point, uncertainty, budget)? {
                     return Ok(Err(()));
                 }
-                if !paint.boundary.contains(point, vectorcraft_geom::FillRule::NonZero) {
+                if !paint.boundary.contains_bounded(point, vectorcraft_geom::FillRule::NonZero, budget)? {
                     return Ok(Ok(None));
                 }
                 let tone = paint.inks.get(name).copied();
@@ -255,6 +255,7 @@ pub(crate) fn compare(bytes: &[u8], render: &Render, tolerance: Option<f64>) -> 
         }
     }
     let mut page_paints = vec![];
+    let mut retained_segments = 0usize;
     for (page_number, (page, images)) in info.pages.iter().zip(&order.images).enumerate() {
         let mut image_paints = match paints(page, images, uncertainty) {
             Ok(p) => p,
@@ -262,9 +263,18 @@ pub(crate) fn compare(bytes: &[u8], render: &Render, tolerance: Option<f64>) -> 
         };
         for (raw, paint) in images.iter().zip(&mut image_paints) {
             if let Some(census) = &path_census {
-                let context = image_contexts.get_mut(&raw.layer).and_then(|q| q.pop_front()).ok_or("Native image context is missing")?;
-                let origin = census.page_origins_mm.get(page_number).ok_or("Native image page origin missing")?;
+                let Some(context) = image_contexts.get_mut(&raw.layer).and_then(|q| q.pop_front()) else {
+                    return Ok(incomplete("Native image context is missing".into()));
+                };
+                let Some(origin) = census.page_origins_mm.get(page_number) else {
+                    return Ok(incomplete("Native image page origin missing".into()));
+                };
                 if let Err(reason) = reconcile_image_clip(raw, context, origin, paint) {
+                    return Ok(incomplete(reason));
+                }
+                if let Some(clip) = &paint.clip
+                    && let Err(reason) = crate::raster::retain_boundary(clip, &mut retained_segments)
+                {
                     return Ok(incomplete(reason));
                 }
             } else if raw.clip_context {
@@ -272,14 +282,19 @@ pub(crate) fn compare(bytes: &[u8], render: &Render, tolerance: Option<f64>) -> 
             }
         }
         let mut image_paints = images.iter().zip(image_paints).peekable();
-        let vectors = path_census
-            .as_ref()
-            .map(|c| c.paints.iter().filter(|p| p.page == Some(page_number)).map(|p| vector_paint(p, c)).collect::<Result<Vec<_>, _>>())
-            .transpose();
-        let vectors = match vectors {
-            Ok(v) => v.unwrap_or_default(),
-            Err(e) => return Ok(incomplete(e)),
-        };
+        let mut vectors = vec![];
+        if let Some(census) = &path_census {
+            for paint in census.paints.iter().filter(|p| p.page == Some(page_number)) {
+                let vector = match vector_paint(paint, census) {
+                    Ok(vector) => vector,
+                    Err(reason) => return Ok(incomplete(reason)),
+                };
+                if let Err(reason) = crate::raster::retain_boundary(&vector.boundary, &mut retained_segments) {
+                    return Ok(incomplete(reason));
+                }
+                vectors.push(vector);
+            }
+        }
         let path_count = order.pages.get(page_number).ok_or("Mixed path page missing")?.len();
         if vectors.len() != path_count {
             return Ok(incomplete("Mixed vector page count differs from raw path events".into()));
@@ -678,7 +693,7 @@ mod tests {
         objects_pdf(&[
             "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [8 0 R 9 0 R] /D << /Order [9 0 R 8 0 R] /ON [8 0 R 9 0 R] >> >> >>".into(),
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
-            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 96 72] {crop_entry} /Rotate {rotate} /UserUnit {unit} /Resources << /XObject << /Im 5 0 R /MaskedForm 11 0 R >> /Properties << /Lower 8 0 R /Upper 9 0 R >> /ColorSpace << /Ink [/Separation /SyntheticSpot /DeviceCMYK 7 0 R] >> /ExtGState << /OP0 << /op true /OPM 0 >> /OP1 << /op true /OPM 1 >> /Alpha << /ca 0.5 >> /Multiply << /BM /Multiply >> /Soft << /SMask << /S /Alpha /G 10 0 R >> >> /Transfer << /TR 12 0 R >> /Defaults << /TR2 /Default /BG2 /Default /UCR2 /Default /HT /Default >> /Identity << /TR /Identity >> >> >> /Contents 4 0 R >>"),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 96 72] {crop_entry} /Rotate {rotate} /UserUnit {unit} /Resources << /XObject << /Im 5 0 R /MaskedForm 11 0 R /PlainForm 13 0 R >> /Properties << /Lower 8 0 R /Upper 9 0 R >> /ColorSpace << /Ink [/Separation /SyntheticSpot /DeviceCMYK 7 0 R] >> /ExtGState << /OP0 << /op true /OPM 0 >> /OP1 << /op true /OPM 1 >> /Alpha << /ca 0.5 >> /Multiply << /BM /Multiply >> /Soft << /SMask << /S /Alpha /G 10 0 R >> >> /Transfer << /TR 12 0 R >> /Defaults << /TR2 /Default /BG2 /Default /UCR2 /Default /HT /Default >> /Identity << /TR /Identity >> >> >> /Contents 4 0 R >>"),
             format!("<< /Length {} >>\nstream\n{stream}\nendstream",stream.len()),
             format!("<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 /ColorSpace /DeviceCMYK {mask_entry} /Filter /ASCIIHexDecode /Length 33 >>\nstream\nff00000000ff00000000ff00000000ff>\nendstream"),
             "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /ASCIIHexDecode /Length 9 >>\nstream\n00ff80ff>\nendstream".into(),
@@ -688,6 +703,7 @@ mod tests {
             {let content="1 g 0 0 96 72 re f";format!("<< /Type /XObject /Subtype /Form /BBox [0 0 96 72] /Group << /S /Transparency /CS /DeviceGray >> /Resources << >> /Length {} >>\nstream\n{content}\nendstream",content.len())},
             {let content="/Soft gs q 48 0 0 48 12 12 cm /Im Do Q";format!("<< /Type /XObject /Subtype /Form /BBox [0 0 96 72] /Group << /S /Transparency /CS /DeviceCMYK >> /Resources << /XObject << /Im 5 0 R >> /ExtGState << /Soft << /SMask << /S /Alpha /G 10 0 R >> >> >> >> /Length {} >>\nstream\n{content}\nendstream",content.len())},
             "<< /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >>".into(),
+            {let content=IMAGE;format!("<< /Type /XObject /Subtype /Form /BBox [0 0 96 72] /Resources << /XObject << /Im 5 0 R >> >> /Length {} >>\nstream\n{content}\nendstream",content.len())},
         ])
     }
     const IMAGE: &str = "q 48 0 0 48 12 12 cm /Im Do Q";
@@ -905,7 +921,11 @@ mod tests {
         };
         let clip = "18 18 36 36 re W n";
         let hole = "12 12 48 48 re 24 24 24 24 re W* n";
+        let circle = "60 36 m 60 49.254834 49.254834 60 36 60 c 22.745166 60 12 49.254834 12 36 c 12 22.745166 22.745166 12 36 12 c 49.254834 12 60 22.745166 60 36 c h W n";
         let cases = [
+            ("clip-curve", format!("q {circle} {IMAGE} Q"), 0, 1.0, false),
+            ("clip-enclosing", format!("q 12 12 48 48 re W n {IMAGE} Q"), 0, 1.0, false),
+            ("clip-form", "/PlainForm Do".into(), 0, 1.0, false),
             ("clip-only", format!("q {clip} {IMAGE} Q"), 0, 1.0, false),
             ("clip-hole", format!("q {hole} {IMAGE} Q"), 0, 1.0, false),
             ("clip-mask", format!("{BACKGROUND} q {hole} {IMAGE} Q {FOREGROUND}"), 0, 1.0, true),
@@ -939,14 +959,18 @@ mod tests {
                 let mut render = crate::independent::render(&config, &bytes, &output).unwrap();
                 let result = compare(&bytes, &render, Some(2.0)).unwrap();
                 retain_result(&output, &render, &result, "comparison");
-                if result.status != Status::Pass {
+                let expected = if matches!(name, "clip-enclosing" | "clip-form") { Status::Incomplete } else { Status::Pass };
+                if expected == Status::Incomplete {
+                    assert!(result.issues.iter().any(|s| s.contains("Raw image clipping has no reconciled native boundary")), "{name}: {result:?}");
+                }
+                if result.status != expected {
                     let imported = vectorcraft_pdf::import_with_report(&bytes, &Default::default()).unwrap();
                     let census = crate::pdf::census_for_raw_image_prediction(&imported.document);
                     failures.push(format!(
                         "{name}/{dpi}: {result:?}; contexts={:?}; warnings={:?}; unresolved={:?}",
                         census.prediction_images, imported.warnings, census.unresolved
                     ));
-                } else {
+                } else if expected == Status::Pass {
                     let plane = render.planes.iter_mut().find(|p| p.name == "Cyan").unwrap();
                     let mut image = image::open(&plane.path).unwrap().into_luma8();
                     for y in (plane.height / 2).saturating_sub(4)..(plane.height / 2 + 5).min(plane.height) {
@@ -1001,5 +1025,52 @@ mod tests {
             let raw = vectorcraft_pdf::print_order(&bytes).unwrap();
             assert!(raw.images[0][0].compositing_unresolved, "{gs}");
         }
+    }
+    #[test]
+    fn duplicate_named_image_layers_stay_incomplete_before_plane_measurement() {
+        let original = mixed_pdf(&format!("/OC /Lower BDC {IMAGE} EMC /OC /Upper BDC {IMAGE} EMC"), 0, 1.0, false, false);
+        let text = String::from_utf8(original.clone()).unwrap().replace("/Name (Upper)", "/Name (Lower)");
+        assert_eq!(text.len(), original.len()); // Equal-width edit preserves synthetic xref offsets.
+        let bytes = text.into_bytes();
+        let raw = vectorcraft_pdf::print_order(&bytes).unwrap();
+        assert!(raw.issues.iter().any(|s| s.contains("Duplicate PDF layer names")));
+        let render = Render {
+            pdf_sha256: crate::sha256(&bytes),
+            configuration_sha256: "0".repeat(64),
+            version: "synthetic preflight only".into(),
+            planes: vec![],
+            spot_names: vec![],
+            diagnostics: vec![],
+            pixel_pitch_mm: 0.1,
+            qualified: false,
+        };
+        let comparison = compare(&bytes, &render, Some(2.0)).unwrap();
+        assert_eq!(comparison.status, Status::Incomplete);
+        assert!(comparison.issues.iter().any(|s| s.contains("unsupported printable context")));
+    }
+    #[test]
+    fn repeated_curved_image_clips_share_an_aggregate_storage_budget() {
+        let circle = "60 36 m 60 49.254834 49.254834 60 36 60 c 22.745166 60 12 49.254834 12 36 c 12 22.745166 22.745166 12 36 12 c 49.254834 12 60 22.745166 60 36 c h W n";
+        let one = mixed_pdf(&format!("q {circle} {IMAGE} Q"), 0, 1.0, false, false);
+        let native = vectorcraft_pdf::import(&one).unwrap();
+        let census = crate::pdf::census_for_raw_image_prediction(&native);
+        let clip = census.prediction_images[0].clip_mm.as_ref().unwrap();
+        let boundary = crate::geometry::Boundary::new(clip, vectorcraft_geom::FillRule::NonZero, 0.000001).unwrap();
+        let repetitions = 1_000_000 / boundary.retained_segments() + 1;
+        assert!(repetitions < 4096);
+        let bytes = mixed_pdf(&format!("q {circle} {} Q", format!("{IMAGE} ").repeat(repetitions)), 0, 1.0, false, false);
+        let render = Render {
+            pdf_sha256: crate::sha256(&bytes),
+            configuration_sha256: "0".repeat(64),
+            version: "synthetic resource preflight only".into(),
+            planes: vec![],
+            spot_names: vec![],
+            diagnostics: vec![],
+            pixel_pitch_mm: 0.1,
+            qualified: false,
+        };
+        let result = compare(&bytes, &render, Some(2.0)).unwrap();
+        assert_eq!(result.status, Status::Incomplete);
+        assert!(result.issues.iter().any(|s| s.contains("aggregate geometry storage budget")), "{result:?}");
     }
 }

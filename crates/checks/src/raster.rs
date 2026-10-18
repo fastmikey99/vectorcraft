@@ -24,6 +24,14 @@ pub struct Comparison {
     pub planes: Vec<PlaneComparison>,
     pub issues: Vec<String>,
 }
+/// Bound all retained segment copies, including both spatial indexes.
+pub(crate) fn retain_boundary(boundary: &Boundary, retained: &mut usize) -> Result<(), String> {
+    *retained = retained.saturating_add(boundary.retained_segments());
+    if *retained > 1_000_000 {
+        return Err("Independent aggregate geometry storage budget exceeded".into());
+    }
+    Ok(())
+}
 /// An interrupted measurement retains confirmed defects and the measured counts.
 /// Unvisited pixels/planes can never turn a partial result into Pass.
 pub(crate) fn interrupted(mut planes: Vec<PlaneComparison>, current: Option<PlaneComparison>, uncertainty_mm: f64, reason: String) -> Comparison {
@@ -126,6 +134,7 @@ pub fn compare(census: &Census, render: &Render, tolerance_mm: Option<f64>) -> R
         issues.push("Independent raster resolution does not resolve approved geometric acceptance".into());
     }
     let mut paints = vec![];
+    let mut retained_segments = 0usize;
     let mut inks: BTreeSet<String> = ["Cyan", "Magenta", "Yellow", "Black"].into_iter().map(String::from).collect();
     for p in &census.paints {
         let (Some(page), Some(path)) = (p.page, p.geometry_mm.as_ref()) else {
@@ -138,6 +147,9 @@ pub fn compare(census: &Census, render: &Render, tolerance_mm: Option<f64>) -> R
         };
         match (Boundary::new(path, FillRule::NonZero, 0.000001), source_tones(p, source)) {
             (Ok(boundary), Ok(tones)) => {
+                if let Err(reason) = retain_boundary(&boundary, &mut retained_segments) {
+                    return Ok(interrupted(vec![], None, uncertainty_mm, reason));
+                }
                 inks.extend(tones.keys().cloned());
                 let device_cmyk = source.color_space == vectorcraft_pdf::PrintColorSpace::DeviceCmyk;
                 paints.push(Paint { page, boundary, inks: tones, overprint: p.overprint, skip_zero_process: device_cmyk && !p.overprint_zero });
@@ -214,7 +226,11 @@ pub fn compare(census: &Census, render: &Render, tolerance_mm: Option<f64>) -> R
                 if near {
                     uncertain = true;
                 }
-                if paint.boundary.contains(point, FillRule::NonZero) {
+                let contains = match paint.boundary.contains_bounded(point, FillRule::NonZero, &mut budget) {
+                    Ok(contains) => contains,
+                    Err(reason) => return Ok(interrupted(results, Some(result), uncertainty_mm, reason)),
+                };
+                if contains {
                     // ISO 32000-1 §8.6.7 and Table 148: OP preserves unspecified
                     // colourants. Only direct DeviceCMYK with OPM 1 preserves zero
                     // components; a zero Separation tint still paints its named ink.
