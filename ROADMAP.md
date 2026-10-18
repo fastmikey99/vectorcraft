@@ -276,3 +276,5 @@ and native reopen, with unchanged PDF artwork after undo/reopen; synthetic
 64-level groups and masks also reopen in the browser. All nine full CI gates
 pass. No broader lossless claim or parity score change is made. Customer
 files remain local and uncommitted.
+
+Revision evidence, 18 October 2026 — checker review fixes: physical process coverage includes paint outside the declared OCG; ambiguous process/source destinations remain Incomplete. Export-token snapshot validity follows edits and Undo independently of panel run replacement, including saved-byte checks. See [production checker documentation](docs/production-checks.md). No parity score, milestone completion or estimate change; raster, profile and independent runtime qualification remain open.

@@ -79,6 +79,10 @@ impl State {
     pub fn remote_token(&self) -> Option<&str> {
         self.remote.as_ref().map(|r| r.token.as_str())
     }
+    /// The exact document retained for the in-flight service export.
+    pub fn remote_document(&self) -> Option<Arc<Document>> {
+        self.remote.as_ref().map(|r| r.document.clone())
+    }
     pub fn cancelling(&self) -> bool {
         self.pending.as_ref().is_some_and(|p| p.cancelled.load(Ordering::Acquire))
     }

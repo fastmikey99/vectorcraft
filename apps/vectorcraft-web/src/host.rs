@@ -69,6 +69,8 @@ pub struct Bridge {
     check_results: Rc<RefCell<Option<(String, serde_json::Value)>>>,
     check_inflight: Rc<RefCell<Option<(String, f64)>>>,
     check_validity: Rc<RefCell<Option<(String, String)>>>,
+    snapshot: Rc<RefCell<crate::check_snapshot::Snapshot>>,
+    snapshot_validity: Rc<RefCell<Option<(String, String)>>>,
 }
 
 impl Bridge {
@@ -94,6 +96,8 @@ impl Bridge {
             check_results: Rc::default(),
             check_inflight: Rc::default(),
             check_validity: Rc::default(),
+            snapshot: Rc::default(),
+            snapshot_validity: Rc::default(),
         })
     }
 
@@ -177,6 +181,8 @@ impl Bridge {
         }
         match vectorcraft_engine::cmd::production_checks::take_remote_export(&mut app.session) {
             Ok(Some((token, bytes))) => {
+                self.snapshot.borrow_mut().replace(token.clone(), app.session.active().and_then(|st| st.production_checks.remote_document()));
+                self.report_snapshot(app);
                 let buffer = js_sys::Uint8Array::from(bytes.as_slice()).buffer();
                 let payload = message(&[("type", "vectorcraft:check".into()), ("id", token.clone().into()), ("bytes", buffer.clone().into())]);
                 let sent = payload.is_some_and(|m| self.parent.post_message_with_transfer(&m, &self.origin, &js_sys::Array::of1(&buffer)).is_ok());
@@ -193,6 +199,10 @@ impl Bridge {
         }
         let asked = std::mem::take(&mut *self.exports.borrow_mut());
         for (id, export) in asked {
+            if let Some(token) = id.as_string() {
+                self.snapshot.borrow_mut().replace(token, app.session.active().map(|st| st.doc.clone()));
+                self.report_snapshot(app);
+            }
             match crate::operations::write_export(app, &export) {
                 Ok((name, bytes, bounds, native)) => match self.post_file(&name, &bytes, Some(&id), bounds, native, export.preserve_source) {
                     Ok(()) => {
@@ -230,7 +240,25 @@ impl Bridge {
     }
 
     /// After each frame: tell the parent when unsaved changes appear or go away.
+    fn report_snapshot(&self, app: &VectorcraftApp) {
+        let snapshot = self.snapshot.borrow();
+        if snapshot.id.is_empty() {
+            return;
+        }
+        let current = (snapshot.id.clone(), snapshot.validity(app.session.active().map(|st| &st.doc)).to_string());
+        if self.snapshot_validity.borrow().as_ref() != Some(&current)
+            && self.send(&[
+                ("type", "vectorcraft:snapshot-validity".into()),
+                ("id", current.0.as_str().into()),
+                ("validity", current.1.as_str().into()),
+            ])
+        {
+            *self.snapshot_validity.borrow_mut() = Some(current);
+        }
+    }
+
     pub fn report_dirty(&self, app: &VectorcraftApp) {
+        self.report_snapshot(app);
         let dirty = app.session.documents().iter().any(|d| d.is_dirty());
         if self.reported.get() != Some(dirty) && self.send(&[("type", "vectorcraft:dirty".into()), ("dirty", dirty.into())]) {
             self.reported.set(Some(dirty));

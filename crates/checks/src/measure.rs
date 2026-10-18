@@ -17,6 +17,43 @@ fn evidence(request: &Request) -> Vec<Evidence> {
         },
     ]
 }
+/// A PDF layer is a file-structure obligation, not a physical ink boundary.
+/// Include process paint anywhere in the PDF. A named ink can be excluded only
+/// when a different declared exact plate accounts for it. Ambiguous routing is
+/// unresolved; never manufacture a physical Pass from a layer-local subset.
+fn physical_paints<'a>(
+    request: &Request,
+    plate: &Value,
+    plates: &[Value],
+    pieces: &[&program::Piece],
+    census: &'a Census,
+) -> Result<Vec<&'a crate::pdf::PaintedObject>, String> {
+    let mode = plate.get("name_mode").and_then(Value::as_str);
+    let ink = plate.get("name").and_then(Value::as_str);
+    if mode == Some("exact") {
+        return Ok(census.paints.iter().filter(|p| p.ink.as_deref() == ink).collect());
+    }
+    let active: Vec<_> = plates.iter().filter(|p| p.get("garment").and_then(Value::as_str).is_some_and(|g| request.garment.matches(g))).collect();
+    if active.iter().filter(|p| p.get("name_mode").and_then(Value::as_str) != Some("exact")).count() != 1 {
+        return Err("Physical process/source routing across multiple destinations requires independent separation evidence".into());
+    }
+    let mut objects = vec![];
+    for paint in &census.paints {
+        if paint.process || pieces.iter().any(|p| p.ink.is_some() && p.ink == paint.ink) {
+            objects.push(paint);
+        } else if let Some(name) = paint.ink.as_deref() {
+            if !active
+                .iter()
+                .any(|p| p.get("name_mode").and_then(Value::as_str) == Some("exact") && p.get("name").and_then(Value::as_str) == Some(name))
+            {
+                return Err(format!("Named ink {name:?} has no proven physical output route"));
+            }
+        } else {
+            return Err("Observed paint has no proven physical output route".into());
+        }
+    }
+    Ok(objects)
+}
 pub fn check(request: &Request, plan: &Plan, census: &Census, report: &mut Report) -> Result<(), String> {
     let program = match program::execute(request, plan) {
         Ok(p) => p,
@@ -45,16 +82,17 @@ pub fn check(request: &Request, plan: &Plan, census: &Census, report: &mut Repor
     for plate in plates.iter().filter(|p| p.get("garment").and_then(Value::as_str).is_some_and(|g| request.garment.matches(g))) {
         let key = plate.get("key").and_then(Value::as_str).ok_or("Plate key missing")?;
         let links: Vec<_> = plate.get("links").and_then(Value::as_array).ok_or("Plate links missing")?.iter().filter_map(Value::as_str).collect();
-        let names: Vec<_> = links.iter().filter_map(|k| request.recipe.file_links.iter().find(|l| l.key == *k)).collect();
         let ready = links.iter().all(|k| program.outputs.contains_key(*k));
         let pieces: Vec<_> = links.iter().flat_map(|k| program.outputs.get(*k).into_iter().flatten()).collect();
-        let mode = plate.get("name_mode").and_then(Value::as_str);
         let ink = plate.get("name").and_then(Value::as_str);
-        let objects: Vec<_> = census
-            .paints
-            .iter()
-            .filter(|p| if mode == Some("exact") { p.ink.as_deref() == ink } else { names.iter().any(|l| l.pdf_layer == p.layer) })
-            .collect();
+        let objects = match physical_paints(request, plate, plates, &pieces, census) {
+            Ok(objects) => objects,
+            Err(reason) => {
+                report.record(&format!("plate/{key}"), Status::Incomplete, reason, Value::Null, evidence(request))?;
+                all_geometry = false;
+                continue;
+            }
+        };
         let printable = objects.iter().any(|p| p.geometry_mm.as_ref().is_some_and(|g| !g.is_empty()));
         let required = plate.get("required").and_then(Value::as_bool) == Some(true);
         let complete = census.unresolved.is_empty() && ready && objects.iter().all(|p| p.geometry_mm.is_some() && p.page.is_some());
@@ -249,6 +287,33 @@ mod tests {
             assert_eq!(report.findings.iter().find(|f| f.obligation.key == "rule/arbitrary/protection").unwrap().status, Status::NotApplicable);
             assert_ne!(report.status, Status::Pass);
         }
+    }
+    #[test]
+    fn physical_process_coverage_includes_unexpected_layers_and_keeps_exact_inks_separate() {
+        let bytes = crate::pdf::tests::pdf(true);
+        let r = request(&bytes);
+        let mut census = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+        let exact = json!({"key":"technical","garment":"dark","name_mode":"exact","name":"Exact ink"});
+        let composite = json!({"key":"art","garment":"dark","name_mode":"composite"});
+        let source = json!({"key":"source","garment":"dark","name_mode":"source"});
+        let mut process = census.paints[0].clone();
+        process.ink = None;
+        process.process = true;
+        process.layer = "Unexpected OCG".into();
+        census.paints.push(process);
+        let plates = [exact.clone(), composite.clone()];
+        let observed = physical_paints(&r, &composite, &plates, &[], &census).unwrap();
+        assert_eq!(observed.len(), 2);
+        assert!(observed.iter().any(|p| p.layer == "Unexpected OCG"));
+        assert!(observed.iter().all(|p| p.process));
+        let exact_observed = physical_paints(&r, &exact, &plates, &[], &census).unwrap();
+        assert_eq!(exact_observed.len(), 1);
+        assert_eq!(exact_observed[0].ink.as_deref(), Some("Exact ink"));
+        // No declared route for the technical ink: do not discard it and pass.
+        assert!(physical_paints(&r, &composite, std::slice::from_ref(&composite), &[], &census).is_err());
+        // Process ink cannot be assigned to two destinations from OCG names.
+        assert!(physical_paints(&r, &composite, &[exact.clone(), composite.clone(), source.clone()], &[], &census).is_err());
+        assert_eq!(physical_paints(&r, &source, &[exact, source.clone()], &[], &census).unwrap().len(), 2);
     }
     #[test]
     fn missing_or_changed_acceptance_never_gets_a_geometry_pass() {
