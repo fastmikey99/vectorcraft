@@ -25,6 +25,7 @@ use std::sync::{Arc, RwLock, Weak};
 use vectorcraft_color::cms::{self, Cms, PROCESS_PLATES};
 pub use vectorcraft_color::cms::{Intent, ProofSetup, ProofTarget};
 use vectorcraft_color::{Color, Swatch, SwatchGroup};
+use vectorcraft_doc::inks::visit_paint;
 pub use vectorcraft_doc::inks::{Inks, Link, Plate, inks, map_document_colors, map_node_colors, plates, spot_color};
 use vectorcraft_doc::overprint::multiply_overprints;
 use vectorcraft_doc::{Document, Node, NodeId, Shared};
@@ -118,6 +119,9 @@ struct How<'a> {
     doc: &'a Document,
     /// Overprinting fills and strokes multiply ([`overprints`]).
     multiply: bool,
+    /// Leave out paints with no ink on a visible plate ([`How::drop_hidden_plate_paints`]): the
+    /// layers only, never symbol definitions (opacity masks and stained instances use those).
+    drop_hidden: bool,
     discard_white: bool,
     /// Separations Preview: the color settings, the proof setup and the visible plates.
     plates: Option<(&'a Cms, &'a ProofSetup, &'a [String])>,
@@ -134,9 +138,51 @@ impl How<'_> {
     fn apply(&self, a: &mut Arc<Node>) {
         if self.multiply {
             multiply_overprints(a, self.discard_white);
+        } else if let Some((c, proof, visible)) = self.plates.filter(|_| self.drop_hidden) {
+            self.drop_hidden_plate_paints(a, c, proof, visible);
         }
         if let Some((c, proof, visible)) = self.plates {
             map_node_colors(Arc::make_mut(a), &mut |col, sw| plate_color(self.doc, c, proof, visible, col, sw));
+        }
+    }
+}
+
+impl How<'_> {
+    /// Separations without overprinting ([`RenderOptions::knockout_separations`]): a fill or
+    /// stroke that puts no ink on any visible plate is left out, so hiding a plate shows what is
+    /// under it instead of a paper-white shape covering it. Fills and strokes with ink on a
+    /// visible plate still cover what is under them. Left as they are (still covering): objects
+    /// with effects, fills/strokes with their own effects, brush strokes and patterns (their
+    /// drawn colours aren't the paint's), and text runs, meshes and images.
+    fn drop_hidden_plate_paints(&self, a: &mut Arc<Node>, c: &Cms, proof: &ProofSetup, visible: &[String]) {
+        if !a.appearance.effects.is_empty() {
+            return;
+        }
+        let plain = |it: &vectorcraft_doc::AppearanceItem| match it {
+            vectorcraft_doc::AppearanceItem::Fill(l) => l.effects.is_empty(),
+            vectorcraft_doc::AppearanceItem::Stroke(l) => l.effects.is_empty() && l.brush.is_none(),
+        };
+        let prints = |paint: &vectorcraft_color::Paint| {
+            let (mut any, mut ink) = (false, false);
+            visit_paint(&mut paint.clone(), &mut |col, swatch, tint| {
+                any = true;
+                let i = inks(self.doc, c, col, swatch.as_deref().map(|s| (s, *tint)), proof.intent);
+                ink |= visible.iter().any(|p| i.on_plate(p) > 0.0);
+            });
+            // No colours (none, pattern): nothing to judge, leave it.
+            !any || ink
+        };
+        let drop = |it: &vectorcraft_doc::AppearanceItem| it.visible() && plain(it) && !prints(it.paint());
+        if !a.appearance.items.iter().any(drop) {
+            return;
+        }
+        for it in &mut Arc::make_mut(a).appearance.items {
+            if drop(it) {
+                match it {
+                    vectorcraft_doc::AppearanceItem::Fill(l) => l.visible = false,
+                    vectorcraft_doc::AppearanceItem::Stroke(l) => l.visible = false,
+                }
+            }
         }
     }
 }
@@ -166,12 +212,18 @@ pub(crate) fn prepare<'a>(doc: &'a Document, opts: &RenderOptions, kept: &mut Op
         }),
     };
     let earlier = kept.take().filter(|k| k.inputs == inputs);
-    let how = How { doc, multiply, discard_white: inputs.discard_white, plates: seps.map(|(proof, visible)| (&*c, proof, visible.as_slice())) };
+    let how = How {
+        doc,
+        multiply,
+        drop_hidden: true,
+        discard_white: inputs.discard_white,
+        plates: seps.map(|(proof, visible)| (&*c, proof, visible.as_slice())),
+    };
     let none = (vec![], vec![]);
     let (layers, art) = earlier.as_ref().map_or((&none, &none), |k| (&k.layers, &k.art));
     let made_layers = prepare_list(&doc.layers, &layers.0, &layers.1, &how);
     let symbol_art: Vec<Arc<Node>> = doc.symbols.iter().map(|s| s.art.clone()).collect();
-    let made_art = prepare_list(&symbol_art, &art.0, &art.1, &how);
+    let made_art = prepare_list(&symbol_art, &art.0, &art.1, &How { drop_hidden: false, ..how });
     let same = |made: &[Arc<Node>], from: &[Arc<Node>]| made.iter().zip(from).all(|(a, b)| Arc::ptr_eq(a, b));
     let out = if same(&made_layers, &doc.layers) && same(&made_art, &symbol_art) {
         Cow::Borrowed(doc)

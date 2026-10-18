@@ -450,6 +450,15 @@ mod tests {
         assert!(s.doc().unwrap().production_separations.overprint);
         s.execute("production.separations.preview", &json!({"overprint":false})).unwrap();
         assert_eq!(render(&mut renderer, &s), covered);
+        // Hiding the covering plate shows the artwork under it in both modes, the same way.
+        let without_wp: Vec<String> = proof::plates(&s.doc().unwrap().doc).into_iter().map(|p| p.name).filter(|p| p != "WP").collect();
+        s.execute("production.separations.preview", &json!({"plates":without_wp})).unwrap();
+        let knocked = render(&mut renderer, &s);
+        assert_ne!(knocked, covered, "a hidden plate must not cover the artwork with paper white");
+        s.execute("production.separations.preview", &json!({"overprint":true})).unwrap();
+        assert_eq!(render(&mut renderer, &s), knocked);
+        s.execute("production.separations.preview", &json!({"overprint":false,"reset":true})).unwrap();
+        assert_eq!(render(&mut renderer, &s), covered);
         // The global Separations Preview (which implies overprinting) doesn't override the box.
         proof::set_view(proof::ProofView { separations: Some(vec!["WP".into()]), overprint: true, ..Default::default() });
         assert_eq!(render(&mut renderer, &s), covered);
