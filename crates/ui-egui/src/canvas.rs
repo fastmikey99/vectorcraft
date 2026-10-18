@@ -490,7 +490,10 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     };
     if app.ui.view.edges && !revolve_edit {
         // Not through a floating panel or menu over the canvas: only when the pointer is on it.
-        if resp.contains_pointer() {
+        // `contains_pointer` alone still holds within egui's interaction radius of a panel's
+        // edge, so the topmost area under the pointer must be the canvas's own too.
+        let on_canvas = ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| ui.ctx().layer_id_at(p).is_none_or(|l| l == resp.layer_id));
+        if resp.contains_pointer() && on_canvas {
             hover_highlight(app, &painter, &xf);
         }
         selection_overlay(app, &painter, &xf, overlays.iter().any(|o| matches!(o, Overlay::CurvePoint { .. })));
@@ -4456,7 +4459,8 @@ mod tests {
         let rect = app.canvas_rect.unwrap();
         let over = Xf::new(rect, app.view().unwrap()).to_screen(Point::new(150.0, 150.0));
         let layer = egui::epaint::ColorMode::Solid(c32(app.session.active().unwrap().doc.layer_color(vectorcraft_doc::NodeId(id))));
-        let outlines = |app: &mut VectorcraftApp, covered: bool| {
+        // `edge`: how far the panel reaches left of the pointer (2 = just inside its edge).
+        let outlines = |app: &mut VectorcraftApp, covered: bool, edge: f32| {
             let mut shapes = vec![];
             // Layer hit-testing uses the previous frame's areas: settle over a few frames.
             for _ in 0..3 {
@@ -4468,7 +4472,7 @@ mod tests {
                 let mut out = ctx.run_ui(raw, |ui| {
                     show(app, ui);
                     if covered {
-                        egui::Area::new(egui::Id::new("floating-cover")).fixed_pos(over - vec2(40.0, 40.0)).show(ui.ctx(), |ui| {
+                        egui::Area::new(egui::Id::new("floating-cover")).fixed_pos(over - vec2(edge, 40.0)).show(ui.ctx(), |ui| {
                             let (r, _) = ui.allocate_exact_size(vec2(80.0, 80.0), Sense::click());
                             ui.painter().rect_filled(r, 0.0, Color32::DARK_GRAY);
                         });
@@ -4487,9 +4491,10 @@ mod tests {
             shapes.iter().for_each(|s| flat(s, &mut all));
             all.iter().filter(|s| matches!(s, Shape::Path(ps) if ps.stroke.width == 1.5 && ps.stroke.color == layer)).count()
         };
-        assert!(outlines(&mut app, false) > 0, "highlighted on the open canvas");
-        assert_eq!(outlines(&mut app, true), 0, "not through a panel over it");
-        assert!(outlines(&mut app, false) > 0, "back once the panel is gone");
+        assert!(outlines(&mut app, false, 40.0) > 0, "highlighted on the open canvas");
+        assert_eq!(outlines(&mut app, true, 40.0), 0, "not through a panel over it");
+        assert_eq!(outlines(&mut app, true, 2.0), 0, "nor just inside the panel's edge");
+        assert!(outlines(&mut app, false, 40.0) > 0, "back once the panel is gone");
     }
 
     /// Hide Corner Widget for angles greater than (#394): a rectangle's 90° corners lose their
