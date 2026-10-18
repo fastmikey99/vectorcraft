@@ -10,6 +10,8 @@ use std::collections::BTreeSet;
 use vectorcraft_geom::{Affine, Point};
 
 struct ImagePaint<'a> {
+    clip: Option<crate::geometry::Boundary>,
+    transform: Affine,
     samples: &'a vectorcraft_pdf::PrintImageSamples,
     inverse: Affine,
     margin: [f64; 2],
@@ -35,15 +37,8 @@ fn paints<'a>(
     images
         .iter()
         .map(|image| {
-            if image.clip_context
-                || image.overprint
-                || image.compositing_unresolved
-                || image.description.optional_content
-                || image.description.interpolate
-            {
-                return Err(
-                    "Image clipping, overprint, graphics state, optional content or interpolation requires broader compositing qualification".into(),
-                );
+            if image.overprint || image.compositing_unresolved || image.description.optional_content || image.description.interpolate {
+                return Err("Image overprint, graphics state, optional content or interpolation requires broader compositing qualification".into());
             }
             let samples = image.samples.as_ref().ok_or_else(|| image.sample_error.clone().unwrap_or("Image samples missing".into()))?;
             let transform = page_transform * Affine::new(image.matrix.ok_or("Image transform missing")?);
@@ -56,7 +51,7 @@ fn paints<'a>(
             if margin.iter().any(|n| !n.is_finite()) || margin[0] * f64::from(samples.width) >= 0.5 || margin[1] * f64::from(samples.height) >= 0.5 {
                 return Err("Independent resolution cannot resolve image sample boundaries".into());
             }
-            Ok(ImagePaint { samples, inverse, margin })
+            Ok(ImagePaint { samples, inverse, margin, clip: None, transform })
         })
         .collect()
 }
@@ -100,7 +95,17 @@ type Sample = Result<Option<(f64, f64)>, ()>;
 impl PaintEvent<'_> {
     fn sample(&self, point: Point, name: &str, uncertainty: f64, budget: &mut usize) -> Result<Sample, String> {
         match self {
-            Self::Image(image) => Ok(image.sample(point, name)),
+            Self::Image(image) => {
+                if let Some(clip) = &image.clip {
+                    if clip.near_boundary(point, uncertainty, budget)? {
+                        return Ok(Err(()));
+                    }
+                    if !clip.contains(point, vectorcraft_geom::FillRule::NonZero) {
+                        return Ok(Ok(None));
+                    }
+                }
+                Ok(image.sample(point, name))
+            }
             Self::Vector(paint) => {
                 if paint.boundary.near_boundary(point, uncertainty, budget)? {
                     return Ok(Err(()));
@@ -131,6 +136,35 @@ fn vector_paint(paint: &crate::pdf::PaintedObject, census: &crate::pdf::Census) 
         skip_zero_process: source.color_space == vectorcraft_pdf::PrintColorSpace::DeviceCmyk && !paint.overprint_zero,
     })
 }
+fn reconcile_image_clip(
+    raw: &vectorcraft_pdf::PrintImageUse,
+    context: &crate::pdf::PredictionImage,
+    origin: &[f64; 2],
+    paint: &mut ImagePaint<'_>,
+) -> Result<(), String> {
+    let expected = Affine::translate((origin[0], origin[1])) * paint.transform;
+    if context.dimensions != [paint.samples.width, paint.samples.height]
+        || context
+            .transform_mm
+            .as_coeffs()
+            .into_iter()
+            .zip(expected.as_coeffs())
+            .any(|(a, b)| !a.is_finite() || !b.is_finite() || (a - b).abs() > 0.000001)
+    {
+        return Err("Native/raw image dimensions, placement or order differ".into());
+    }
+    if raw.clip_context && context.clip_mm.is_none() {
+        return Err("Raw image clipping has no reconciled native boundary".into());
+    }
+    paint.clip = context
+        .clip_mm
+        .as_ref()
+        .map(|p| {
+            crate::geometry::Boundary::new(&p.transformed(Affine::translate((-origin[0], -origin[1]))), vectorcraft_geom::FillRule::NonZero, 0.000001)
+        })
+        .transpose()?;
+    Ok(())
+}
 pub(crate) fn compare(bytes: &[u8], render: &Render, tolerance: Option<f64>) -> Result<Comparison, String> {
     if !render.pixel_pitch_mm.is_finite() || render.pixel_pitch_mm <= 0.0 {
         return Err("Invalid independent image pixel pitch".into());
@@ -156,13 +190,20 @@ pub(crate) fn compare(bytes: &[u8], render: &Render, tolerance: Option<f64>) -> 
     if info.pages.len() != order.images.len() {
         return Err("Raw image page inventories differ".into());
     }
-    let path_census = if order.pages.iter().any(|p| !p.is_empty()) {
+    // Refuse unsupported samples/state and unresolved resolution before decoding
+    // an editable preview solely to obtain paths or clip context.
+    for (page, images) in info.pages.iter().zip(&order.images) {
+        if let Err(reason) = paints(page, images, uncertainty) {
+            return Ok(incomplete(reason));
+        }
+    }
+    let path_census = if order.pages.iter().any(|p| !p.is_empty()) || order.images.iter().flatten().any(|i| i.clip_context) {
         let imported = vectorcraft_pdf::import_with_report(
             bytes,
             &vectorcraft_pdf::ImportOptions { reject_depth_loss: true, text_as: vectorcraft_pdf::TextAs::Outlines, ..Default::default() },
         )
         .map_err(|e| e.to_string())?;
-        let mut census = crate::pdf::paths_for_raw_image_prediction(&imported.document);
+        let mut census = crate::pdf::census_for_raw_image_prediction(&imported.document);
         // Fresh raw page metadata supplies the boxes that the editable importer
         // cannot round-trip. Validate its physical page frame before treating
         // that exact metadata-retention warning as irrelevant to this prediction.
@@ -189,7 +230,15 @@ pub(crate) fn compare(bytes: &[u8], render: &Render, tolerance: Option<f64>) -> 
     } else {
         None
     };
-    let geometry_error = path_census.as_ref().map(|c| c.paints.iter().map(|p| p.geometry_error_mm).fold(0.0, f64::max)).unwrap_or(0.0);
+    let geometry_error = path_census
+        .as_ref()
+        .map(|c| {
+            c.paints
+                .iter()
+                .map(|p| p.geometry_error_mm)
+                .fold(if c.prediction_images.iter().any(|i| i.clip_mm.is_some()) { 0.00001 } else { 0.0 }, f64::max)
+        })
+        .unwrap_or(0.0);
     if !geometry_error.is_finite() || geometry_error < 0.0 {
         return Ok(incomplete("Mixed geometry uncertainty invalid".into()));
     }
@@ -198,12 +247,30 @@ pub(crate) fn compare(bytes: &[u8], render: &Render, tolerance: Option<f64>) -> 
     if tolerance.is_none_or(|t| t < uncertainty) {
         return Ok(incomplete("Independent resolution cannot resolve mixed geometry uncertainty".into()));
     }
+    let mut image_contexts: std::collections::BTreeMap<Option<usize>, std::collections::VecDeque<&crate::pdf::PredictionImage>> = Default::default();
+    if let Some(census) = &path_census {
+        for image in &census.prediction_images {
+            let layer = order.layers.iter().position(|name| name == &image.layer);
+            image_contexts.entry(layer).or_default().push_back(image);
+        }
+    }
     let mut page_paints = vec![];
     for (page_number, (page, images)) in info.pages.iter().zip(&order.images).enumerate() {
-        let image_paints = match paints(page, images, uncertainty) {
+        let mut image_paints = match paints(page, images, uncertainty) {
             Ok(p) => p,
             Err(e) => return Ok(incomplete(e)),
         };
+        for (raw, paint) in images.iter().zip(&mut image_paints) {
+            if let Some(census) = &path_census {
+                let context = image_contexts.get_mut(&raw.layer).and_then(|q| q.pop_front()).ok_or("Native image context is missing")?;
+                let origin = census.page_origins_mm.get(page_number).ok_or("Native image page origin missing")?;
+                if let Err(reason) = reconcile_image_clip(raw, context, origin, paint) {
+                    return Ok(incomplete(reason));
+                }
+            } else if raw.clip_context {
+                return Ok(incomplete("Image clipping context was not reconciled".into()));
+            }
+        }
         let mut image_paints = images.iter().zip(image_paints).peekable();
         let vectors = path_census
             .as_ref()
@@ -233,6 +300,9 @@ pub(crate) fn compare(bytes: &[u8], render: &Render, tolerance: Option<f64>) -> 
             return Ok(incomplete("Image/path event order is inconsistent".into()));
         }
         page_paints.push(events);
+    }
+    if image_contexts.values().any(|images| !images.is_empty()) {
+        return Ok(incomplete("Native image contexts remain unmatched".into()));
     }
     let mut inks: BTreeSet<String> = ["Cyan", "Magenta", "Yellow", "Black"].into_iter().map(String::from).collect();
     for event in page_paints.iter().flatten() {
@@ -265,7 +335,9 @@ pub(crate) fn compare(bytes: &[u8], render: &Render, tolerance: Option<f64>) -> 
         }
         let image = match crate::raster::read_plane(plane) {
             Ok(image) => image,
-            Err(reason) => return Ok(crate::raster::interrupted(planes, None, uncertainty, reason)),
+            Err(reason) => {
+                return Ok(crate::raster::interrupted(planes, None, uncertainty, reason));
+            }
         };
         let page = info.pages.get(plane.page as usize - 1).ok_or("Image plane page missing")?;
         let w = page.crop_mm[2].min(page.media_mm[2]) - page.crop_mm[0].max(page.media_mm[0]);
@@ -304,7 +376,9 @@ pub(crate) fn compare(bytes: &[u8], render: &Render, tolerance: Option<f64>) -> 
             for paint in paints {
                 let sample = match paint.sample(point, &plane.name, uncertainty, &mut boundary_evaluations) {
                     Ok(sample) => sample,
-                    Err(reason) => return Ok(crate::raster::interrupted(planes, Some(result), uncertainty, reason)),
+                    Err(reason) => {
+                        return Ok(crate::raster::interrupted(planes, Some(result), uncertainty, reason));
+                    }
                 };
                 match sample {
                     Ok(Some((tone, alpha))) => {
@@ -604,7 +678,7 @@ mod tests {
         objects_pdf(&[
             "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [8 0 R 9 0 R] /D << /Order [9 0 R 8 0 R] /ON [8 0 R 9 0 R] >> >> >>".into(),
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
-            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 96 72] {crop_entry} /Rotate {rotate} /UserUnit {unit} /Resources << /XObject << /Im 5 0 R /MaskedForm 11 0 R >> /Properties << /Lower 8 0 R /Upper 9 0 R >> /ColorSpace << /Ink [/Separation /SyntheticSpot /DeviceCMYK 7 0 R] >> /ExtGState << /OP0 << /op true /OPM 0 >> /OP1 << /op true /OPM 1 >> /Alpha << /ca 0.5 >> /Multiply << /BM /Multiply >> /Soft << /SMask << /S /Alpha /G 10 0 R >> >> /Transfer << /TR 12 0 R >> /Defaults << /TR2 /Default /BG2 /Default /UCR2 /Default /HT /Default >> >> >> /Contents 4 0 R >>"),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 96 72] {crop_entry} /Rotate {rotate} /UserUnit {unit} /Resources << /XObject << /Im 5 0 R /MaskedForm 11 0 R >> /Properties << /Lower 8 0 R /Upper 9 0 R >> /ColorSpace << /Ink [/Separation /SyntheticSpot /DeviceCMYK 7 0 R] >> /ExtGState << /OP0 << /op true /OPM 0 >> /OP1 << /op true /OPM 1 >> /Alpha << /ca 0.5 >> /Multiply << /BM /Multiply >> /Soft << /SMask << /S /Alpha /G 10 0 R >> >> /Transfer << /TR 12 0 R >> /Defaults << /TR2 /Default /BG2 /Default /UCR2 /Default /HT /Default >> /Identity << /TR /Identity >> >> >> /Contents 4 0 R >>"),
             format!("<< /Length {} >>\nstream\n{stream}\nendstream",stream.len()),
             format!("<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 /ColorSpace /DeviceCMYK {mask_entry} /Filter /ASCIIHexDecode /Length 33 >>\nstream\nff00000000ff00000000ff00000000ff>\nendstream"),
             "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /ASCIIHexDecode /Length 9 >>\nstream\n00ff80ff>\nendstream".into(),
@@ -627,7 +701,7 @@ mod tests {
         assert!(!ordinary.unresolved.is_empty());
         let raw = vectorcraft_pdf::print_order(&bytes).unwrap();
         assert_eq!(raw.images[0][0].before_path, 1);
-        let mut paths = crate::pdf::paths_for_raw_image_prediction(&doc);
+        let mut paths = crate::pdf::census_for_raw_image_prediction(&doc);
         crate::ordering::reconcile_paths_for_images(&raw, &mut paths).unwrap();
         assert_eq!(paths.paints.len(), 2);
         assert!(paths.paint_order_verified);
@@ -669,9 +743,10 @@ mod tests {
             ("image-gs-softmask", format!("{BACKGROUND} /Soft gs {IMAGE}"), 0, 1.0, false, false, Status::Incomplete),
             ("form-gs-softmask", format!("{BACKGROUND} /MaskedForm Do"), 0, 1.0, false, false, Status::Incomplete),
             ("vector-transfer", format!("{IMAGE} /Transfer gs {FOREGROUND}"), 0, 1.0, false, false, Status::Incomplete),
+            ("transfer-identity", format!("/Identity gs {BACKGROUND} {IMAGE} {FOREGROUND}"), 0, 1.0, false, false, Status::Pass),
             ("transfer-default", format!("/Defaults gs {BACKGROUND} {IMAGE} {FOREGROUND}"), 0, 1.0, false, false, Status::Pass),
             ("transfer-restored", format!("q /Transfer gs Q {IMAGE} {FOREGROUND}"), 0, 1.0, false, false, Status::Pass),
-            ("image-clip", format!("{BACKGROUND} q 20 20 20 20 re W n {IMAGE} Q"), 0, 1.0, false, false, Status::Incomplete),
+            ("image-clip", format!("{BACKGROUND} q 20 20 20 20 re W n {IMAGE} Q"), 0, 1.0, false, false, Status::Pass),
             ("vector-alpha", format!("{IMAGE} /Alpha gs {FOREGROUND}"), 0, 1.0, false, false, Status::Incomplete),
             ("vector-blend", format!("{IMAGE} /Multiply gs {FOREGROUND}"), 0, 1.0, false, false, Status::Incomplete),
         ];
@@ -694,7 +769,7 @@ mod tests {
                 retain_result(&output, &render, &result, "comparison");
                 if result.status != status {
                     let imported = vectorcraft_pdf::import_with_report(&bytes, &Default::default()).unwrap();
-                    let c = crate::pdf::paths_for_raw_image_prediction(&imported.document);
+                    let c = crate::pdf::census_for_raw_image_prediction(&imported.document);
                     failures.push(format!(
                         "mixed-{name}/{dpi}: {result:?}; expected={status:?}; census={:?}; warnings={:?}",
                         c.unresolved, imported.warnings
@@ -803,7 +878,7 @@ mod tests {
             verification
                 .comparisons
                 .iter()
-                .any(|c| c.status == Status::Incomplete && c.issues.iter().any(|s| s.contains("Boundary distance budget exceeded")))
+                .any(|c| { c.status == Status::Incomplete && c.issues.iter().any(|s| s.contains("Boundary distance budget exceeded")) })
         );
         let finding = verification.report.findings.iter().find(|f| f.obligation.key == "global/independent").unwrap();
         assert_eq!(finding.status, Status::Incomplete);
@@ -822,5 +897,109 @@ mod tests {
         assert!(partial.issues.iter().any(|s| s.contains("Boundary distance budget exceeded")));
         assert!(partial.planes.iter().any(|p| p.wrong_pixels > 0));
         finish_evidence(&output);
+    }
+    #[test]
+    fn actual_interpreter_image_clipping_retains_holes_repeated_uses_and_page_transforms() {
+        let Ok(binary) = std::env::var("CHECK_GS_BINARY") else {
+            return;
+        };
+        let clip = "18 18 36 36 re W n";
+        let hole = "12 12 48 48 re 24 24 24 24 re W* n";
+        let cases = [
+            ("clip-only", format!("q {clip} {IMAGE} Q"), 0, 1.0, false),
+            ("clip-hole", format!("q {hole} {IMAGE} Q"), 0, 1.0, false),
+            ("clip-mask", format!("{BACKGROUND} q {hole} {IMAGE} Q {FOREGROUND}"), 0, 1.0, true),
+            ("clip-nested", format!("q {clip} q 20 20 30 30 re W n {IMAGE} Q Q"), 0, 1.0, false),
+            ("clip-repeated", format!("q {clip} {IMAGE} Q q 48 24 24 24 re W n q 48 0 0 48 36 12 cm /Im Do Q Q"), 0, 1.0, false),
+            (
+                "clip-layer-order",
+                format!("/OC /Lower BDC q {clip} {IMAGE} Q EMC /OC /Upper BDC {FOREGROUND} EMC /OC /Lower BDC q {hole} {IMAGE} Q EMC"),
+                0,
+                1.0,
+                false,
+            ),
+            ("clip-rotate90", format!("q {hole} {IMAGE} Q"), 90, 1.0, true),
+            ("clip-rotate180-unit2", format!("{BACKGROUND} q {clip} {IMAGE} Q"), 180, 2.0, true),
+            ("clip-rotate270", format!("{BACKGROUND} q {hole} {IMAGE} Q"), 270, 1.0, true),
+        ];
+        let mut failures = vec![];
+        for (name, stream, rotate, unit, mask) in cases {
+            let bytes = mixed_pdf(&stream, rotate, unit, mask, false);
+            for dpi in [72, 144] {
+                let output = evidence_directory(&format!("image-{name}"), dpi);
+                let config = crate::independent::Configuration {
+                    binary: binary.clone().into(),
+                    binary_sha256: crate::sha256(&std::fs::read(&binary).unwrap()),
+                    version: "10.07.1".into(),
+                    dpi,
+                    timeout_ms: 10000,
+                    max_output_bytes: 16 * 1024 * 1024,
+                    qualification_sha256: None,
+                };
+                let mut render = crate::independent::render(&config, &bytes, &output).unwrap();
+                let result = compare(&bytes, &render, Some(2.0)).unwrap();
+                retain_result(&output, &render, &result, "comparison");
+                if result.status != Status::Pass {
+                    let imported = vectorcraft_pdf::import_with_report(&bytes, &Default::default()).unwrap();
+                    let census = crate::pdf::census_for_raw_image_prediction(&imported.document);
+                    failures.push(format!(
+                        "{name}/{dpi}: {result:?}; contexts={:?}; warnings={:?}; unresolved={:?}",
+                        census.prediction_images, imported.warnings, census.unresolved
+                    ));
+                } else {
+                    let plane = render.planes.iter_mut().find(|p| p.name == "Cyan").unwrap();
+                    let mut image = image::open(&plane.path).unwrap().into_luma8();
+                    for y in (plane.height / 2).saturating_sub(4)..(plane.height / 2 + 5).min(plane.height) {
+                        for x in (plane.width / 2).saturating_sub(4)..(plane.width / 2 + 5).min(plane.width) {
+                            let pixel = image.get_pixel_mut(x, y);
+                            pixel.0[0] = if pixel.0[0] > 127 { 0 } else { 255 };
+                        }
+                    }
+                    plane.path = output.join("mutated-cyan.tif");
+                    image.save(&plane.path).unwrap();
+                    plane.sha256 = crate::sha256(&std::fs::read(&plane.path).unwrap());
+                    let defect = compare(&bytes, &render, Some(2.0)).unwrap();
+                    retain_result(&output, &render, &defect, "defect");
+                    if defect.status != Status::Fail {
+                        failures.push(format!("{name}/{dpi} changed interior: {defect:?}"));
+                    }
+                }
+                finish_evidence(&output);
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+    #[test]
+    fn image_context_reconciliation_rejects_changed_transform_dimensions_and_missing_clip() {
+        let bytes = mixed_pdf(&format!("q 18 18 36 36 re W n {IMAGE} Q"), 0, 1.0, false, false);
+        let doc = vectorcraft_pdf::import(&bytes).unwrap();
+        let census = crate::pdf::census_for_raw_image_prediction(&doc);
+        let raw = vectorcraft_pdf::print_order(&bytes).unwrap();
+        let info = vectorcraft_pdf::production_info(&bytes).unwrap();
+        let mut paints = paints(&info.pages[0], &raw.images[0], 0.0001).unwrap();
+        let image = &raw.images[0][0];
+        let context = &census.prediction_images[0];
+        let origin = &census.page_origins_mm[0];
+        assert!(reconcile_image_clip(image, context, origin, &mut paints[0]).is_ok());
+        let mut changed = context.clone();
+        changed.dimensions[0] += 1;
+        assert!(reconcile_image_clip(image, &changed, origin, &mut paints[0]).is_err());
+        changed = context.clone();
+        changed.transform_mm = Affine::translate((0.1, 0.0)) * changed.transform_mm;
+        assert!(reconcile_image_clip(image, &changed, origin, &mut paints[0]).is_err());
+        changed = context.clone();
+        changed.clip_mm = None;
+        assert!(reconcile_image_clip(image, &changed, origin, &mut paints[0]).is_err());
+    }
+    #[test]
+    fn raw_image_device_defaults_and_identity_keep_the_state_explicit() {
+        for gs in ["Defaults", "Identity"] {
+            let bytes = mixed_pdf(&format!("/{gs} gs {IMAGE}"), 0, 1.0, false, false);
+            let raw = vectorcraft_pdf::print_order(&bytes).unwrap();
+            assert!(!raw.images[0][0].compositing_unresolved, "{gs}");
+            let bytes = mixed_pdf(&format!("/Transfer gs /{gs} gs {IMAGE}"), 0, 1.0, false, false);
+            let raw = vectorcraft_pdf::print_order(&bytes).unwrap();
+            assert!(raw.images[0][0].compositing_unresolved, "{gs}");
+        }
     }
 }

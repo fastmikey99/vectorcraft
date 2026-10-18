@@ -35,8 +35,26 @@ pub struct RawPaintAudit {
     pub issue_count: usize,
     pub issues_sample: Vec<String>,
 }
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug)]
+pub(crate) struct PredictionImage {
+    pub layer: String,
+    pub dimensions: [u32; 2],
+    /// Raw bottom-up unit image square to absolute document mm.
+    pub transform_mm: Affine,
+    pub clip_mm: Option<PathData>,
+}
 #[derive(Clone, Debug, Serialize)]
 pub struct Census {
+    #[cfg(not(target_arch = "wasm32"))]
+    #[serde(skip)]
+    pub(crate) prediction_images: Vec<PredictionImage>,
+    #[cfg(not(target_arch = "wasm32"))]
+    #[serde(skip)]
+    pub(crate) image_clip_elements: usize,
+    #[cfg(not(target_arch = "wasm32"))]
+    #[serde(skip)]
+    pub(crate) page_origins_mm: Vec<[f64; 2]>,
     pub paint_order_verified: bool,
     pub raw_audit: Option<RawPaintAudit>,
     pub raw_audit_error: Option<String>,
@@ -170,17 +188,31 @@ fn walk(doc: &Document, symbols: &SymbolBoxes, node: &Node, layer: &str, state: 
     // still has to match the raw image-use census and pass raw sample/context
     // checks before it can enter the ordered predictor. Ordinary census retains
     // all image gaps, and no production obligation is resolved by this shortcut.
-    if raw_images && matches!(node.kind, NodeKind::Image(_)) {
-        // Image-owned SMask/Mask is evaluated from exact raw samples by the caller.
-        // Graphics-state and enclosing-group masks remain rejected separately.
-        if state.clip.is_some()
-            || node.opacity != 1.0
+    #[cfg(not(target_arch = "wasm32"))]
+    if raw_images && let NodeKind::Image(image) = &node.kind {
+        // Exact image-owned masks come from the raw decoder. Ancestor/GS
+        // masks and blending remain separately unresolved.
+        if node.opacity != 1.0
             || node.blend != BlendMode::Normal
             || !node.appearance.effects.is_empty()
             || node.appearance.items.iter().any(|item| item.visible() && !item.paint().is_none())
         {
-            census.unresolved.push(format!("{}: image container appearance or clipping requires reconciliation", node.id));
+            census.unresolved.push(format!("{}: image container appearance requires reconciliation", node.id));
         }
+        let elements = state.clip.map_or(0, |p| p.subpaths.iter().fold(0usize, |n, s| n.saturating_add(s.anchors.len()).saturating_add(2)));
+        census.image_clip_elements = census.image_clip_elements.saturating_add(elements);
+        if census.prediction_images.len() >= 4096 || census.image_clip_elements > 1_000_000 {
+            census.budget_exhausted = true;
+            return;
+        }
+        census.prediction_images.push(PredictionImage {
+            layer: layer.into(),
+            dimensions: [image.width, image.height],
+            transform_mm: Affine::scale(25.4 / 72.0)
+                * image.xf
+                * Affine::new([f64::from(image.width), 0.0, 0.0, -f64::from(image.height), 0.0, f64::from(image.height)]),
+            clip_mm: state.clip.map(|p| p.transformed(Affine::scale(25.4 / 72.0))),
+        });
         return;
     }
     let bounds = node.geometric_bounds_with(symbols).map(|b| [b.x0 * 25.4 / 72.0, b.y0 * 25.4 / 72.0, b.x1 * 25.4 / 72.0, b.y1 * 25.4 / 72.0]);
@@ -337,13 +369,19 @@ fn walk(doc: &Document, symbols: &SymbolBoxes, node: &Node, layer: &str, state: 
 pub fn census(doc: &Document) -> Census {
     census_mode(doc, false)
 }
-/// Path-side accounting for the raw-image predictor only; not a complete census.
+/// Image contexts and paths for raw reconciliation only; not a complete census.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn paths_for_raw_image_prediction(doc: &Document) -> Census {
+pub(crate) fn census_for_raw_image_prediction(doc: &Document) -> Census {
     census_mode(doc, true)
 }
 fn census_mode(doc: &Document, raw_images: bool) -> Census {
     let mut c = Census {
+        #[cfg(not(target_arch = "wasm32"))]
+        prediction_images: vec![],
+        #[cfg(not(target_arch = "wasm32"))]
+        image_clip_elements: 0,
+        #[cfg(not(target_arch = "wasm32"))]
+        page_origins_mm: doc.artboards.iter().map(|a| [a.rect.x0 * 25.4 / 72.0, a.rect.y0 * 25.4 / 72.0]).collect(),
         paint_order_verified: false,
         raw_audit: None,
         raw_audit_error: None,
