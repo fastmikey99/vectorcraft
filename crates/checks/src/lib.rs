@@ -15,11 +15,13 @@ pub mod pdf;
 pub mod preparation;
 pub mod prepare;
 pub mod prepare_edits;
+pub mod prepared_mask;
 pub mod program;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod raster;
 #[cfg(not(target_arch = "wasm32"))]
 mod raster_images;
+pub mod raster_prepare;
 pub mod recipe;
 mod specification;
 

@@ -287,7 +287,9 @@ fn verify_with_renderer(
                 resolutions.push(ResolutionEvidence { dpi: configuration.dpi, rendering_index: None, comparison_index: comparisons.len() });
                 comparisons.push(crate::raster::Comparison {
                     status: crate::Status::Incomplete,
-                    uncertainty_mm: 25.4 / f64::from(configuration.dpi.max(1)) * 2.0f64.sqrt() + 0.000002,
+                    uncertainty_mm: 25.4 / f64::from(configuration.dpi.max(1)) * 2.0f64.sqrt()
+                        + 0.000002
+                        + census.paints.iter().map(|p| p.geometry_error_mm).fold(0.0, f64::max),
                     planes: vec![],
                     issues: vec![format!("Independent render at {} DPI did not complete: {reason}", configuration.dpi)],
                 });
@@ -562,6 +564,56 @@ mod runtime_tests {
             let finding = verification.report.findings.iter().find(|f| f.obligation.key == "global/independent").unwrap();
             assert_eq!(finding.status, if defect { crate::Status::Fail } else { crate::Status::Incomplete });
             assert!(verification.comparisons[1].issues.iter().any(|s| s.contains("144 DPI") && s.contains("timeout")));
+            assert!(output.join("measurements.json").exists());
+            fs::remove_dir_all(output).unwrap();
+        }
+    }
+    #[test]
+    fn missing_first_or_both_renderings_keep_explicit_resolution_mapping() {
+        let bytes = crate::pdf::tests::pdf(true);
+        let mut request = crate::tests::request();
+        request.identity.pdf_sha256 = crate::sha256(&bytes);
+        let config = Configuration {
+            binary: "/synthetic/no-interpreter-used".into(),
+            binary_sha256: "a".repeat(64),
+            version: "synthetic mapping fixture".into(),
+            dpi: 72,
+            timeout_ms: 1,
+            max_output_bytes: 1,
+            qualification_sha256: None,
+        };
+        for both in [false, true] {
+            let output = std::env::temp_dir().join(format!(
+                "vc-first-render-mapping-{}-{both}",
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            ));
+            let mut calls = 0;
+            let verification = verify_with_renderer(&request, &bytes, &config, &output, |configuration, bytes, _| {
+                calls += 1;
+                if calls == 1 || both {
+                    return Err("Synthetic unavailable rendering".into());
+                }
+                Ok(Render {
+                    pdf_sha256: crate::sha256(bytes),
+                    configuration_sha256: crate::digest(configuration)?,
+                    version: configuration.version.clone(),
+                    planes: vec![],
+                    spot_names: vec![],
+                    diagnostics: vec!["Synthetic empty-plane mapping fixture".into()],
+                    pixel_pitch_mm: 25.4 / f64::from(configuration.dpi),
+                    qualified: false,
+                })
+            })
+            .unwrap();
+            assert_eq!(calls, 2);
+            assert_eq!(verification.renderings.len(), usize::from(!both));
+            assert_eq!(verification.comparisons.len(), 2);
+            assert_eq!(
+                verification.resolutions.iter().map(|r| (r.dpi, r.rendering_index, r.comparison_index)).collect::<Vec<_>>(),
+                vec![(72, None, 0), (144, if both { None } else { Some(0) }, 1)]
+            );
+            assert!(verification.comparisons.iter().all(|c| c.status == crate::Status::Incomplete));
+            assert_eq!(verification.report.coverage.total, crate::pdf::check(&request, &bytes).unwrap().coverage.total);
             assert!(output.join("measurements.json").exists());
             fs::remove_dir_all(output).unwrap();
         }

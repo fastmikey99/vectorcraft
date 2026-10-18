@@ -11,6 +11,7 @@ use vectorcraft_geom::{Affine, FillRule, PathData, Rect, Shape};
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Edit {
+    RasterMask { source: String, source_sha256: String, policy: String },
     Affine { regions: Vec<String>, matrix: [f64; 6], target_page: Option<usize> },
     Crop { regions: Vec<String>, bounds_mm: [f64; 4] },
 }
@@ -18,18 +19,26 @@ pub fn replay(mut draft: Draft, edits: &[Fact]) -> Result<Draft, String> {
     if edits.len() > 1000 || !draft.baseline.intentional_edits.is_empty() {
         return Err("Preparation edit replay budget or origin invalid".into());
     }
+    let mut geometry_edited = false;
     for fact in edits {
         if !fact.evidenced() || !matches!(fact.provenance, Provenance::Operator { .. }) {
             return Err("Intentional preparation changes require explicit attributed operator decisions".into());
         }
         let edit: Edit = serde_json::from_value(fact.value.clone()).map_err(|e| format!("Unsupported preparation edit: {e}"))?;
+        if let Edit::RasterMask { source, source_sha256, policy } = &edit {
+            crate::raster_prepare::apply(&mut draft, source, source_sha256, policy)?;
+            continue;
+        }
+        geometry_edited = true;
         let regions = match &edit {
+            Edit::RasterMask { .. } => return Err("Undispatched raster mask decision".into()),
             Edit::Affine { regions, .. } | Edit::Crop { regions, .. } => regions,
         };
         if regions.is_empty() || regions.len() > 50_000 || regions.iter().collect::<BTreeSet<_>>().len() != regions.len() {
             return Err("Preparation edit needs unique captured region identities".into());
         }
         let (xf, crop, target_page, error_scale) = match &edit {
+            Edit::RasterMask { .. } => return Err("Undispatched raster mask decision".into()),
             Edit::Affine { matrix, target_page, .. } => {
                 if matrix.iter().any(|n| !n.is_finite() || n.abs() > 1_000_000.0) || target_page.is_some_and(|p| p >= 1000) {
                     return Err("Preparation transform exceeds finite coordinate/page bounds".into());
@@ -81,7 +90,7 @@ pub fn replay(mut draft: Draft, edits: &[Fact]) -> Result<Draft, String> {
             draft.previews.insert(id.clone(), Preview { page: geometry.page, bounds_mm: bounds, path_svg: path.to_svg() });
         }
     }
-    if !edits.is_empty() {
+    if geometry_edited {
         draft.baseline.selected_pages = draft.geometry.regions.values().map(|g| g.page).collect::<BTreeSet<_>>().into_iter().collect();
     }
     draft.baseline.intentional_edits = edits.to_vec();

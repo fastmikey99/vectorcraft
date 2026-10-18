@@ -524,6 +524,7 @@ mod tests {
             regions.insert(
                 id,
                 program::RegionGeometry {
+                    prepared_mask: None,
                     page: piece.page,
                     path_mm: piece.path.clone(),
                     fill_rule: vectorcraft_geom::FillRule::NonZero,

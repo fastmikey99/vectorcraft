@@ -148,7 +148,8 @@ pub fn compare(census: &Census, render: &Render, tolerance_mm: Option<f64>) -> R
         match (Boundary::new(path, FillRule::NonZero, 0.000001), source_tones(p, source)) {
             (Ok(boundary), Ok(tones)) => {
                 if let Err(reason) = retain_boundary(&boundary, &mut retained_segments) {
-                    return Ok(interrupted(vec![], None, uncertainty_mm, reason));
+                    issues.push(reason);
+                    return Ok(Comparison { status: Status::Incomplete, uncertainty_mm, planes: vec![], issues });
                 }
                 inks.extend(tones.keys().cloned());
                 let device_cmyk = source.color_space == vectorcraft_pdf::PrintColorSpace::DeviceCmyk;

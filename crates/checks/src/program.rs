@@ -9,6 +9,9 @@ use vectorcraft_pathops::BoolOp;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RegionGeometry {
+    /// Original source mask; ordered preparation edits are verified by fresh replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_mask: Option<crate::prepared_mask::Mask>,
     pub page: usize,
     pub path_mm: PathData,
     pub fill_rule: FillRule,
@@ -98,6 +101,13 @@ pub fn execute(request: &Request, plan: &Plan) -> Result<Program, String> {
     }
     for region in &baseline.regions {
         let geometry = inputs.regions.get(&region.id).ok_or("Prepared region geometry missing")?;
+        match (&geometry.prepared_mask, &region.prepared_mask_sha256) {
+            (Some(mask), Some(hash)) if digest(mask)? == *hash => {
+                mask.validate()?;
+            }
+            (None, None) => {}
+            _ => return Err(format!("{}: prepared raster mask identity mismatch", region.id)),
+        }
         if !geometry.geometry_error_mm.is_finite() || geometry.geometry_error_mm < 0.0 {
             return Err("Prepared geometry numerical error is invalid".into());
         }
@@ -282,6 +292,7 @@ mod tests {
     fn request() -> Request {
         let mut r = crate::attribution::tests::request();
         let geometry = RegionGeometry {
+            prepared_mask: None,
             page: 0,
             path_mm: rectangle(0.0, 0.0, 10.0, 10.0),
             fill_rule: FillRule::NonZero,

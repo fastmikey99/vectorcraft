@@ -545,6 +545,9 @@ pub(crate) mod tests {
             objects.push("<< /Type /Filespec /F (vectorcraft-editing.vectorcraft) /EF << /F 9 0 R >> >>".into());
             objects.push(format!("<< /Type /EmbeddedFile /Length {} >>\nstream\n{native}\nendstream", native.len()));
         }
+        objects_pdf(&objects)
+    }
+    pub(crate) fn objects_pdf(objects: &[String]) -> Vec<u8> {
         let mut out = b"%PDF-1.7\n".to_vec();
         let mut offsets = vec![0];
         for (i, o) in objects.iter().enumerate() {

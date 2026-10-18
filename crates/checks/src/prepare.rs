@@ -20,6 +20,8 @@ pub struct Preview {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Draft {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub raster_sources: BTreeMap<String, crate::raster_prepare::Source>,
     pub baseline: Baseline,
     pub geometry: Inputs,
     pub diagnostics: Vec<String>,
@@ -40,6 +42,8 @@ pub fn capture(bytes: &[u8], id: String, job_revision: String) -> Result<Draft, 
     let ordered = crate::ordering::try_reconcile(bytes, &mut census).is_ok();
     let original = sha256(bytes);
     let (mut diagnostics, notices) = pdf::import_messages(imported.warnings);
+    let import_issues = diagnostics.clone();
+    let native_images = census.image_objects;
     diagnostics.extend(census.unresolved);
     if census.budget_exhausted {
         diagnostics.push("Original census resource budget exceeded".into());
@@ -71,6 +75,7 @@ pub fn capture(bytes: &[u8], id: String, job_revision: String) -> Result<Draft, 
             continue;
         };
         let artifact = RegionGeometry {
+            prepared_mask: None,
             page,
             path_mm,
             fill_rule: vectorcraft_geom::FillRule::NonZero,
@@ -106,7 +111,14 @@ pub fn capture(bytes: &[u8], id: String, job_revision: String) -> Result<Draft, 
     if baseline.source_census.is_empty() {
         diagnostics.push("No fully accounted printable original content".into());
     }
-    Ok(Draft { baseline, geometry, diagnostics, notices, previews })
+    let mut draft = Draft { baseline, geometry, diagnostics, notices, previews, raster_sources: BTreeMap::new() };
+    if native_images > 0
+        && !census.budget_exhausted
+        && let Err(reason) = crate::raster_prepare::capture(bytes, &mut draft, native_images, &import_issues)
+    {
+        draft.diagnostics.push(format!("Raster preparation remains unresolved: {reason}"));
+    }
+    Ok(draft)
 }
 /// Verify a stored preparation against a fresh read of its original. Intentional geometry edits
 /// require a distinct adjudicated artifact; they cannot quietly make output its own baseline.
@@ -133,7 +145,8 @@ pub fn verify_original(request: &crate::Request, bytes: &[u8]) -> Result<Vec<Str
     for region in &b.regions {
         let captured = fresh.baseline.regions.iter().find(|r| r.id == region.id);
         if captured.is_none_or(|r| {
-            r.source_objects != region.source_objects
+            r.prepared_mask_sha256 != region.prepared_mask_sha256
+                || r.source_objects != region.source_objects
                 || r.facts
                     .iter()
                     .any(|(key, fact)| region.facts.get(key).is_none_or(|stored| stored.value != fact.value || stored.provenance != fact.provenance))

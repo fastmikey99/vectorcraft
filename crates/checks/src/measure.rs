@@ -244,6 +244,7 @@ mod tests {
         p.line_to((10.0 * k, 90.0 * k));
         p.close_path();
         let geometry = RegionGeometry {
+            prepared_mask: None,
             page: 0,
             path_mm: vectorcraft_geom::PathData::from_bezpath(&p),
             fill_rule: vectorcraft_geom::FillRule::NonZero,
