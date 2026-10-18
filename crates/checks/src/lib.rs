@@ -19,6 +19,7 @@ pub mod prepared_mask;
 pub mod program;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod raster;
+mod raster_fidelity;
 #[cfg(not(target_arch = "wasm32"))]
 mod raster_images;
 pub mod raster_prepare;

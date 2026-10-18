@@ -115,7 +115,12 @@ pub fn capture(bytes: &[u8], draft: &mut Draft, native_images: usize, import_iss
             let ink = (image.description.colour_space == "Separation" && samples.colourants.len() == 1)
                 .then(|| samples.colourants.first().cloned())
                 .flatten();
-            let paint = json!({"type":"source_image","source_sha256":mask.source_sha256,"sample_sha256":samples.sample_sha256,"colourants":samples.colourants,"description":image.description});
+            let visible_sample = if matches!(image.description.colour_space.as_str(), "DeviceGray" | "DeviceCMYK") {
+                crate::raster_fidelity::visible_signature(&mask, samples)?
+            } else {
+                Value::Null
+            };
+            let paint = json!({"visible_sample":visible_sample,"type":"source_image","source_sha256":mask.source_sha256,"sample_sha256":samples.sample_sha256,"colourants":samples.colourants,"description":image.description});
             sources.insert(id, Source { mask, paint, ink });
         }
     }

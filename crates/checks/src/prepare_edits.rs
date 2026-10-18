@@ -15,6 +15,75 @@ enum Edit {
     Affine { regions: Vec<String>, matrix: [f64; 6], target_page: Option<usize> },
     Crop { regions: Vec<String>, bounds_mm: [f64; 4] },
 }
+/// Replay only the source pixel grid. Crops need a separate sample/clip proof;
+/// never recover a transform by fitting the finished output's bounding box.
+pub(crate) fn raster_placement(
+    mask: &crate::prepared_mask::Mask,
+    id: &str,
+    edits: &[Fact],
+) -> Result<(crate::prepared_mask::Mask, PathData, f64), String> {
+    if edits.len() > 1000 {
+        return Err("Raster placement edit budget exceeded".into());
+    }
+    let mut placed = mask.clone();
+    let mut path = mask.path()?;
+    let mut error = 1.0e-9;
+    let mut approved = false;
+    for fact in edits {
+        if !fact.evidenced() || !matches!(fact.provenance, Provenance::Operator { .. }) {
+            return Err("Raster placement requires attributed preparation decisions".into());
+        }
+        match serde_json::from_value::<Edit>(fact.value.clone()).map_err(|e| e.to_string())? {
+            Edit::RasterMask { source, source_sha256, policy } if source == id => {
+                if approved || source_sha256 != mask.source_sha256 || policy != "exact_binary_alpha" {
+                    return Err("Raster source boundary decision is invalid".into());
+                }
+                approved = true;
+            }
+            Edit::Affine { regions, matrix, target_page } if regions.iter().any(|r| r == id) => {
+                if !approved {
+                    return Err("Raster transform precedes its boundary decision".into());
+                }
+                let (xf, norm) = checked_affine(matrix, target_page)?;
+                // Bound coefficient composition before cancellation, then evaluate
+                // its effect across the full original pixel grid.
+                let magnitude =
+                    matrix.iter().map(|n| n.abs()).fold(1.0, f64::max) * placed.pixel_to_page_mm.iter().map(|n| n.abs()).fold(1.0, f64::max);
+                error = norm * error + 128.0 * f64::EPSILON * magnitude * (f64::from(mask.width) + f64::from(mask.height) + 1.0);
+                if !error.is_finite() {
+                    return Err("Raster affine uncertainty exceeds finite bounds".into());
+                }
+                path = path.transformed(xf);
+                placed.pixel_to_page_mm = (xf * Affine::new(placed.pixel_to_page_mm)).as_coeffs();
+                if let Some(page) = target_page {
+                    placed.page = page;
+                }
+                placed.validate()?;
+            }
+            Edit::Crop { regions, .. } if regions.iter().any(|r| r == id) => {
+                return Err("Cropped raster source continuity needs explicit sample/clip reconciliation".into());
+            }
+            _ => {}
+        }
+    }
+    if !approved {
+        return Err("Raster source boundary decision is missing".into());
+    }
+    placed.validate()?;
+    Ok((placed, path, error))
+}
+fn checked_affine(matrix: [f64; 6], target_page: Option<usize>) -> Result<(Affine, f64), String> {
+    if matrix.iter().any(|n| !n.is_finite() || n.abs() > 1_000_000.0) || target_page.is_some_and(|p| p >= 1000) {
+        return Err("Preparation transform exceeds finite coordinate/page bounds".into());
+    }
+    let xf = Affine::new(matrix);
+    if !xf.determinant().is_finite() || xf.determinant() == 0.0 {
+        return Err("Preparation transform is singular".into());
+    }
+    let [a, b, c, d, _, _] = matrix;
+    let norm = ((a.abs() + b.abs()).max(c.abs() + d.abs()) * (a.abs() + c.abs()).max(b.abs() + d.abs())).sqrt();
+    Ok((xf, norm))
+}
 pub fn replay(mut draft: Draft, edits: &[Fact]) -> Result<Draft, String> {
     if edits.len() > 1000 || !draft.baseline.intentional_edits.is_empty() {
         return Err("Preparation edit replay budget or origin invalid".into());
@@ -40,15 +109,7 @@ pub fn replay(mut draft: Draft, edits: &[Fact]) -> Result<Draft, String> {
         let (xf, crop, target_page, error_scale) = match &edit {
             Edit::RasterMask { .. } => return Err("Undispatched raster mask decision".into()),
             Edit::Affine { matrix, target_page, .. } => {
-                if matrix.iter().any(|n| !n.is_finite() || n.abs() > 1_000_000.0) || target_page.is_some_and(|p| p >= 1000) {
-                    return Err("Preparation transform exceeds finite coordinate/page bounds".into());
-                }
-                let xf = Affine::new(*matrix);
-                if !xf.determinant().is_finite() || xf.determinant() == 0.0 {
-                    return Err("Preparation transform is singular".into());
-                }
-                let [a, b, c, d, _, _] = *matrix;
-                let norm = ((a.abs() + b.abs()).max(c.abs() + d.abs()) * (a.abs() + c.abs()).max(b.abs() + d.abs())).sqrt();
+                let (xf, norm) = checked_affine(*matrix, *target_page)?;
                 (Some(xf), None, *target_page, norm)
             }
             Edit::Crop { bounds_mm, .. } => {

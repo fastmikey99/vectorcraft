@@ -282,3 +282,5 @@ Revision evidence, 18 October 2026 — checker review fixes: physical process co
 ### 19 October 2026: HC.17 verification clip context
 
 Verification callers retain explicit enclosing/page-wide clips and Form BBoxes through the shared interpreter pinned to `bbf9f87ff696ccbf2cfe7e9e3a59a8e15e18e096`. Adjacent layer runs preserve attribution, clip-copy amplification is bounded, and crop warnings follow painted children. Default editing import is unchanged. This is engineering coverage, with no parity score increase or production qualification claim. See `docs/production-checks.md`.
+
+- 2026-10-19 HC.18: bounded single-image source continuity compares samples/alpha, explicit preparation transforms and output routes; equivalent lossless pixel orientations are reconciled. Mixed/clipped raster preparation, full PDF semantics and production qualification remain open. Work is now prioritised against the supplied private PA Sharp/Esko/production examples. Scores and estimates are unchanged; see `docs/production-checks.md`.

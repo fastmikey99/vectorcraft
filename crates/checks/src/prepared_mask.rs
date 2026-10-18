@@ -54,6 +54,23 @@ impl Mask {
     pub fn validate(&self) -> Result<(), String> {
         self.bytes().map(|_| ())
     }
+    /// Exact non-transparent pixel rectangle, excluding encoding-only padding.
+    pub fn visible_window(&self) -> Result<Option<[u32; 4]>, String> {
+        let bytes = self.bytes()?;
+        let (mut x0, mut y0, mut x1, mut y1) = (self.width, self.height, 0, 0);
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let at = y as usize * self.width as usize + x as usize;
+                if bytes.get(at / 8).is_some_and(|b| b & (1 << (7 - at % 8)) != 0) {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x + 1);
+                    y1 = y1.max(y + 1);
+                }
+            }
+        }
+        Ok((x1 > x0 && y1 > y0).then(|| [x0, y0, x1 - x0, y1 - y0]))
+    }
     /// Pixel-space boolean uncertainty scaled conservatively into physical space.
     pub fn geometry_error_mm(&self) -> f64 {
         let [a, b, c, d, _, _] = self.pixel_to_page_mm;

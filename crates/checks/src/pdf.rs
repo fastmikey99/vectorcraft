@@ -528,6 +528,7 @@ pub fn check(request: &Request, bytes: &[u8]) -> Result<Report, String> {
         && let Some(plan) = source_plan
     {
         crate::measure::check(request, &plan, &c, &mut report)?;
+        crate::raster_fidelity::check(request, &plan, bytes, &mut report)?;
     }
     crate::ordering::check(request, bytes, &c, &mut report)?;
     crate::specification::check(request, bytes, &mut report)?;
