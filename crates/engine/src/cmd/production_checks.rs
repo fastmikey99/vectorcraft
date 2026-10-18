@@ -88,7 +88,7 @@ struct WorkerPermit;
 impl WorkerPermit {
     fn acquire() -> std::result::Result<Self, String> {
         LIVE_WORKERS
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < 2).then_some(n + 1))
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < 2).then_some(n + 1))
             .map_err(|_| "Two check workers are already finishing; retry after they finish".to_string())?;
         Ok(Self)
     }
@@ -168,7 +168,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     // The browser host transfers one exact export to its service; editing can continue.
     if cfg!(target_arch = "wasm32") || p.get("service").and_then(Value::as_bool) == Some(true) {
         let sequence = NEXT_REMOTE
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
             .map_err(|_| bad(C, "Service check sequence exhausted"))?;
         state.remote = Some(Remote {
             token: format!("{}:service:{sequence}", state.origin_run_id),
