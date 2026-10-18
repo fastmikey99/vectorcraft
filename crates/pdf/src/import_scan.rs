@@ -381,6 +381,8 @@ struct State {
     /// The inks of fills and of strokes.
     inks: [Inks; 2],
     spaces: [PrintColorSpace; 2],
+    matrix: Option<vectorcraft_geom::Affine>,
+    clip_context: bool,
 }
 
 /// A marked-content tag as [`Scan::tags`] keeps it: its FNV-1a hash (the tags are only compared,
@@ -520,6 +522,48 @@ impl Walker<'_, '_> {
             order.issues.insert(issue.into());
         }
     }
+    fn image_mark(&mut self, stream: &craft_pdf::syntax::object::Stream<'_>, res: &Resources<'_>, inline: bool) {
+        if self.out.print_order.is_none() || !self.is_visible() {
+            return;
+        }
+        if self.out.print_order.as_ref().is_some_and(|o| o.images.len() >= crate::print_image::MAX_IMAGES) {
+            self.out.cut = true;
+            return;
+        }
+        let state = self.state();
+        let description = crate::print_image::describe(stream, res, inline);
+        if let Some(order) = &mut self.out.print_order {
+            order.issues.insert("Image sample, mask and compositing coverage requires independent reconciliation".into());
+            order.issues.extend(description.issues.iter().cloned());
+            if description.optional_content {
+                order.issues.insert("Image optional-content print state requires verification".into());
+            }
+            if state.matrix.is_none() {
+                order.issues.insert("Image placement transform is unresolved".into());
+            }
+            order.images.push(crate::PrintImageUse {
+                layer: self.layers.last().copied().flatten(),
+                before_path: order.layers.len(),
+                inline,
+                matrix: state.matrix.map(|m| m.as_coeffs()),
+                clip_context: state.clip_context,
+                overprint: state.fill,
+                overprint_mode: u8::from(state.nonzero),
+                description,
+            });
+        }
+    }
+    fn concat(&mut self, matrix: [f64; 6]) {
+        if self.out.print_order.is_none() {
+            return;
+        }
+        if let Some(s) = self.states.last_mut() {
+            s.matrix = s
+                .matrix
+                .map(|m| m * vectorcraft_geom::Affine::new(matrix))
+                .filter(|m| m.as_coeffs().iter().all(|v| v.is_finite() && v.abs() <= 1.0e12));
+        }
+    }
     fn order_mark(&mut self, stroke: bool) {
         if !self.is_visible() {
             return;
@@ -613,6 +657,7 @@ impl Walker<'_, '_> {
 
     /// The pattern of fills (or of `stroke`s) is in ink `ink` from now on.
     fn set_pattern(&mut self, stroke: bool, ink: Option<u32>) {
+        self.order_issue("Pattern or shading content requires nested composited paint census");
         if let Some(s) = self.states.last_mut() {
             s.inks[usize::from(stroke)].pattern = ink;
             s.spaces[usize::from(stroke)] = PrintColorSpace::Other;
@@ -817,6 +862,12 @@ impl Walker<'_, '_> {
                     self.visible.pop();
                     self.layers.pop();
                 }
+                TypedInstruction::Transform(m) => self.concat([m.0.as_f64(), m.1.as_f64(), m.2.as_f64(), m.3.as_f64(), m.4.as_f64(), m.5.as_f64()]),
+                TypedInstruction::ClipNonZero(_) | TypedInstruction::ClipEvenOdd(_) => {
+                    if let Some(s) = self.states.last_mut() {
+                        s.clip_context = true;
+                    }
+                }
                 TypedInstruction::SaveState(_) => self.save(),
                 TypedInstruction::RestoreState(_) => self.restore(),
                 TypedInstruction::SetGraphicsState(gs) => {
@@ -885,7 +936,7 @@ impl Walker<'_, '_> {
                 | TypedInstruction::ShowTexts(_)
                 | TypedInstruction::NextLineAndShowText(_)
                 | TypedInstruction::ShowTextWithParameters(_) => self.shown(),
-                TypedInstruction::InlineImage(_) => self.order_issue("Inline image requires direct image paint census"),
+                TypedInstruction::InlineImage(image) => self.image_mark(image.0, res, true),
                 TypedInstruction::XObject(x) => {
                     if !self.is_visible() {
                         continue;
@@ -895,8 +946,24 @@ impl Walker<'_, '_> {
                         continue;
                     };
                     let d = s.dict();
+                    if d.get::<Name<'_>>(b"Subtype").as_deref() == Some(b"Image") {
+                        // Own image optional content is separate from the enclosing marked-content layer.
+                        // Preserve the normal import scanner's behaviour; this is raw audit evidence only.
+                        if self.out.print_order.is_some() {
+                            let oc = d.get::<Dict<'_>>(b"OC");
+                            if let Some(oc) = &oc {
+                                self.begin_oc(oc, d.get_ref(b"OC").map(ObjectIdentifier::from));
+                            }
+                            self.image_mark(&s, res, false);
+                            if oc.is_some() {
+                                self.visible.pop();
+                                self.layers.pop();
+                            }
+                        }
+                        continue;
+                    }
                     if d.get::<Name<'_>>(b"Subtype").as_deref() != Some(b"Form") || d.get::<[f32; 4]>(b"BBox").is_none() {
-                        self.order_issue("Image or unrecognised XObject requires direct paint census");
+                        self.order_issue("Unrecognised XObject requires direct paint census");
                         continue;
                     }
                     if depth >= MAX_DEPTH {
@@ -930,6 +997,16 @@ impl Walker<'_, '_> {
                         // (Its own resources, or without any those of what draws it: as the interpreter reads them.)
                         let inner = Resources::from_scope(d.get::<Dict<'_>>(b"Resources"), res.clone());
                         self.save();
+                        if d.contains_key(b"Matrix") {
+                            if let Some(matrix) = d.get::<[f64; 6]>(b"Matrix") {
+                                self.concat(matrix);
+                            } else if let Some(state) = self.states.last_mut() {
+                                state.matrix = None;
+                            }
+                        }
+                        if let Some(state) = self.states.last_mut() {
+                            state.clip_context = true;
+                        }
                         self.walk(data.as_ref(), &inner, depth + 1);
                         self.restore();
                         if self.out.cut {
@@ -995,7 +1072,7 @@ fn walk_page<'w, 'p>(
         max_form_bytes,
         out: Scan { print_order: record_order.then(Default::default), ..Default::default() },
         hidden_form: false,
-        states: vec![State::default()],
+        states: vec![State { matrix: Some(vectorcraft_geom::Affine::IDENTITY), ..Default::default() }],
         text: TextOverprint::None,
         text_inks: [RunInk::None; 2],
         ink_index: HashMap::new(),

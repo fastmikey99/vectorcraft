@@ -66,6 +66,7 @@ mod post;
 mod preserve;
 mod presets;
 mod print;
+mod print_image;
 mod print_order;
 mod settings;
 mod streams;
@@ -80,6 +81,7 @@ pub use pages::{PageInfo, PdfInfo, has_illustrator_data, illustrator_data, info,
 pub use post::{THUMBNAIL_SIZE, Thumbnail};
 pub use presets::*;
 pub use print::*;
+pub use print_image::{PrintImageDescription, PrintImageUse};
 pub use print_order::{PrintColorSpace, PrintOrder, PrintPaintSource, print_order};
 pub use settings::*;
 

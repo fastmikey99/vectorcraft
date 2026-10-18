@@ -1,5 +1,5 @@
 //! A bounded content-stream order audit, before editor layer aggregation.
-//! This is a path-paint ordering proof, not complete PDF interpretation/qualification.
+//! Records path order and image uses; this is not complete composited PDF qualification.
 use crate::{
     PdfError,
     import_scan::{Ocgs, scan_print_order},
@@ -28,6 +28,7 @@ pub struct PrintPaintSource {
 }
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PageOrder {
+    pub images: Vec<crate::PrintImageUse>,
     pub layers: Vec<Option<usize>>,
     pub source_indices: Vec<usize>,
     pub sources: Vec<PrintPaintSource>,
@@ -35,6 +36,8 @@ pub(crate) struct PageOrder {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct PrintOrder {
+    /// Image uses in stream order, per page. Does not establish composited coverage.
+    pub images: Vec<Vec<crate::PrintImageUse>>,
     /// Exact OCG names; events refer into this dictionary, retaining duplicates.
     pub layers: Vec<String>,
     pub pages: Vec<Vec<Option<usize>>>,
@@ -46,11 +49,12 @@ pub struct PrintOrder {
 pub fn print_order(bytes: &[u8]) -> Result<PrintOrder, PdfError> {
     let pdf = crate::pages::open_with_options(bytes, None, &craft_pdf::OpenOptions { max_input_bytes: 256 * 1024 * 1024, ..Default::default() })?;
     let mut ocgs = Ocgs::read(&pdf);
-    let mut report = PrintOrder { layers: vec![], pages: vec![], source_indices: vec![], sources: vec![], issues: BTreeSet::new() };
+    let mut report = PrintOrder { images: vec![], layers: vec![], pages: vec![], source_indices: vec![], sources: vec![], issues: BTreeSet::new() };
     if pdf.pages().len() > 1000 {
         return Err(PdfError::Unsupported("Print-order page budget exceeded".into()));
     }
     let mut count = 0usize;
+    let mut images = 0usize;
     for page in pdf.pages().iter() {
         if page.raw().get::<craft_pdf::syntax::object::Object<'_>>(b"Annots").is_some() {
             report.issues.insert("Annotation print appearances require direct census".into());
@@ -60,6 +64,11 @@ pub fn print_order(bytes: &[u8]) -> Result<PrintOrder, PdfError> {
         }
         let result = scan_print_order(page, &mut ocgs, pdf.decode_limits().max_decoded_stream())?;
         count += result.layers.len();
+        images += result.images.len();
+        if images > crate::print_image::MAX_IMAGES {
+            return Err(PdfError::Unsupported("Print-image use budget exceeded".into()));
+        }
+        report.images.push(result.images);
         if count > 50_000 {
             return Err(PdfError::Unsupported("Print-order event budget exceeded".into()));
         }

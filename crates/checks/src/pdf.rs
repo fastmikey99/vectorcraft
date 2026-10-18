@@ -26,8 +26,20 @@ pub struct PaintedObject {
     pub paint: Value,
 }
 #[derive(Clone, Debug, Serialize)]
+pub struct RawPaintAudit {
+    pub path_paint_count: usize,
+    pub image_use_count: usize,
+    pub source_space_count: usize,
+    pub image_sample: Vec<(usize, vectorcraft_pdf::PrintImageUse)>,
+    pub issue_count: usize,
+    pub issues_sample: Vec<String>,
+}
+#[derive(Clone, Debug, Serialize)]
 pub struct Census {
     pub paint_order_verified: bool,
+    pub raw_audit: Option<RawPaintAudit>,
+    pub raw_audit_error: Option<String>,
+    pub image_objects: usize,
     pub paint_sources: Vec<vectorcraft_pdf::PrintPaintSource>,
     pub unresolved_layers: std::collections::BTreeSet<String>,
     pub paints: Vec<PaintedObject>,
@@ -149,6 +161,9 @@ fn walk(doc: &Document, symbols: &SymbolBoxes, node: &Node, layer: &str, state: 
     if !visible {
         census.unresolved_layers.insert(layer.into());
         census.unresolved.push(format!("{}: optional-content print state needs verification", node.id));
+    }
+    if matches!(node.kind, NodeKind::Image(_)) {
+        census.image_objects += 1;
     }
     let bounds = node.geometric_bounds_with(symbols).map(|b| [b.x0 * 25.4 / 72.0, b.y0 * 25.4 / 72.0, b.x1 * 25.4 / 72.0, b.y1 * 25.4 / 72.0]);
     match &node.kind {
@@ -304,6 +319,9 @@ fn walk(doc: &Document, symbols: &SymbolBoxes, node: &Node, layer: &str, state: 
 pub fn census(doc: &Document) -> Census {
     let mut c = Census {
         paint_order_verified: false,
+        raw_audit: None,
+        raw_audit_error: None,
+        image_objects: 0,
         paint_sources: vec![],
         paints: vec![],
         unresolved: vec![],
@@ -374,6 +392,7 @@ pub fn check(request: &Request, bytes: &[u8]) -> Result<Report, String> {
         Status::Incomplete,
         "Public PDF parsed; complete printable-content accounting requires independent census reconciliation",
         json!({"pages":c.pages,"paint_count":c.paints.len(),"budget_exhausted":c.budget_exhausted,"notices":notices,
+            "decoded_image_objects":c.image_objects,"raw_paint_audit":c.raw_audit,"raw_paint_audit_error":c.raw_audit_error,
             "source_space_count":c.paint_sources.len(),"source_spaces_sample":c.paint_sources.iter().take(32).collect::<Vec<_>>(),
             "unresolved_count":c.unresolved.len(),"unresolved_sample":c.unresolved.iter().take(64).collect::<Vec<_>>()}),
         evidence.clone(),

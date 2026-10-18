@@ -47,11 +47,38 @@ pub fn reconcile(bytes: &[u8], census: &mut crate::pdf::Census) {
 }
 pub(crate) fn try_reconcile(bytes: &[u8], census: &mut crate::pdf::Census) -> Result<(), String> {
     census.paint_order_verified = false;
+    census.raw_audit = None;
+    census.raw_audit_error = None;
     census.paint_sources.clear();
     for p in &mut census.paints {
         p.source_space = None;
     }
-    let order = vectorcraft_pdf::print_order(bytes).map_err(|e| e.to_string())?;
+    let mut order = vectorcraft_pdf::print_order(bytes).map_err(|e| {
+        let reason = e.to_string();
+        census.raw_audit_error = Some(reason.clone());
+        reason
+    })?;
+    let images: usize = order.images.iter().map(Vec::len).sum();
+    if images != census.image_objects {
+        order.issues.insert(format!(
+            "Raw image uses ({images}) differ from decoded image objects ({}); expansion, omission or mask conversion needs reconciliation",
+            census.image_objects
+        ));
+    }
+    census.raw_audit = Some(crate::pdf::RawPaintAudit {
+        path_paint_count: order.pages.iter().map(Vec::len).sum(),
+        image_use_count: order.images.iter().map(Vec::len).sum(),
+        source_space_count: order.sources.len(),
+        image_sample: order
+            .images
+            .iter()
+            .enumerate()
+            .flat_map(|(page, images)| images.iter().map(move |image| (page, image.clone())))
+            .take(32)
+            .collect(),
+        issue_count: order.issues.len(),
+        issues_sample: order.issues.iter().take(64).cloned().collect(),
+    });
     let indices = indices(&order, census)?;
     census.paints = indices.iter().filter_map(|i| census.paints.get(*i).cloned()).collect();
     for ((i, p), &source) in census.paints.iter_mut().enumerate().zip(order.source_indices.iter().flatten()) {
@@ -219,6 +246,50 @@ mod tests {
         }
         bytes.extend(format!("trailer << /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", offsets.len()).as_bytes());
         bytes
+    }
+    #[test]
+    fn image_audit_survives_unresolved_reconciliation_and_exposes_omissions() {
+        let bytes = pdf(false, "BI /W 1 /H 1 /BPC 8 /CS /G ID x EI");
+        let mut census = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+        assert_eq!(census.image_objects, 1);
+        assert!(try_reconcile(&bytes, &mut census).is_err());
+        assert!(!census.paint_order_verified);
+        let raw = census.raw_audit.as_ref().unwrap();
+        assert_eq!(raw.image_use_count, 1);
+        assert_eq!(raw.path_paint_count, 2);
+        assert_eq!(raw.image_sample.len(), 1);
+        let mut request = crate::tests::request();
+        request.identity.pdf_sha256 = crate::sha256(&bytes);
+        request.identity.recipe_sha256 = crate::digest(&request.recipe).unwrap();
+        let report = crate::pdf::check(&request, &bytes).unwrap();
+        let integrity = report.findings.iter().find(|f| f.obligation.key == "global/integrity").unwrap();
+        assert_eq!(integrity.status, Status::Incomplete);
+        assert_eq!(integrity.observed["raw_paint_audit"]["image_use_count"], 1);
+        assert_eq!(integrity.observed["decoded_image_objects"], 1);
+        // A dropped imported image cannot erase its raw occurrence or establish order.
+        census.image_objects = 0;
+        assert!(try_reconcile(&bytes, &mut census).is_err());
+        let raw = census.raw_audit.as_ref().unwrap();
+        assert!(raw.issues_sample.iter().any(|s| s.contains("differ from decoded image objects")));
+        assert_eq!(raw.image_use_count, 1);
+    }
+    #[test]
+    fn image_samples_are_bounded_while_the_full_count_is_retained() {
+        let bytes = pdf(false, &"BI /W 1 /H 1 /BPC 8 /CS /G ID x EI ".repeat(35));
+        let mut census = crate::pdf::census(&vectorcraft_doc::Document::new(100.0, 100.0));
+        assert!(try_reconcile(&bytes, &mut census).is_err());
+        let raw = census.raw_audit.unwrap();
+        assert_eq!(raw.image_use_count, 35);
+        assert_eq!(raw.image_sample.len(), 32);
+    }
+    #[test]
+    fn raw_image_budget_failure_is_retained_as_an_explicit_audit_error() {
+        let bytes = pdf(false, &"BI /W 1 /H 1 /BPC 8 /CS /G ID x EI ".repeat(4097));
+        let mut census = crate::pdf::census(&vectorcraft_doc::Document::new(100.0, 100.0));
+        assert!(try_reconcile(&bytes, &mut census).is_err());
+        assert!(census.raw_audit.is_none());
+        assert!(census.raw_audit_error.is_some());
+        assert!(!census.paint_order_verified);
     }
     #[test]
     fn interleaved_content_fails_even_when_layer_metadata_looks_right() {
