@@ -2434,3 +2434,41 @@ fn crop_image_trim_leaves_a_cmyk_image_alone() {
     let r = s.execute("object.cropImage", &json!({"trim": true})).unwrap();
     assert_eq!((r["trimmed"].as_bool(), r["width"].as_u64(), r["height"].as_u64()), (Some(false), Some(4), Some(2)), "{r}");
 }
+
+/// A whole 547 × 984 mm gang sheet (Feedback #1269) rasterizes at 300 ppi: about 74 MP, over the
+/// old 64 MP limit.
+#[test]
+fn rasterize_a_gang_sheet_at_300_ppi() {
+    let mut s = session();
+    let mm = 72.0 / 25.4;
+    let a = rect(&mut s, 0.0, 0.0, 547.0 * mm, 984.0 * mm);
+    fill(&mut s, a, "#ff0000");
+    sel(&mut s, &[a]);
+    let r = s.execute("object.rasterize", &json!({"ppi": 300, "padding": 0})).unwrap();
+    let (w, h) = (r["width"].as_u64().unwrap(), r["height"].as_u64().unwrap());
+    assert!(w * h > 64_000_000 && w * h <= 100_000_000, "{w} × {h}");
+    assert_eq!(r["ppi"], json!(300.0));
+    assert!(r.get("note").is_none(), "{r}");
+}
+
+/// Past the limit, Rasterize makes the image at the highest whole ppi that fits and says so,
+/// instead of refusing.
+#[test]
+fn rasterize_too_large_lowers_the_ppi_to_fit() {
+    let mut s = session();
+    let mm = 72.0 / 25.4;
+    let a = rect(&mut s, 0.0, 0.0, 1000.0 * mm, 1000.0 * mm);
+    fill(&mut s, a, "#00ff00");
+    sel(&mut s, &[a]);
+    let r = s.execute("object.rasterize", &json!({"ppi": 300, "padding": 0})).unwrap();
+    let ppi = r["ppi"].as_f64().unwrap();
+    let (w, h) = (r["width"].as_u64().unwrap(), r["height"].as_u64().unwrap());
+    assert!(w * h <= 100_000_000, "{w} × {h}");
+    // 1 m square: 100 MP is 10,000 px a side, 254 ppi; a stroke widens the bounds a little.
+    assert!((250.0..254.0).contains(&ppi) && ppi.fract() == 0.0, "{ppi}");
+    let note = r["note"].as_str().unwrap();
+    assert!(note.contains(&format!("{ppi} ppi")) && note.contains("asked for 300 ppi"), "{note}");
+    // The image covers the art at that ppi.
+    let NodeKind::Image(im) = &node(&s, id_of(&r)).kind else { panic!() };
+    assert_eq!((im.width, im.height), (w as u32, h as u32));
+}
