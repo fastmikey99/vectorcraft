@@ -325,7 +325,8 @@ mod runtime_tests {
         };
         let bytes = crate::pdf::tests::fixture(true, "Exact#20ink", "q 0 0 40 40 re 5 5 30 30 re W* n q 0 0 20 40 re W n 0 0 40 40 re f Q Q", None);
         let rendering = render(&cfg, &bytes, &output).unwrap();
-        let census = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+        let mut census = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+        crate::ordering::reconcile(&bytes, &mut census);
         let comparison = crate::raster::compare(&census, &rendering, Some(0.3)).unwrap();
         assert_eq!(comparison.status, crate::Status::Pass, "{comparison:?}");
         fs::remove_dir_all(output).unwrap();
@@ -357,7 +358,8 @@ mod runtime_tests {
             let rendering = render(&cfg, &bytes, &output).unwrap();
             let imported = vectorcraft_pdf::import_with_report(&bytes, &Default::default()).unwrap();
             assert!(imported.warnings.is_empty(), "{label}: {:?}", imported.warnings);
-            let census = crate::pdf::census(&imported.document);
+            let mut census = crate::pdf::census(&imported.document);
+            crate::ordering::reconcile(&bytes, &mut census);
             let comparison = crate::raster::compare(&census, &rendering, Some(0.3)).unwrap();
             assert_eq!(comparison.status, crate::Status::Pass, "{label}: {comparison:?}");
             fs::remove_dir_all(output).unwrap();
@@ -392,6 +394,7 @@ mod runtime_tests {
                 let imported = vectorcraft_pdf::import_with_report(&bytes, &Default::default()).unwrap();
                 assert!(imported.warnings.is_empty(), "{label}/{mode}: {:?}", imported.warnings);
                 let mut census = crate::pdf::census(&imported.document);
+                crate::ordering::reconcile(&bytes, &mut census);
                 let comparison = crate::raster::compare(&census, &rendering, Some(0.3)).unwrap();
                 assert_eq!(comparison.status, crate::Status::Pass, "{label}/{mode}: {comparison:?}");
                 if label == "cmyk" {
@@ -432,6 +435,7 @@ mod runtime_tests {
             assert_eq!(image.get_pixel(20, 80).0[0], if overprint { 0 } else { 255 });
             let imported = vectorcraft_pdf::import(&crate::pdf::tests::pdf(overprint)).unwrap();
             let mut census = crate::pdf::census(&imported);
+            crate::ordering::reconcile(&crate::pdf::tests::pdf(overprint), &mut census);
             let comparison = crate::raster::compare(&census, &result, Some(1.0)).unwrap();
             assert_eq!(comparison.status, crate::Status::Pass, "{comparison:?}");
             census.paints.last_mut().unwrap().overprint = !overprint;

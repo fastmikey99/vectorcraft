@@ -23,8 +23,11 @@ use craft_pdf::syntax::content::ops::TypedInstruction;
 use craft_pdf::syntax::object::{Array, Dict, FromBytes, MaybeRef, Name, Object, ObjectIdentifier, dict_or_stream};
 use craft_pdf::syntax::page::{Page, Resources};
 
-use crate::PdfError;
 use crate::import_color::ink_names;
+use crate::{
+    PdfError,
+    print_order::{PrintColorSpace, PrintPaintSource},
+};
 
 /// The interpreter's limit on nested form XObjects.
 const MAX_DEPTH: u32 = 50;
@@ -377,6 +380,7 @@ struct State {
     nonzero: bool,
     /// The inks of fills and of strokes.
     inks: [Inks; 2],
+    spaces: [PrintColorSpace; 2],
 }
 
 /// A marked-content tag as [`Scan::tags`] keeps it: its FNV-1a hash (the tags are only compared,
@@ -460,6 +464,7 @@ struct Walker<'w, 'p> {
     ink_index: HashMap<Vec<String>, u32>,
     /// More inks or changes of ink than are kept: the page's inks are left out.
     inks_cut: bool,
+    print_sources: HashMap<(PrintColorSpace, Option<u32>), usize>,
 }
 
 impl Walker<'_, '_> {
@@ -515,16 +520,33 @@ impl Walker<'_, '_> {
             order.issues.insert(issue.into());
         }
     }
-    fn order_mark(&mut self) {
+    fn order_mark(&mut self, stroke: bool) {
         if !self.is_visible() {
             return;
         }
+        let state = self.state();
+        let kind = state.spaces[usize::from(stroke)];
+        let ink = state.inks[usize::from(stroke)].space;
         if let Some(order) = &mut self.out.print_order {
+            let source = if let Some(&i) = self.print_sources.get(&(kind, ink)) {
+                i
+            } else {
+                let names = ink.and_then(|i| self.out.inks.get(i as usize)).map(Vec::as_slice).unwrap_or_default();
+                if order.sources.len() >= 4096 || names.len() > 32 || names.iter().map(String::len).sum::<usize>() > 64 * 1024 {
+                    self.out.cut = true;
+                    return;
+                }
+                let i = order.sources.len();
+                order.sources.push(PrintPaintSource { color_space: kind, colorants: names.to_vec() });
+                self.print_sources.insert((kind, ink), i);
+                i
+            };
             if order.layers.len() >= 50_000 {
                 self.out.cut = true;
                 return;
             }
             order.layers.push(self.layers.last().copied().flatten());
+            order.source_indices.push(source);
         }
     }
 
@@ -556,7 +578,7 @@ impl Walker<'_, '_> {
         let s = self.state();
         let on = if stroke { s.stroke } else { s.fill };
         self.overprinting(on);
-        self.order_mark();
+        self.order_mark(stroke);
         let k = self.out.paints.len();
         self.out.paints.push(on);
         self.out.paint_zero.push(!s.nonzero);
@@ -582,9 +604,10 @@ impl Walker<'_, '_> {
     }
 
     /// The color space of fills (or of `stroke`s) is in ink `ink` from now on.
-    fn set_space(&mut self, stroke: bool, ink: Option<u32>) {
+    fn set_space(&mut self, stroke: bool, ink: Option<u32>, kind: PrintColorSpace) {
         if let Some(s) = self.states.last_mut() {
             s.inks[usize::from(stroke)].space = ink;
+            s.spaces[usize::from(stroke)] = kind;
         }
     }
 
@@ -592,6 +615,34 @@ impl Walker<'_, '_> {
     fn set_pattern(&mut self, stroke: bool, ink: Option<u32>) {
         if let Some(s) = self.states.last_mut() {
             s.inks[usize::from(stroke)].pattern = ink;
+            s.spaces[usize::from(stroke)] = PrintColorSpace::Other;
+        }
+    }
+
+    fn device_space(name: &[u8], res: &Resources<'_>) -> PrintColorSpace {
+        let (kind, fallback) = match name {
+            b"DeviceCMYK" | b"CMYK" => (PrintColorSpace::DeviceCmyk, b"DefaultCMYK".as_slice()),
+            b"DeviceGray" | b"G" => (PrintColorSpace::DeviceGray, b"DefaultGray".as_slice()),
+            b"DeviceRGB" | b"RGB" => (PrintColorSpace::DeviceRgb, b"DefaultRGB".as_slice()),
+            _ => return PrintColorSpace::Other,
+        };
+        if Name::new(fallback).and_then(|n| res.get_color_space(&n)).is_some() { PrintColorSpace::Other } else { kind }
+    }
+    fn source_space(name: &Name<'_>, res: &Resources<'_>) -> PrintColorSpace {
+        if matches!(name.as_ref(), b"DeviceCMYK" | b"CMYK" | b"DeviceGray" | b"G" | b"DeviceRGB" | b"RGB") {
+            return Self::device_space(name.as_ref(), res);
+        }
+        match res.get_color_space(name) {
+            Some(Object::Name(n)) => Self::device_space(n.as_ref(), res),
+            Some(Object::Array(a)) => {
+                let mut it = a.flex_iter();
+                match it.next::<Name<'_>>().as_deref() {
+                    Some(b"Separation") => PrintColorSpace::Separation,
+                    Some(b"DeviceN") => PrintColorSpace::DeviceN,
+                    _ => PrintColorSpace::Other,
+                }
+            }
+            _ => PrintColorSpace::Other,
         }
     }
 
@@ -673,6 +724,9 @@ impl Walker<'_, '_> {
     /// Graphics and optional-content state live across windows; page state is saved once.
     fn page(&mut self, page: &Page<'_>) {
         let resources = page.resources();
+        if let Some(state) = self.states.last_mut() {
+            state.spaces = [Self::device_space(b"DeviceGray", resources); 2];
+        }
         self.note_fonts(resources);
         let saved = self.states.len();
         self.save();
@@ -802,11 +856,11 @@ impl Walker<'_, '_> {
                 }
                 TypedInstruction::ColorSpaceNonStroke(cs) => {
                     let ink = self.space_ink(cs.0, res);
-                    self.set_space(false, ink);
+                    self.set_space(false, ink, Self::source_space(cs.0, res));
                 }
                 TypedInstruction::ColorSpaceStroke(cs) => {
                     let ink = self.space_ink(cs.0, res);
-                    self.set_space(true, ink);
+                    self.set_space(true, ink, Self::source_space(cs.0, res));
                 }
                 // A pattern by name; without one, `scn` sets a color in the space set before.
                 TypedInstruction::NonStrokeColorNamed(c) => {
@@ -821,14 +875,12 @@ impl Walker<'_, '_> {
                         self.set_pattern(true, ink);
                     }
                 }
-                TypedInstruction::NonStrokeColorDeviceGray(_)
-                | TypedInstruction::NonStrokeColorDeviceRgb(_)
-                | TypedInstruction::NonStrokeColorCmyk(_) => {
-                    self.set_space(false, None);
-                }
-                TypedInstruction::StrokeColorDeviceGray(_) | TypedInstruction::StrokeColorDeviceRgb(_) | TypedInstruction::StrokeColorCmyk(_) => {
-                    self.set_space(true, None);
-                }
+                TypedInstruction::NonStrokeColorDeviceGray(_) => self.set_space(false, None, Self::device_space(b"DeviceGray", res)),
+                TypedInstruction::NonStrokeColorDeviceRgb(_) => self.set_space(false, None, Self::device_space(b"DeviceRGB", res)),
+                TypedInstruction::NonStrokeColorCmyk(_) => self.set_space(false, None, Self::device_space(b"DeviceCMYK", res)),
+                TypedInstruction::StrokeColorDeviceGray(_) => self.set_space(true, None, Self::device_space(b"DeviceGray", res)),
+                TypedInstruction::StrokeColorDeviceRgb(_) => self.set_space(true, None, Self::device_space(b"DeviceRGB", res)),
+                TypedInstruction::StrokeColorCmyk(_) => self.set_space(true, None, Self::device_space(b"DeviceCMYK", res)),
                 TypedInstruction::ShowText(_)
                 | TypedInstruction::ShowTexts(_)
                 | TypedInstruction::NextLineAndShowText(_)
@@ -868,6 +920,7 @@ impl Walker<'_, '_> {
                     }
                     if self.is_visible() {
                         if let Some(g) = d.get::<Dict<'_>>(b"Group") {
+                            self.order_issue("Form transparency group colour space requires compositing reconciliation");
                             if self.out.groups.len() >= MAX_GROUPS {
                                 self.out.cut = true;
                                 return;
@@ -947,6 +1000,7 @@ fn walk_page<'w, 'p>(
         text_inks: [RunInk::None; 2],
         ink_index: HashMap::new(),
         inks_cut: false,
+        print_sources: HashMap::new(),
     };
     w.page(page);
     if !w.layers.is_empty() {

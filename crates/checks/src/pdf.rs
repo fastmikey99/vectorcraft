@@ -19,6 +19,7 @@ pub struct PaintedObject {
     pub bounds_mm: Option<[f64; 4]>,
     pub kind: String,
     pub order: usize,
+    pub source_space: Option<usize>,
     pub page: Option<usize>,
     pub geometry_mm: Option<PathData>,
     pub geometry_error_mm: f64,
@@ -27,6 +28,7 @@ pub struct PaintedObject {
 #[derive(Clone, Debug, Serialize)]
 pub struct Census {
     pub paint_order_verified: bool,
+    pub paint_sources: Vec<vectorcraft_pdf::PrintPaintSource>,
     pub unresolved_layers: std::collections::BTreeSet<String>,
     pub paints: Vec<PaintedObject>,
     pub unresolved: Vec<String>,
@@ -248,6 +250,7 @@ fn walk(doc: &Document, symbols: &SymbolBoxes, node: &Node, layer: &str, state: 
             bounds_mm: bounds,
             kind: node.kind_label().into(),
             order: census.paints.len(),
+            source_space: None,
             page,
             geometry_mm,
             geometry_error_mm,
@@ -301,6 +304,7 @@ fn walk(doc: &Document, symbols: &SymbolBoxes, node: &Node, layer: &str, state: 
 pub fn census(doc: &Document) -> Census {
     let mut c = Census {
         paint_order_verified: false,
+        paint_sources: vec![],
         paints: vec![],
         unresolved: vec![],
         unresolved_layers: Default::default(),
@@ -370,6 +374,7 @@ pub fn check(request: &Request, bytes: &[u8]) -> Result<Report, String> {
         Status::Incomplete,
         "Public PDF parsed; complete printable-content accounting requires independent census reconciliation",
         json!({"pages":c.pages,"paint_count":c.paints.len(),"budget_exhausted":c.budget_exhausted,"notices":notices,
+            "source_space_count":c.paint_sources.len(),"source_spaces_sample":c.paint_sources.iter().take(32).collect::<Vec<_>>(),
             "unresolved_count":c.unresolved.len(),"unresolved_sample":c.unresolved.iter().take(64).collect::<Vec<_>>()}),
         evidence.clone(),
     )?;

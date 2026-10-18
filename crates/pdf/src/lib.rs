@@ -80,7 +80,7 @@ pub use pages::{PageInfo, PdfInfo, has_illustrator_data, illustrator_data, info,
 pub use post::{THUMBNAIL_SIZE, Thumbnail};
 pub use presets::*;
 pub use print::*;
-pub use print_order::{PrintOrder, print_order};
+pub use print_order::{PrintColorSpace, PrintOrder, PrintPaintSource, print_order};
 pub use settings::*;
 
 use vectorcraft_doc::Document;

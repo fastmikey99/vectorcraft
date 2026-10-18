@@ -9,6 +9,15 @@ fn indices(order: &vectorcraft_pdf::PrintOrder, census: &crate::pdf::Census) -> 
     if !order.issues.is_empty() || !census.unresolved.is_empty() || census.budget_exhausted || order.pages.len() != census.pages {
         return Err("Printable census is incomplete; content order cannot be reconciled".into());
     }
+    if order.source_indices.len() != order.pages.len()
+        || order
+            .source_indices
+            .iter()
+            .zip(&order.pages)
+            .any(|(sources, events)| sources.len() != events.len() || sources.iter().any(|i| *i >= order.sources.len()))
+    {
+        return Err("Raw PDF source-space census differs from paint events".into());
+    }
     let mut groups: BTreeMap<(usize, Option<usize>), VecDeque<usize>> = BTreeMap::new();
     for (i, p) in census.paints.iter().enumerate() {
         let page = p.page.ok_or("Paint has no resolved production page")?;
@@ -38,12 +47,18 @@ pub fn reconcile(bytes: &[u8], census: &mut crate::pdf::Census) {
 }
 pub(crate) fn try_reconcile(bytes: &[u8], census: &mut crate::pdf::Census) -> Result<(), String> {
     census.paint_order_verified = false;
+    census.paint_sources.clear();
+    for p in &mut census.paints {
+        p.source_space = None;
+    }
     let order = vectorcraft_pdf::print_order(bytes).map_err(|e| e.to_string())?;
     let indices = indices(&order, census)?;
     census.paints = indices.iter().filter_map(|i| census.paints.get(*i).cloned()).collect();
-    for (i, p) in census.paints.iter_mut().enumerate() {
+    for ((i, p), &source) in census.paints.iter_mut().enumerate().zip(order.source_indices.iter().flatten()) {
         p.order = i;
+        p.source_space = Some(source);
     }
+    census.paint_sources = order.sources;
     census.paint_order_verified = true;
     Ok(())
 }
@@ -273,7 +288,7 @@ mod tests {
                 qualification_sha256: None,
             };
             let render = crate::independent::render(&config, &bytes, &output).unwrap();
-            assert_eq!(crate::raster::compare(&before, &render, Some(0.3)).unwrap().status, Status::Fail);
+            assert_eq!(crate::raster::compare(&before, &render, Some(0.3)).unwrap().status, Status::Incomplete);
             let mut after = before;
             reconcile(&bytes, &mut after);
             assert_eq!(crate::raster::compare(&after, &render, Some(0.3)).unwrap().status, Status::Pass);
