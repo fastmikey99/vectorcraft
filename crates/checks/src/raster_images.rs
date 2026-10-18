@@ -1,4 +1,4 @@
-//! Raw image-only PDF prediction, independently reconciled to tiffsep planes.
+//! Raw image and reconciled vector PDF prediction, independently reconciled to tiffsep planes.
 //! Reject unsupported contexts before comparing. This is a feature-specific measurement,
 //! not runtime qualification, a prepared hard mask, or proof of artwork fidelity.
 use crate::{
@@ -9,7 +9,7 @@ use crate::{
 use std::collections::BTreeSet;
 use vectorcraft_geom::{Affine, Point};
 
-struct Paint<'a> {
+struct ImagePaint<'a> {
     samples: &'a vectorcraft_pdf::PrintImageSamples,
     inverse: Affine,
     margin: [f64; 2],
@@ -18,7 +18,7 @@ fn paints<'a>(
     page: &vectorcraft_pdf::ProductionPage,
     images: &'a [vectorcraft_pdf::PrintImageUse],
     uncertainty: f64,
-) -> Result<Vec<Paint<'a>>, String> {
+) -> Result<Vec<ImagePaint<'a>>, String> {
     let [mx0, my0, mx1, my1] = page.media_mm;
     let [cx0, cy0, cx1, cy1] = page.crop_mm;
     let [x0, y0, x1, y1] = [mx0.max(cx0), my0.max(cy0), mx1.min(cx1), my1.min(cy1)];
@@ -56,11 +56,11 @@ fn paints<'a>(
             if margin.iter().any(|n| !n.is_finite()) || margin[0] * f64::from(samples.width) >= 0.5 || margin[1] * f64::from(samples.height) >= 0.5 {
                 return Err("Independent resolution cannot resolve image sample boundaries".into());
             }
-            Ok(Paint { samples, inverse, margin })
+            Ok(ImagePaint { samples, inverse, margin })
         })
         .collect()
 }
-impl Paint<'_> {
+impl ImagePaint<'_> {
     fn sample(&self, p: Point, name: &str) -> Result<Option<(f64, f64)>, ()> {
         let p = self.inverse * p;
         let [u, v] = [p.x, 1.0 - p.y];
@@ -86,6 +86,51 @@ impl Paint<'_> {
         Ok(Some((tone, alpha)))
     }
 }
+struct VectorPaint {
+    boundary: crate::geometry::Boundary,
+    inks: std::collections::BTreeMap<String, f64>,
+    overprint: bool,
+    skip_zero_process: bool,
+}
+enum PaintEvent<'a> {
+    Image(ImagePaint<'a>),
+    Vector(VectorPaint),
+}
+type Sample = Result<Option<(f64, f64)>, ()>;
+impl PaintEvent<'_> {
+    fn sample(&self, point: Point, name: &str, uncertainty: f64, budget: &mut usize) -> Result<Sample, String> {
+        match self {
+            Self::Image(image) => Ok(image.sample(point, name)),
+            Self::Vector(paint) => {
+                if paint.boundary.near_boundary(point, uncertainty, budget)? {
+                    return Ok(Err(()));
+                }
+                if !paint.boundary.contains(point, vectorcraft_geom::FillRule::NonZero) {
+                    return Ok(Ok(None));
+                }
+                let tone = paint.inks.get(name).copied();
+                if paint.overprint && (tone.is_none() || paint.skip_zero_process && tone == Some(0.0)) {
+                    return Ok(Ok(None));
+                }
+                Ok(Ok(Some((tone.unwrap_or(0.0), 1.0))))
+            }
+        }
+    }
+}
+fn vector_paint(paint: &crate::pdf::PaintedObject, census: &crate::pdf::Census) -> Result<VectorPaint, String> {
+    let path = paint.geometry_mm.as_ref().ok_or("Mixed vector paint has no coverage")?;
+    let source = paint.source_space.and_then(|i| census.paint_sources.get(i)).ok_or("Mixed vector source space missing")?;
+    let inks = crate::raster::source_tones(paint, source)?;
+    if inks.values().any(|v| !v.is_finite() || !(0.0..=1.0).contains(v)) {
+        return Err("Mixed vector source tone invalid".into());
+    }
+    Ok(VectorPaint {
+        boundary: crate::geometry::Boundary::new(path, vectorcraft_geom::FillRule::NonZero, 0.000001)?,
+        inks,
+        overprint: paint.overprint,
+        skip_zero_process: source.color_space == vectorcraft_pdf::PrintColorSpace::DeviceCmyk && !paint.overprint_zero,
+    })
+}
 pub(crate) fn compare(bytes: &[u8], render: &Render, tolerance: Option<f64>) -> Result<Comparison, String> {
     if !render.pixel_pitch_mm.is_finite() || render.pixel_pitch_mm <= 0.0 {
         return Err("Invalid independent image pixel pitch".into());
@@ -99,11 +144,10 @@ pub(crate) fn compare(bytes: &[u8], render: &Render, tolerance: Option<f64>) -> 
         return Ok(incomplete("Interpreter diagnostics or unresolved geometric acceptance".into()));
     }
     let order = vectorcraft_pdf::print_order(bytes).map_err(|e| e.to_string())?;
-    if order.pages.iter().any(|p| !p.is_empty())
-        || order.images.iter().all(Vec::is_empty)
+    if order.images.iter().all(Vec::is_empty)
         || order.issues.iter().any(|s| s != "Image sample, mask and compositing coverage requires independent reconciliation")
     {
-        return Ok(incomplete("Raw image-only census contains unsupported printable context".into()));
+        return Ok(incomplete("Raw image/vector census contains unsupported printable context".into()));
     }
     let info = vectorcraft_pdf::production_info(bytes).map_err(|e| e.to_string())?;
     if info.intents.as_ref().is_some_and(|a| !a.is_empty()) || info.pages.iter().any(|p| p.intents.as_ref().is_some_and(|a| !a.is_empty())) {
@@ -112,16 +156,90 @@ pub(crate) fn compare(bytes: &[u8], render: &Render, tolerance: Option<f64>) -> 
     if info.pages.len() != order.images.len() {
         return Err("Raw image page inventories differ".into());
     }
-    let mut page_paints = vec![];
-    for (page, images) in info.pages.iter().zip(&order.images) {
-        match paints(page, images, uncertainty) {
-            Ok(p) => page_paints.push(p),
-            Err(e) => return Ok(incomplete(e)),
+    let path_census = if order.pages.iter().any(|p| !p.is_empty()) {
+        let imported = vectorcraft_pdf::import_with_report(
+            bytes,
+            &vectorcraft_pdf::ImportOptions { reject_depth_loss: true, text_as: vectorcraft_pdf::TextAs::Outlines, ..Default::default() },
+        )
+        .map_err(|e| e.to_string())?;
+        let mut census = crate::pdf::paths_for_raw_image_prediction(&imported.document);
+        // Fresh raw page metadata supplies the boxes that the editable importer
+        // cannot round-trip. Validate its physical page frame before treating
+        // that exact metadata-retention warning as irrelevant to this prediction.
+        if census.page_sizes_mm.len() != info.pages.len()
+            || census.page_sizes_mm.iter().zip(&info.pages).any(|(size, page)| {
+                let width = page.crop_mm[2].min(page.media_mm[2]) - page.crop_mm[0].max(page.media_mm[0]);
+                let height = page.crop_mm[3].min(page.media_mm[3]) - page.crop_mm[1].max(page.media_mm[1]);
+                let expected = if matches!(page.rotation, 90 | 270) { [height, width] } else { [width, height] };
+                size.iter().zip(expected).any(|(observed, expected)| !observed.is_finite() || (*observed - expected).abs() > 0.000001)
+            })
+        {
+            return Ok(incomplete("Native and raw physical page frames differ".into()));
         }
+        census.unresolved.extend(
+            crate::pdf::import_messages(imported.warnings)
+                .0
+                .into_iter()
+                .filter(|w| w != "original PDF page boxes are not retained for a rotated, scaled-unit or artwork-bounds import"),
+        );
+        if let Err(reason) = crate::ordering::reconcile_paths_for_images(&order, &mut census) {
+            return Ok(incomplete(reason));
+        }
+        Some(census)
+    } else {
+        None
+    };
+    let geometry_error = path_census.as_ref().map(|c| c.paints.iter().map(|p| p.geometry_error_mm).fold(0.0, f64::max)).unwrap_or(0.0);
+    if !geometry_error.is_finite() || geometry_error < 0.0 {
+        return Ok(incomplete("Mixed geometry uncertainty invalid".into()));
+    }
+    let uncertainty = uncertainty + geometry_error;
+    let incomplete = |reason: String| Comparison { status: Status::Incomplete, uncertainty_mm: uncertainty, planes: vec![], issues: vec![reason] };
+    if tolerance.is_none_or(|t| t < uncertainty) {
+        return Ok(incomplete("Independent resolution cannot resolve mixed geometry uncertainty".into()));
+    }
+    let mut page_paints = vec![];
+    for (page_number, (page, images)) in info.pages.iter().zip(&order.images).enumerate() {
+        let image_paints = match paints(page, images, uncertainty) {
+            Ok(p) => p,
+            Err(e) => return Ok(incomplete(e)),
+        };
+        let mut image_paints = images.iter().zip(image_paints).peekable();
+        let vectors = path_census
+            .as_ref()
+            .map(|c| c.paints.iter().filter(|p| p.page == Some(page_number)).map(|p| vector_paint(p, c)).collect::<Result<Vec<_>, _>>())
+            .transpose();
+        let vectors = match vectors {
+            Ok(v) => v.unwrap_or_default(),
+            Err(e) => return Ok(incomplete(e)),
+        };
+        let path_count = order.pages.get(page_number).ok_or("Mixed path page missing")?.len();
+        if vectors.len() != path_count {
+            return Ok(incomplete("Mixed vector page count differs from raw path events".into()));
+        }
+        let mut vectors = vectors.into_iter();
+        let mut events = vec![];
+        for before_path in 0..=path_count {
+            while image_paints.peek().is_some_and(|(image, _)| image.before_path == before_path) {
+                if let Some((_, image)) = image_paints.next() {
+                    events.push(PaintEvent::Image(image));
+                }
+            }
+            if let Some(vector) = vectors.next() {
+                events.push(PaintEvent::Vector(vector));
+            }
+        }
+        if image_paints.next().is_some() {
+            return Ok(incomplete("Image/path event order is inconsistent".into()));
+        }
+        page_paints.push(events);
     }
     let mut inks: BTreeSet<String> = ["Cyan", "Magenta", "Yellow", "Black"].into_iter().map(String::from).collect();
-    for p in page_paints.iter().flatten() {
-        inks.extend(p.samples.colourants.iter().cloned());
+    for event in page_paints.iter().flatten() {
+        match event {
+            PaintEvent::Image(p) => inks.extend(p.samples.colourants.iter().cloned()),
+            PaintEvent::Vector(p) => inks.extend(p.inks.keys().cloned()),
+        }
     }
     let expected: BTreeSet<_> = (1..=info.pages.len() as u32).flat_map(|page| inks.iter().cloned().map(move |name| (page, name))).collect();
     let actual: BTreeSet<_> = render.planes.iter().map(|p| (p.page, p.name.clone())).collect();
@@ -132,40 +250,29 @@ pub(crate) fn compare(bytes: &[u8], render: &Render, tolerance: Option<f64>) -> 
     let mut unresolved_blending = false;
     let mut pixels = 0u64;
     let mut evaluations = 0u64;
+    let mut boundary_evaluations = 0usize;
     for plane in &render.planes {
         let plane_pixels = u64::from(plane.width) * u64::from(plane.height);
         if plane_pixels == 0 || plane_pixels > 20_000_000 - pixels {
-            return Err("Independent image comparison pixel budget exceeded".into());
+            return Ok(crate::raster::interrupted(planes, None, uncertainty, "Independent image comparison pixel budget exceeded".into()));
         }
         let count = page_paints.get(plane.page as usize - 1).ok_or("Image paints page missing")?.len() as u64;
         evaluations = evaluations
             .checked_add(plane_pixels.checked_mul(count).ok_or("Image evaluation budget overflow")?)
             .ok_or("Image evaluation budget overflow")?;
         if evaluations > 80_000_000 {
-            return Err("Independent image sample evaluation budget exceeded".into());
+            return Ok(crate::raster::interrupted(planes, None, uncertainty, "Independent image sample evaluation budget exceeded".into()));
         }
-        let raw = std::fs::read(&plane.path).map_err(|e| e.to_string())?;
-        if crate::sha256(&raw) != plane.sha256 {
-            return Err("Independent image plane changed".into());
-        }
-        let dimensions = image::ImageReader::new(std::io::Cursor::new(&raw))
-            .with_guessed_format()
-            .map_err(|e| e.to_string())?
-            .into_dimensions()
-            .map_err(|e| e.to_string())?;
-        if dimensions != (plane.width, plane.height) {
-            return Err("Independent image plane dimensions changed".into());
-        }
-        let image = image::load_from_memory(&raw).map_err(|e| e.to_string())?.into_luma8();
-        if image.dimensions() != (plane.width, plane.height) {
-            return Err("Independent image plane dimensions changed".into());
-        }
+        let image = match crate::raster::read_plane(plane) {
+            Ok(image) => image,
+            Err(reason) => return Ok(crate::raster::interrupted(planes, None, uncertainty, reason)),
+        };
         let page = info.pages.get(plane.page as usize - 1).ok_or("Image plane page missing")?;
         let w = page.crop_mm[2].min(page.media_mm[2]) - page.crop_mm[0].max(page.media_mm[0]);
         let h = page.crop_mm[3].min(page.media_mm[3]) - page.crop_mm[1].max(page.media_mm[1]);
         let (w, h) = if page.rotation == 90 || page.rotation == 270 { (h, w) } else { (w, h) };
         if (w / render.pixel_pitch_mm - f64::from(plane.width)).abs() > 1.0 || (h / render.pixel_pitch_mm - f64::from(plane.height)).abs() > 1.0 {
-            return Ok(incomplete("Independent image page dimensions disagree".into()));
+            return Ok(crate::raster::interrupted(planes, None, uncertainty, "Independent image page dimensions disagree".into()));
         }
         let paints = page_paints.get(plane.page as usize - 1).ok_or("Image paints page missing")?;
         let mut result = PlaneComparison {
@@ -181,16 +288,39 @@ pub(crate) fn compare(bytes: &[u8], render: &Render, tolerance: Option<f64>) -> 
         for (x, y, pixel) in image.enumerate_pixels() {
             pixels += 1;
             if pixels > 20_000_000 {
-                return Err("Independent image comparison pixel budget exceeded".into());
+                return Ok(crate::raster::interrupted(
+                    planes,
+                    Some(result),
+                    uncertainty,
+                    "Independent image comparison pixel budget exceeded".into(),
+                ));
             }
             let point = Point::new((f64::from(x) + 0.5) * render.pixel_pitch_mm, (f64::from(y) + 0.5) * render.pixel_pitch_mm);
             let mut expected = 0.0;
+            let vector_tone_error = 1.0 / 255.0 + f64::from(f32::EPSILON);
+            let mut allowed_tone_error = vector_tone_error;
             let mut boundary = false;
             let mut fractional_layers = 0;
             for paint in paints {
-                match paint.sample(point, &plane.name) {
+                let sample = match paint.sample(point, &plane.name, uncertainty, &mut boundary_evaluations) {
+                    Ok(sample) => sample,
+                    Err(reason) => return Ok(crate::raster::interrupted(planes, Some(result), uncertainty, reason)),
+                };
+                match sample {
                     Ok(Some((tone, alpha))) => {
                         expected = expected * (1.0 - alpha) + tone * alpha;
+                        // Retain the vector-only quantisation envelope wherever an
+                        // opaque vector is the last writer. Fractional image writes
+                        // keep the existing source/mask envelope for visible mixtures.
+                        let own_error = match paint {
+                            PaintEvent::Image(_) => 2.0 / 255.0,
+                            PaintEvent::Vector(_) => vector_tone_error,
+                        };
+                        if alpha == 1.0 {
+                            allowed_tone_error = own_error;
+                        } else if alpha > 0.0 {
+                            allowed_tone_error = allowed_tone_error.max(own_error);
+                        }
                         if alpha == 1.0 {
                             fractional_layers = 0;
                         } else if alpha > 0.0 {
@@ -213,7 +343,7 @@ pub(crate) fn compare(bytes: &[u8], render: &Render, tolerance: Option<f64>) -> 
             result.compared_pixels += 1;
             let error = (1.0 - f64::from(pixel.0[0]) / 255.0 - expected).abs();
             result.maximum_tone_error = result.maximum_tone_error.max(error);
-            if error > 2.0 / 255.0 {
+            if error > allowed_tone_error {
                 result.status = Status::Fail;
                 result.wrong_pixels += 1;
                 if result.first_defect_mm.is_none() {
@@ -467,5 +597,230 @@ mod tests {
                 finish_evidence(&output);
             }
         }
+    }
+    fn mixed_pdf(stream: &str, rotate: u16, unit: f64, mask: bool, crop: bool) -> Vec<u8> {
+        let mask_entry = if mask { "/SMask 6 0 R" } else { "" };
+        let crop_entry = if crop { "/CropBox [6 4 90 68]" } else { "" };
+        objects_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [8 0 R 9 0 R] /D << /Order [9 0 R 8 0 R] /ON [8 0 R 9 0 R] >> >> >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 96 72] {crop_entry} /Rotate {rotate} /UserUnit {unit} /Resources << /XObject << /Im 5 0 R /MaskedForm 11 0 R >> /Properties << /Lower 8 0 R /Upper 9 0 R >> /ColorSpace << /Ink [/Separation /SyntheticSpot /DeviceCMYK 7 0 R] >> /ExtGState << /OP0 << /op true /OPM 0 >> /OP1 << /op true /OPM 1 >> /Alpha << /ca 0.5 >> /Multiply << /BM /Multiply >> /Soft << /SMask << /S /Alpha /G 10 0 R >> >> /Transfer << /TR 12 0 R >> /Defaults << /TR2 /Default /BG2 /Default /UCR2 /Default /HT /Default >> >> >> /Contents 4 0 R >>"),
+            format!("<< /Length {} >>\nstream\n{stream}\nendstream",stream.len()),
+            format!("<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 /ColorSpace /DeviceCMYK {mask_entry} /Filter /ASCIIHexDecode /Length 33 >>\nstream\nff00000000ff00000000ff00000000ff>\nendstream"),
+            "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /ASCIIHexDecode /Length 9 >>\nstream\n00ff80ff>\nendstream".into(),
+            "<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 0 0 1] /N 1 >>".into(),
+            "<< /Type /OCG /Name (Lower) >>".into(),
+            "<< /Type /OCG /Name (Upper) >>".into(),
+            {let content="1 g 0 0 96 72 re f";format!("<< /Type /XObject /Subtype /Form /BBox [0 0 96 72] /Group << /S /Transparency /CS /DeviceGray >> /Resources << >> /Length {} >>\nstream\n{content}\nendstream",content.len())},
+            {let content="/Soft gs q 48 0 0 48 12 12 cm /Im Do Q";format!("<< /Type /XObject /Subtype /Form /BBox [0 0 96 72] /Group << /S /Transparency /CS /DeviceCMYK >> /Resources << /XObject << /Im 5 0 R >> /ExtGState << /Soft << /SMask << /S /Alpha /G 10 0 R >> >> >> >> /Length {} >>\nstream\n{content}\nendstream",content.len())},
+            "<< /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >>".into(),
+        ])
+    }
+    const IMAGE: &str = "q 48 0 0 48 12 12 cm /Im Do Q";
+    const BACKGROUND: &str = "0.4 0.2 0 0 k 8 6 80 60 re f";
+    const FOREGROUND: &str = "0 0.7 0.3 0 k 24 18 48 36 re f";
+    #[test]
+    fn mixed_path_reconciliation_keeps_full_census_gaps_and_detects_missing_images() {
+        let bytes = mixed_pdf(&format!("{BACKGROUND} {IMAGE} {FOREGROUND}"), 0, 1.0, false, false);
+        let doc = vectorcraft_pdf::import(&bytes).unwrap();
+        let ordinary = crate::pdf::census(&doc);
+        assert!(!ordinary.unresolved.is_empty());
+        let raw = vectorcraft_pdf::print_order(&bytes).unwrap();
+        assert_eq!(raw.images[0][0].before_path, 1);
+        let mut paths = crate::pdf::paths_for_raw_image_prediction(&doc);
+        crate::ordering::reconcile_paths_for_images(&raw, &mut paths).unwrap();
+        assert_eq!(paths.paints.len(), 2);
+        assert!(paths.paint_order_verified);
+        paths.image_objects = 0;
+        assert!(crate::ordering::reconcile_paths_for_images(&raw, &mut paths).is_err());
+        let mut unsupported = raw.clone();
+        unsupported.issues.insert("Unrelated printable context".into());
+        paths.image_objects = 1;
+        assert!(crate::ordering::reconcile_paths_for_images(&unsupported, &mut paths).is_err());
+    }
+    #[test]
+    fn actual_interpreter_mixed_images_vectors_preserve_paint_order_and_bound_unsupported_context() {
+        let Ok(binary) = std::env::var("CHECK_GS_BINARY") else {
+            return;
+        };
+        let cases = [
+            ("vector-image", format!("{BACKGROUND} {IMAGE}"), 0, 1.0, false, false, Status::Pass),
+            ("image-vector", format!("{IMAGE} {FOREGROUND}"), 0, 1.0, false, false, Status::Pass),
+            ("vector-mask-vector", format!("{BACKGROUND} {IMAGE} {FOREGROUND}"), 0, 1.0, true, false, Status::Pass),
+            ("spot-mask", format!("/Ink cs 0.6 scn 8 6 80 60 re f {IMAGE}"), 0, 1.0, true, false, Status::Pass),
+            ("mask-spot", format!("{IMAGE} /Ink cs 0.6 scn 24 18 48 36 re f"), 0, 1.0, true, false, Status::Pass),
+            (
+                "layer-order",
+                format!("/OC /Lower BDC {BACKGROUND} EMC {IMAGE} /OC /Upper BDC {FOREGROUND} EMC /OC /Lower BDC 0 0 0 0.5 k 30 24 24 24 re f EMC"),
+                0,
+                1.0,
+                false,
+                false,
+                Status::Pass,
+            ),
+            ("vector-opm0", format!("{IMAGE} /OP0 gs {FOREGROUND}"), 0, 1.0, false, false, Status::Pass),
+            ("vector-opm1", format!("{IMAGE} /OP1 gs {FOREGROUND}"), 0, 1.0, false, false, Status::Pass),
+            ("gray-overprint", format!("{IMAGE} /OP1 gs 0.4 g 24 18 48 36 re f"), 0, 1.0, false, false, Status::Pass),
+            ("rotate90", format!("{BACKGROUND} {IMAGE} {FOREGROUND}"), 90, 1.0, true, false, Status::Pass),
+            ("rotate180-unit2", format!("{BACKGROUND} {IMAGE} {FOREGROUND}"), 180, 2.0, true, false, Status::Pass),
+            ("rotate270-crop", format!("{BACKGROUND} {IMAGE} {FOREGROUND}"), 270, 1.0, true, true, Status::Pass),
+            ("vector-clip", format!("{IMAGE} q 18 18 48 36 re 30 24 24 24 re W* n {FOREGROUND} Q"), 0, 1.0, false, false, Status::Pass),
+            ("image-alpha", format!("{BACKGROUND} /Alpha gs {IMAGE}"), 0, 1.0, false, false, Status::Incomplete),
+            ("image-gs-softmask", format!("{BACKGROUND} /Soft gs {IMAGE}"), 0, 1.0, false, false, Status::Incomplete),
+            ("form-gs-softmask", format!("{BACKGROUND} /MaskedForm Do"), 0, 1.0, false, false, Status::Incomplete),
+            ("vector-transfer", format!("{IMAGE} /Transfer gs {FOREGROUND}"), 0, 1.0, false, false, Status::Incomplete),
+            ("transfer-default", format!("/Defaults gs {BACKGROUND} {IMAGE} {FOREGROUND}"), 0, 1.0, false, false, Status::Pass),
+            ("transfer-restored", format!("q /Transfer gs Q {IMAGE} {FOREGROUND}"), 0, 1.0, false, false, Status::Pass),
+            ("image-clip", format!("{BACKGROUND} q 20 20 20 20 re W n {IMAGE} Q"), 0, 1.0, false, false, Status::Incomplete),
+            ("vector-alpha", format!("{IMAGE} /Alpha gs {FOREGROUND}"), 0, 1.0, false, false, Status::Incomplete),
+            ("vector-blend", format!("{IMAGE} /Multiply gs {FOREGROUND}"), 0, 1.0, false, false, Status::Incomplete),
+        ];
+        let mut failures = vec![];
+        for (name, stream, rotate, unit, mask, crop, status) in cases {
+            let bytes = mixed_pdf(&stream, rotate, unit, mask, crop);
+            for dpi in [72, 144] {
+                let output = evidence_directory(&format!("mixed-{name}"), dpi);
+                let config = crate::independent::Configuration {
+                    binary: binary.clone().into(),
+                    binary_sha256: crate::sha256(&std::fs::read(&binary).unwrap()),
+                    version: "10.07.1".into(),
+                    dpi,
+                    timeout_ms: 10000,
+                    max_output_bytes: 16 * 1024 * 1024,
+                    qualification_sha256: None,
+                };
+                let mut render = crate::independent::render(&config, &bytes, &output).unwrap();
+                let result = compare(&bytes, &render, Some(2.0)).unwrap();
+                retain_result(&output, &render, &result, "comparison");
+                if result.status != status {
+                    let imported = vectorcraft_pdf::import_with_report(&bytes, &Default::default()).unwrap();
+                    let c = crate::pdf::paths_for_raw_image_prediction(&imported.document);
+                    failures.push(format!(
+                        "mixed-{name}/{dpi}: {result:?}; expected={status:?}; census={:?}; warnings={:?}",
+                        c.unresolved, imported.warnings
+                    ));
+                    finish_evidence(&output);
+                    continue;
+                }
+                assert!(!render.qualified);
+                if status == Status::Pass {
+                    let plane = render.planes.iter_mut().find(|p| p.name == "Cyan").unwrap();
+                    let mut image = image::open(&plane.path).unwrap().into_luma8();
+                    // A small interior patch includes witnessed pixels even when one
+                    // sample falls in a legitimate vector/image boundary envelope.
+                    for y in (plane.height / 3).saturating_sub(4)..(plane.height / 3 + 5).min(plane.height) {
+                        for x in (plane.width / 3).saturating_sub(4)..(plane.width / 3 + 5).min(plane.width) {
+                            let pixel = image.get_pixel_mut(x, y);
+                            pixel.0[0] = if pixel.0[0] > 127 { 0 } else { 255 };
+                        }
+                    }
+                    plane.path = output.join("mutated-cyan.tif");
+                    image.save(&plane.path).unwrap();
+                    plane.sha256 = crate::sha256(&std::fs::read(&plane.path).unwrap());
+                    let defect = compare(&bytes, &render, Some(2.0)).unwrap();
+                    retain_result(&output, &render, &defect, "defect");
+                    if defect.status != Status::Fail {
+                        failures.push(format!("mixed-{name}/{dpi} changed interior pixels: {defect:?}"));
+                    }
+                }
+                finish_evidence(&output);
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+    #[test]
+    fn mixed_vector_only_pixels_keep_the_vector_tone_threshold() {
+        let Ok(binary) = std::env::var("CHECK_GS_BINARY") else {
+            return;
+        };
+        let bytes = mixed_pdf(&format!("{IMAGE} {FOREGROUND}"), 0, 1.0, false, false);
+        let output = evidence_directory("vector-quantisation", 72);
+        let config = crate::independent::Configuration {
+            binary: binary.clone().into(),
+            binary_sha256: crate::sha256(&std::fs::read(&binary).unwrap()),
+            version: "10.07.1".into(),
+            dpi: 72,
+            timeout_ms: 10000,
+            max_output_bytes: 16 * 1024 * 1024,
+            qualification_sha256: None,
+        };
+        let mut render = crate::independent::render(&config, &bytes, &output).unwrap();
+        assert_eq!(compare(&bytes, &render, Some(2.0)).unwrap().status, Status::Pass);
+        let mut unchanged = render.clone();
+        let plane = render.planes.iter_mut().find(|p| p.name == "Cyan").unwrap();
+        let mut image = image::open(&plane.path).unwrap().into_luma8();
+        assert_eq!(image.get_pixel(40, 30).0[0], 255);
+        image.get_pixel_mut(40, 30).0[0] = 253;
+        plane.path = output.join("two-step-vector-defect.tif");
+        image.save(&plane.path).unwrap();
+        plane.sha256 = crate::sha256(&std::fs::read(&plane.path).unwrap());
+        let defect = compare(&bytes, &render, Some(2.0)).unwrap();
+        retain_result(&output, &render, &defect, "quantisation-defect");
+        assert_eq!(defect.status, Status::Fail);
+        unchanged.planes.first_mut().unwrap().sha256 = "0".repeat(64);
+        let unavailable = compare(&bytes, &unchanged, Some(2.0)).unwrap();
+        assert_eq!(unavailable.status, Status::Incomplete);
+        render.planes.iter_mut().find(|p| p.name == "Yellow").unwrap().sha256 = "0".repeat(64);
+        let retained = compare(&bytes, &render, Some(2.0)).unwrap();
+        assert_eq!(retained.status, Status::Fail);
+        assert!(retained.issues.iter().any(|s| s.contains("plane changed")));
+        finish_evidence(&output);
+    }
+    #[test]
+    fn independent_boundary_budget_retains_an_incomplete_report() {
+        let Ok(binary) = std::env::var("CHECK_GS_BINARY") else {
+            return;
+        };
+        let bytes = mixed_pdf(&format!("{} {IMAGE}", format!("{BACKGROUND} ").repeat(80)), 0, 1.0, false, false);
+        let output = evidence_directory("mixed-boundary-budget", 144);
+        let config = crate::independent::Configuration {
+            binary: binary.clone().into(),
+            binary_sha256: crate::sha256(&std::fs::read(&binary).unwrap()),
+            version: "10.07.1".into(),
+            dpi: 144,
+            timeout_ms: 10000,
+            max_output_bytes: 32 * 1024 * 1024,
+            qualification_sha256: None,
+        };
+        let mut request = crate::tests::request();
+        request.identity.pdf_sha256 = crate::sha256(&bytes);
+        request.identity.recipe_sha256 = crate::digest(&request.recipe).unwrap();
+        request.acceptance.insert(
+            "geometry_tolerance_mm".into(),
+            crate::preparation::Fact {
+                value: serde_json::json!(2.0),
+                provenance: crate::preparation::Provenance::Operator {
+                    actor: "Synthetic budget test".into(),
+                    at: "2026-10-19".into(),
+                    decision_id: "synthetic".into(),
+                    evidence_sha256: "e".repeat(64),
+                },
+            },
+        );
+        request.identity.measurement_sha256 = crate::digest(&request.acceptance).unwrap();
+        let verification = crate::independent::verify(&request, &bytes, &config, &output).unwrap();
+        assert!(
+            verification
+                .comparisons
+                .iter()
+                .any(|c| c.status == Status::Incomplete && c.issues.iter().any(|s| s.contains("Boundary distance budget exceeded")))
+        );
+        let finding = verification.report.findings.iter().find(|f| f.obligation.key == "global/independent").unwrap();
+        assert_eq!(finding.status, Status::Incomplete);
+        assert_eq!(verification.report.coverage.total, crate::enumerate(&request).unwrap().len());
+        let mut altered = verification.renderings[0].clone();
+        let plane = altered.planes.first_mut().unwrap();
+        let mut image = image::open(&plane.path).unwrap().into_luma8();
+        let pixel = image.get_pixel_mut(160, 60);
+        pixel.0[0] = if pixel.0[0] > 127 { 0 } else { 255 };
+        plane.path = output.join("early-defect-before-budget.tif");
+        image.save(&plane.path).unwrap();
+        plane.sha256 = crate::sha256(&std::fs::read(&plane.path).unwrap());
+        let partial = compare(&bytes, &altered, Some(2.0)).unwrap();
+        retain_result(&output, &altered, &partial, "budget-defect");
+        assert_eq!(partial.status, Status::Fail);
+        assert!(partial.issues.iter().any(|s| s.contains("Boundary distance budget exceeded")));
+        assert!(partial.planes.iter().any(|p| p.wrong_pixels > 0));
+        finish_evidence(&output);
     }
 }

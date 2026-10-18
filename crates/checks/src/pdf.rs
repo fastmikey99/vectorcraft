@@ -30,7 +30,8 @@ pub struct RawPaintAudit {
     pub path_paint_count: usize,
     pub image_use_count: usize,
     pub source_space_count: usize,
-    pub image_sample: Vec<(usize, vectorcraft_pdf::PrintImageUse)>,
+    /// Serialized metadata only; retaining this diagnostic must not clone packed image buffers.
+    pub image_sample: Vec<(usize, Value)>,
     pub issue_count: usize,
     pub issues_sample: Vec<String>,
 }
@@ -136,7 +137,7 @@ fn stroke_coverage(path: &vectorcraft_geom::BezPath, stroke: &vectorcraft_doc::S
     }
     filled(&PathData::from_bezpath(&outline), vectorcraft_geom::FillRule::NonZero)
 }
-fn walk(doc: &Document, symbols: &SymbolBoxes, node: &Node, layer: &str, state: Traversal<'_>, census: &mut Census) {
+fn walk(doc: &Document, symbols: &SymbolBoxes, node: &Node, layer: &str, state: Traversal<'_>, census: &mut Census, raw_images: bool) {
     if census.object_count >= 50_000 {
         census.budget_exhausted = true;
         return;
@@ -164,6 +165,23 @@ fn walk(doc: &Document, symbols: &SymbolBoxes, node: &Node, layer: &str, state: 
     }
     if matches!(node.kind, NodeKind::Image(_)) {
         census.image_objects += 1;
+    }
+    // This mode is private to independent mixed-content prediction. Every image
+    // still has to match the raw image-use census and pass raw sample/context
+    // checks before it can enter the ordered predictor. Ordinary census retains
+    // all image gaps, and no production obligation is resolved by this shortcut.
+    if raw_images && matches!(node.kind, NodeKind::Image(_)) {
+        // Image-owned SMask/Mask is evaluated from exact raw samples by the caller.
+        // Graphics-state and enclosing-group masks remain rejected separately.
+        if state.clip.is_some()
+            || node.opacity != 1.0
+            || node.blend != BlendMode::Normal
+            || !node.appearance.effects.is_empty()
+            || node.appearance.items.iter().any(|item| item.visible() && !item.paint().is_none())
+        {
+            census.unresolved.push(format!("{}: image container appearance or clipping requires reconciliation", node.id));
+        }
+        return;
     }
     let bounds = node.geometric_bounds_with(symbols).map(|b| [b.x0 * 25.4 / 72.0, b.y0 * 25.4 / 72.0, b.x1 * 25.4 / 72.0, b.y1 * 25.4 / 72.0]);
     match &node.kind {
@@ -299,24 +317,32 @@ fn walk(doc: &Document, symbols: &SymbolBoxes, node: &Node, layer: &str, state: 
             && let Some(mask) = children.first()
             && let Some(fill) = mask.clip_paint().fill
         {
-            walk(doc, symbols, &fill, layer, Traversal { visible, depth: state.depth + 1, clip: active }, census);
+            walk(doc, symbols, &fill, layer, Traversal { visible, depth: state.depth + 1, clip: active }, census, raw_images);
         }
         for child in children.iter().skip(usize::from(node.clips())) {
             if census.budget_exhausted {
                 break;
             }
-            walk(doc, symbols, child, layer, Traversal { visible, depth: state.depth + 1, clip: active }, census);
+            walk(doc, symbols, child, layer, Traversal { visible, depth: state.depth + 1, clip: active }, census, raw_images);
         }
         if node.clips()
             && let Some(mask) = children.first()
             && let Some(stroke) = mask.clip_paint().stroke
         {
-            walk(doc, symbols, &stroke, layer, Traversal { visible, depth: state.depth + 1, clip: state.clip }, census);
+            walk(doc, symbols, &stroke, layer, Traversal { visible, depth: state.depth + 1, clip: state.clip }, census, raw_images);
         }
     }
 }
 
 pub fn census(doc: &Document) -> Census {
+    census_mode(doc, false)
+}
+/// Path-side accounting for the raw-image predictor only; not a complete census.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn paths_for_raw_image_prediction(doc: &Document) -> Census {
+    census_mode(doc, true)
+}
+fn census_mode(doc: &Document, raw_images: bool) -> Census {
     let mut c = Census {
         paint_order_verified: false,
         raw_audit: None,
@@ -337,7 +363,7 @@ pub fn census(doc: &Document) -> Census {
         if c.budget_exhausted {
             break;
         }
-        walk(doc, &symbols, layer, "", Traversal { visible: true, depth: 0, clip: None }, &mut c);
+        walk(doc, &symbols, layer, "", Traversal { visible: true, depth: 0, clip: None }, &mut c, raw_images);
     }
     c
 }

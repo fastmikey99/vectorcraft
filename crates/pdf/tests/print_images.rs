@@ -295,7 +295,7 @@ fn soft_mask_default_gray_and_explicit_oversize_are_unresolved() {
 #[test]
 fn image_compositing_state_restores_after_graphics_pop() {
     for content in ["q /GS gs /Im Do Q /Im Do", "q /Perceptual ri /Im Do Q /Im Do"] {
-        for gs in ["/BM /Multiply", "/SMask /None"] {
+        for gs in ["/BM /Multiply", "/SMask /None", "/HTP [0 0]"] {
             let bytes = pdf(content, &format!("/XObject << /Im 5 0 R >> /ExtGState << /GS << {gs} >> >>"), &[image("/ColorSpace /DeviceGray")]);
             let audit = print_order(&bytes).unwrap();
             assert!(audit.images[0][0].compositing_unresolved);

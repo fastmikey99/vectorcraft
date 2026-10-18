@@ -384,6 +384,7 @@ struct State {
     matrix: Option<vectorcraft_geom::Affine>,
     clip_context: bool,
     image_compositing_unresolved: bool,
+    source_effects_unresolved: bool,
 }
 
 /// A marked-content tag as [`Scan::tags`] keeps it: its FNV-1a hash (the tags are only compared,
@@ -581,6 +582,9 @@ impl Walker<'_, '_> {
             return;
         }
         let state = self.state();
+        if state.source_effects_unresolved {
+            self.order_issue("Paint transfer, halftone, black generation or rendering intent requires qualification");
+        }
         let kind = state.spaces[usize::from(stroke)];
         let ink = state.inks[usize::from(stroke)].space;
         if let Some(order) = &mut self.out.print_order {
@@ -891,15 +895,28 @@ impl Walker<'_, '_> {
                         // Without `/op`, `/OP` sets both.
                         s.fill = d.get::<bool>(b"op").or(stroke).unwrap_or(s.fill);
                         s.nonzero = d.get::<u8>(b"OPM").map_or(s.nonzero, |m| m != 0);
+                        // ISO 32000-1 Table 58: Default restores the page-start
+                        // device state. It adds no effect to the predictor's existing
+                        // initial-device assumption; runtime qualification is separate.
+                        let unchanged_device_state = |key: &[u8]| {
+                            d.get::<Name<'_>>(key).is_some_and(|name| {
+                                (matches!(key, b"TR" | b"TR2") && name.as_ref() == b"Identity")
+                                    || (matches!(key, b"TR2" | b"BG2" | b"UCR2" | b"HT") && name.as_ref() == b"Default")
+                            })
+                        };
+                        s.source_effects_unresolved |= [b"TR".as_slice(), b"TR2", b"BG", b"BG2", b"UCR", b"UCR2", b"HT", b"HTP", b"RI"]
+                            .iter()
+                            .any(|key| d.contains_key(key) && !unchanged_device_state(key));
                         s.image_compositing_unresolved |=
-                            [b"ca".as_slice(), b"CA", b"BM", b"SMask", b"TR", b"TR2", b"BG", b"BG2", b"UCR", b"UCR2", b"HT", b"RI", b"AIS"]
+                            [b"ca".as_slice(), b"CA", b"BM", b"SMask", b"TR", b"TR2", b"BG", b"BG2", b"UCR", b"UCR2", b"HT", b"HTP", b"RI", b"AIS"]
                                 .iter()
-                                .any(|k| d.contains_key(k));
+                                .any(|key| d.contains_key(key) && !unchanged_device_state(key));
                     }
                 }
                 TypedInstruction::RenderingIntent(_) => {
                     if let Some(s) = self.states.last_mut() {
                         s.image_compositing_unresolved = true;
+                        s.source_effects_unresolved = true;
                     }
                 }
                 TypedInstruction::FillPathEvenOdd(_) | TypedInstruction::FillPathNonZero(_) | TypedInstruction::FillPathNonZeroCompatibility(_) => {

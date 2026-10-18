@@ -65,7 +65,7 @@ impl PrintImageSamples {
             Mask::Soft(mask) => Ok(decoded(mask, pixel)?.clamp(0.0, 1.0)),
             Mask::Stencil(mask) => Ok(1.0 - decoded(mask, pixel)?.clamp(0.0, 1.0)),
             Mask::Key(ranges) => {
-                for (channel, range) in ranges.chunks_exact(2).enumerate() {
+                for (channel, range) in ranges.as_chunks::<2>().0.iter().enumerate() {
                     let value = f64::from(self.raw.value(pixel * self.raw.components + channel)?);
                     if value < range[0] || value > range[1] {
                         return Ok(1.0);
@@ -371,7 +371,9 @@ pub(crate) fn decode(
         }
         if ranges.len() != raw.components * 2
             || ranges
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .any(|r| r[0] < 0.0 || r[0] > r[1] || r[1] > f64::from((1u32 << raw.bits) - 1) || r.iter().any(|n| n.fract() != 0.0))
         {
             return Err("Invalid image color-key mask".into());

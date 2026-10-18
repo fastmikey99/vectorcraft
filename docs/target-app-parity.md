@@ -935,3 +935,5 @@ Revision evidence, 18 October 2026 — checker review fixes: physical process co
 - 19 October 2026 — HC.11: bounded source ink/alpha image samples and native image-only independent prediction added; prepared raster masks, mixed compositing and runtime qualification remain open. HC.10 criteria now require job-bound operator evidence. No parity score or estimate changed.
 
 - HC.12 (2026-10-19): compact source-sample storage, document-wide work bounds and inline delimiter handling extend the measured image subset. Four milestone Fable reviews and focused follow-ups are retained in the companion Reporter audit; full production qualification and headline parity estimates remain unchanged.
+
+- HC.13 (19 October 2026): independent prediction now interleaves bounded raw image samples and reconciled solid vector paint in PDF order. Two-resolution mixed-content fixtures cover masks, vector clips, OPM, spot paints and page transforms; unsupported image clips/transparency and production qualification remain open. See [production checks](production-checks.md). Scores and estimates are unchanged.

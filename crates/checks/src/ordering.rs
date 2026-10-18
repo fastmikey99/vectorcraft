@@ -5,8 +5,15 @@ use serde_json::json;
 /// Match path-paint events to decoded per-layer paths without trusting the editor's
 /// cross-layer aggregation. Any omission, ambiguity or unsupported paint blocks the proof.
 fn indices(order: &vectorcraft_pdf::PrintOrder, census: &crate::pdf::Census) -> Result<Vec<usize>, String> {
+    indices_mode(order, census, false)
+}
+fn indices_mode(order: &vectorcraft_pdf::PrintOrder, census: &crate::pdf::Census, raw_images: bool) -> Result<Vec<usize>, String> {
     use std::collections::{BTreeMap, VecDeque};
-    if !order.issues.is_empty() || !census.unresolved.is_empty() || census.budget_exhausted || order.pages.len() != census.pages {
+    if order.issues.iter().any(|issue| !(raw_images && issue == "Image sample, mask and compositing coverage requires independent reconciliation"))
+        || !census.unresolved.is_empty()
+        || census.budget_exhausted
+        || order.pages.len() != census.pages
+    {
         return Err("Printable census is incomplete; content order cannot be reconciled".into());
     }
     if order.source_indices.len() != order.pages.len()
@@ -39,6 +46,23 @@ fn indices(order: &vectorcraft_pdf::PrintOrder, census: &crate::pdf::Census) -> 
     }
     Ok(indices)
 }
+/// Match every path while raw images are independently decoded. This does not
+/// mark the general census or any production obligation complete.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn reconcile_paths_for_images(order: &vectorcraft_pdf::PrintOrder, census: &mut crate::pdf::Census) -> Result<(), String> {
+    if order.images.iter().map(Vec::len).sum::<usize>() != census.image_objects {
+        return Err("Raw and editable image-use counts differ in mixed prediction".into());
+    }
+    let indices = indices_mode(order, census, true)?;
+    census.paints = indices.iter().map(|i| census.paints.get(*i).cloned().ok_or("Mixed path index missing".into())).collect::<Result<_, String>>()?;
+    for ((i, p), source) in census.paints.iter_mut().enumerate().zip(order.source_indices.iter().flatten()) {
+        p.order = i;
+        p.source_space = Some(*source);
+    }
+    census.paint_sources = order.sources.clone();
+    census.paint_order_verified = true;
+    Ok(())
+}
 /// Restore real PDF stream order before compositing native per-ink predictions.
 pub fn reconcile(bytes: &[u8], census: &mut crate::pdf::Census) {
     if let Err(reason) = try_reconcile(bytes, census) {
@@ -65,17 +89,22 @@ pub(crate) fn try_reconcile(bytes: &[u8], census: &mut crate::pdf::Census) -> Re
             census.image_objects
         ));
     }
+    let image_sample = order
+        .images
+        .iter()
+        .enumerate()
+        .flat_map(|(page, images)| images.iter().map(move |image| (page, image)))
+        .take(32)
+        .map(|(page, image)| serde_json::to_value(image).map(|metadata| (page, metadata)).map_err(|e| e.to_string()))
+        .collect::<Result<_, String>>()
+        .inspect_err(|reason| {
+            census.raw_audit_error = Some(reason.clone());
+        })?;
     census.raw_audit = Some(crate::pdf::RawPaintAudit {
         path_paint_count: order.pages.iter().map(Vec::len).sum(),
         image_use_count: order.images.iter().map(Vec::len).sum(),
         source_space_count: order.sources.len(),
-        image_sample: order
-            .images
-            .iter()
-            .enumerate()
-            .flat_map(|(page, images)| images.iter().map(move |image| (page, image.clone())))
-            .take(32)
-            .collect(),
+        image_sample,
         issue_count: order.issues.len(),
         issues_sample: order.issues.iter().take(64).cloned().collect(),
     });
@@ -258,6 +287,10 @@ mod tests {
         assert_eq!(raw.image_use_count, 1);
         assert_eq!(raw.path_paint_count, 2);
         assert_eq!(raw.image_sample.len(), 1);
+        let order = vectorcraft_pdf::print_order(&bytes).unwrap();
+        assert_eq!(raw.image_sample[0].1, serde_json::to_value(&order.images[0][0]).unwrap());
+        assert_eq!(raw.image_sample[0].1["samples"]["width"], 1);
+        assert!(raw.image_sample[0].1["samples"].get("raw").is_none());
         let mut request = crate::tests::request();
         request.identity.pdf_sha256 = crate::sha256(&bytes);
         request.identity.recipe_sha256 = crate::digest(&request.recipe).unwrap();

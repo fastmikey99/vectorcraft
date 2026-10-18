@@ -24,6 +24,36 @@ pub struct Comparison {
     pub planes: Vec<PlaneComparison>,
     pub issues: Vec<String>,
 }
+/// An interrupted measurement retains confirmed defects and the measured counts.
+/// Unvisited pixels/planes can never turn a partial result into Pass.
+pub(crate) fn interrupted(mut planes: Vec<PlaneComparison>, current: Option<PlaneComparison>, uncertainty_mm: f64, reason: String) -> Comparison {
+    if let Some(mut current) = current {
+        current.status = if current.wrong_pixels > 0 { Status::Fail } else { Status::Incomplete };
+        planes.push(current);
+    }
+    let status = if planes.iter().any(|p| p.status == Status::Fail) { Status::Fail } else { Status::Incomplete };
+    Comparison { status, uncertainty_mm, planes, issues: vec![reason] }
+}
+/// Callers preflight the total pixel budget before decoding a plane.
+pub(crate) fn read_plane(plane: &crate::independent::Plane) -> Result<image::GrayImage, String> {
+    let bytes = std::fs::read(&plane.path).map_err(|e| e.to_string())?;
+    if crate::sha256(&bytes) != plane.sha256 {
+        return Err("Independent plane changed before measurement".into());
+    }
+    let dimensions = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?
+        .into_dimensions()
+        .map_err(|e| e.to_string())?;
+    if dimensions != (plane.width, plane.height) {
+        return Err("Independent plane dimensions changed".into());
+    }
+    let image = image::load_from_memory(&bytes).map_err(|e| e.to_string())?.into_luma8();
+    if image.dimensions() != (plane.width, plane.height) {
+        return Err("Independent plane dimensions changed".into());
+    }
+    Ok(image)
+}
 struct Paint {
     page: usize,
     boundary: Boundary,
@@ -48,7 +78,7 @@ fn tones(paint: &Value, ink: Option<&str>) -> Result<BTreeMap<String, f64>, Stri
     };
     Ok(["Cyan", "Magenta", "Yellow", "Black"].into_iter().zip(values).map(|(k, v)| (k.into(), v)).collect())
 }
-fn source_tones(paint: &crate::pdf::PaintedObject, source: &vectorcraft_pdf::PrintPaintSource) -> Result<BTreeMap<String, f64>, String> {
+pub(crate) fn source_tones(paint: &crate::pdf::PaintedObject, source: &vectorcraft_pdf::PrintPaintSource) -> Result<BTreeMap<String, f64>, String> {
     use vectorcraft_pdf::PrintColorSpace;
     let mut values = tones(&paint.paint, paint.ink.as_deref())?;
     let model = paint.paint.get("color").and_then(|c| c.get("model")).and_then(Value::as_str);
@@ -150,14 +180,14 @@ pub fn compare(census: &Census, render: &Render, tolerance_mm: Option<f64>) -> R
     let mut budget = 0usize;
     let mut pixels = 0u64;
     for p in &render.planes {
-        let bytes = std::fs::read(&p.path).map_err(|e| e.to_string())?;
-        if crate::sha256(&bytes) != p.sha256 {
-            return Err("Independent plane changed before measurement".into());
+        let count = u64::from(p.width) * u64::from(p.height);
+        if count == 0 || count > 20_000_000 - pixels {
+            return Ok(interrupted(results, None, uncertainty_mm, "Independent tonal comparison pixel budget exceeded".into()));
         }
-        let image = image::load_from_memory(&bytes).map_err(|e| e.to_string())?.into_luma8();
-        if image.dimensions() != (p.width, p.height) {
-            return Err("Independent plane dimensions changed".into());
-        }
+        let image = match read_plane(p) {
+            Ok(image) => image,
+            Err(reason) => return Ok(interrupted(results, None, uncertainty_mm, reason)),
+        };
         let mut result = PlaneComparison {
             page: p.page,
             name: p.name.clone(),
@@ -171,13 +201,17 @@ pub fn compare(census: &Census, render: &Render, tolerance_mm: Option<f64>) -> R
         for (x, y, pixel) in image.enumerate_pixels() {
             pixels += 1;
             if pixels > 20_000_000 {
-                return Err("Independent tonal comparison pixel budget exceeded".into());
+                return Ok(interrupted(results, Some(result), uncertainty_mm, "Independent tonal comparison pixel budget exceeded".into()));
             }
             let point = Point::new((x as f64 + 0.5) * render.pixel_pitch_mm, (y as f64 + 0.5) * render.pixel_pitch_mm);
             let mut expected = 0.0;
             let mut uncertain = false;
             for paint in paints.iter().filter(|a| a.page + 1 == p.page as usize) {
-                if paint.boundary.near_boundary(point, uncertainty_mm, &mut budget)? {
+                let near = match paint.boundary.near_boundary(point, uncertainty_mm, &mut budget) {
+                    Ok(near) => near,
+                    Err(reason) => return Ok(interrupted(results, Some(result), uncertainty_mm, reason)),
+                };
+                if near {
                     uncertain = true;
                 }
                 if paint.boundary.contains(point, FillRule::NonZero) {

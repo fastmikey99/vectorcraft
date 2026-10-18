@@ -263,11 +263,19 @@ pub fn verify(request: &crate::Request, bytes: &[u8], config: &Configuration, ou
         let mut configuration = config.clone();
         configuration.dpi *= multiplier;
         let rendering = render(&configuration, bytes, &output.join(format!("dpi-{}", configuration.dpi)))?;
-        let comparison = if census.raw_audit.as_ref().is_some_and(|a| a.image_use_count > 0 && a.path_paint_count == 0) {
-            crate::raster_images::compare(bytes, &rendering, tolerance)?
+        let comparison = if census.raw_audit.as_ref().is_some_and(|a| a.image_use_count > 0) {
+            crate::raster_images::compare(bytes, &rendering, tolerance)
         } else {
-            crate::raster::compare(&census, &rendering, tolerance)?
-        };
+            crate::raster::compare(&census, &rendering, tolerance)
+        }
+        .unwrap_or_else(|reason| crate::raster::Comparison {
+            status: crate::Status::Incomplete,
+            uncertainty_mm: rendering.pixel_pitch_mm * 2.0f64.sqrt()
+                + 0.000002
+                + census.paints.iter().map(|p| p.geometry_error_mm).fold(0.0, f64::max),
+            planes: vec![],
+            issues: vec![format!("Independent comparison could not complete: {reason}")],
+        });
         renderings.push(rendering);
         comparisons.push(comparison);
     }

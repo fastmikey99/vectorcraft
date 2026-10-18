@@ -114,4 +114,28 @@ mod budget_tests {
         assert_eq!(audit.images.iter().filter(|p| p[0].samples.is_some()).count(), 2);
         assert_eq!(audit.images.iter().filter(|p| p[0].sample_error.as_ref().is_some_and(|s| s.contains("budget"))).count(), 3);
     }
+    #[test]
+    fn vector_transfer_and_device_state_is_unresolved_only_when_painted() {
+        use vectorcraft_testkit::pdf::{PdfPage, pdf_with};
+        for key in ["TR", "TR2", "BG", "BG2", "UCR", "UCR2", "HT", "HTP", "RI"] {
+            let make = |stream: &str| {
+                let mut page = PdfPage::new(72.0, 72.0, stream);
+                page.resources = format!("/ExtGState << /GS << /{key} /Unqualified >> >>");
+                pdf_with(&[page], &[], None)
+            };
+            let audit = print_order(&make("/GS gs 0 0 24 24 re f")).unwrap();
+            assert!(audit.issues.iter().any(|s| s.contains("Paint transfer")), "{key}");
+            let restored = print_order(&make("q /GS gs Q 0 0 24 24 re f")).unwrap();
+            assert!(restored.issues.is_empty(), "{key}: {:?}", restored.issues);
+        }
+        let mut page = PdfPage::new(72.0, 72.0, "/GS gs 0 0 24 24 re f");
+        page.resources = "/ExtGState << /GS << /TR /Identity >> >>".into();
+        assert!(print_order(&pdf_with(&[page], &[], None)).unwrap().issues.is_empty());
+        for key in ["TR2", "BG2", "UCR2", "HT", "TR", "BG", "UCR", "RI", "HTP"] {
+            let mut page = PdfPage::new(72.0, 72.0, "/GS gs 0 0 24 24 re f");
+            page.resources = format!("/ExtGState << /GS << /{key} /Default >> >>");
+            let audit = print_order(&pdf_with(&[page], &[], None)).unwrap();
+            assert_eq!(audit.issues.is_empty(), matches!(key, "TR2" | "BG2" | "UCR2" | "HT"), "{key}");
+        }
+    }
 }
