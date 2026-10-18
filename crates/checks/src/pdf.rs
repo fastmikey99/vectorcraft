@@ -26,6 +26,7 @@ pub struct PaintedObject {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Census {
+    pub paint_order_verified: bool,
     pub unresolved_layers: std::collections::BTreeSet<String>,
     pub paints: Vec<PaintedObject>,
     pub unresolved: Vec<String>,
@@ -299,6 +300,7 @@ fn walk(doc: &Document, symbols: &SymbolBoxes, node: &Node, layer: &str, state: 
 
 pub fn census(doc: &Document) -> Census {
     let mut c = Census {
+        paint_order_verified: false,
         paints: vec![],
         unresolved: vec![],
         unresolved_layers: Default::default(),
@@ -360,6 +362,9 @@ pub fn check(request: &Request, bytes: &[u8]) -> Result<Report, String> {
     let (warnings, notices) = import_messages(imported.warnings);
     let import_complete = warnings.is_empty();
     c.unresolved.extend(warnings);
+    // Ordering is required for overlapping paint, but an ordering gap does not
+    // erase independently measurable geometry or the existing diagnostics.
+    let _ = crate::ordering::try_reconcile(bytes, &mut c);
     report.record(
         "global/integrity",
         Status::Incomplete,

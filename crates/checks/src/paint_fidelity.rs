@@ -92,6 +92,40 @@ fn combine_status(a: Status, b: Status) -> Status {
         Status::Pass
     }
 }
+/// Exact opaque knockout in page space. Later paint removes earlier visible
+/// coverage, including holes; no image sampling or area suppression is involved.
+fn visible_knockout(paths: &[(usize, usize, PathData)]) -> Result<(Vec<PathData>, f64), String> {
+    use vectorcraft_geom::FillRule;
+    use vectorcraft_pathops::{BoolOp, try_boolean_for_measurement};
+    if paths.len() > 2500 {
+        return Err("Opaque paint-stack measurement budget exceeded".into());
+    }
+    let mut indices: Vec<_> = (0..paths.len()).collect();
+    indices.sort_by_key(|i| paths.get(*i).map(|p| (p.0, p.1)));
+    let mut result = vec![PathData::default(); paths.len()];
+    let mut later: BTreeMap<usize, PathData> = BTreeMap::new();
+    let mut operations = 0;
+    for i in indices.into_iter().rev() {
+        let (page, _, path) = paths.get(i).ok_or("Paint-stack index missing")?;
+        let mask = later.entry(*page).or_default();
+        let visible = if mask.is_empty() {
+            path.clone()
+        } else {
+            operations += 1;
+            try_boolean_for_measurement(path, FillRule::NonZero, mask, FillRule::NonZero, BoolOp::Difference).map_err(|e| e.to_string())?
+        };
+        *result.get_mut(i).ok_or("Paint-stack output index missing")? = visible;
+        if mask.is_empty() {
+            *mask = path.clone();
+        } else {
+            operations += 1;
+            *mask = try_boolean_for_measurement(mask, FillRule::NonZero, path, FillRule::NonZero, BoolOp::Union).map_err(|e| e.to_string())?;
+        }
+    }
+    // Construction precision is separate from manufacturing acceptance. Retain
+    // a conservative cumulative bound for every boolean operation in the stack.
+    Ok((result, f64::from(operations) * 0.00001))
+}
 pub fn check(request: &Request, program: &Program, census: &Census, report: &mut Report) -> Result<(), String> {
     if !census.unresolved.is_empty() || census.budget_exhausted {
         return Ok(());
@@ -131,11 +165,48 @@ pub fn check(request: &Request, program: &Program, census: &Census, report: &mut
                 declared.iter().flat_map(|l| program.outputs.get(&l.key).into_iter().flatten()).filter(|p| !p.path.is_empty()).collect();
             let observed: Vec<_> =
                 census.paints.iter().filter(|p| p.layer == layer && p.geometry_mm.as_ref().is_some_and(|g| !g.is_empty())).collect();
+            if observed.len() > 2500 {
+                return Err("Output paint-stack measurement budget exceeded".into());
+            }
             if expected.is_empty() && observed.is_empty() {
                 return Err("Empty contributions retain their independent applicability evidence".into());
             }
+            let orders: Option<Vec<_>> = expected
+                .iter()
+                .map(|p| {
+                    let values: Option<BTreeSet<_>> = p.regions.iter().map(|id| request.geometry.as_ref()?.regions.get(id)?.source_order).collect();
+                    let values = values?;
+                    if values.len() == 1 { values.first().copied() } else { None }
+                })
+                .collect();
+            let composited = declared.len() == 1
+                && declared.first().is_some_and(|l| !l.overprint)
+                && observed.iter().all(|p| !p.overprint)
+                && census.paint_order_verified
+                && orders.as_ref().is_some_and(|o| o.iter().collect::<BTreeSet<_>>().len() == o.len());
+            let (expected_paths, observed_paths, stack_error) = if composited {
+                let expected_stack: Vec<_> = expected
+                    .iter()
+                    .zip(orders.as_ref().ok_or("Source paint order missing")?)
+                    .map(|(p, order)| (p.page, *order, p.path.clone()))
+                    .collect();
+                let observed_stack = observed
+                    .iter()
+                    .map(|p| Ok((p.page.ok_or("Output page unresolved")?, p.order, p.geometry_mm.clone().ok_or("Output geometry unresolved")?)))
+                    .collect::<Result<Vec<_>, String>>()?;
+                let (a, a_error) = visible_knockout(&expected_stack)?;
+                let (b, b_error) = visible_knockout(&observed_stack)?;
+                let source_error = expected.iter().map(|p| p.construction_error_mm).fold(0.0, f64::max);
+                let output_error = observed.iter().map(|p| p.geometry_error_mm).fold(0.0, f64::max);
+                (a, b, a_error + b_error + source_error + output_error)
+            } else {
+                (expected.iter().map(|p| p.path.clone()).collect(), observed.iter().filter_map(|p| p.geometry_mm.clone()).collect(), 0.0)
+            };
             let mut groups: Vec<Group> = vec![];
-            for p in expected {
+            for (p, path) in expected.iter().zip(expected_paths) {
+                if path.is_empty() {
+                    continue;
+                }
                 let colour = Colour::read(&p.paint, p.ink.as_deref())?;
                 let matches: Vec<_> =
                     groups.iter().enumerate().filter(|(_, g)| g.page == p.page && g.colour.agrees(&colour)).map(|(i, _)| i).collect();
@@ -143,15 +214,15 @@ pub fn check(request: &Request, program: &Program, census: &Census, report: &mut
                     return Err("Source colours overlap the decoder's numerical envelope".into());
                 }
                 if let Some(g) = matches.first().and_then(|i| groups.get_mut(*i)) {
-                    g.expected.push(p.path.clone());
-                    g.error = g.error.max(p.construction_error_mm);
+                    g.expected.push(path);
+                    g.error = g.error.max(p.construction_error_mm + stack_error);
                 } else {
                     groups.push(Group {
                         colour,
                         page: p.page,
-                        expected: vec![p.path.clone()],
+                        expected: vec![path],
                         observed: vec![],
-                        error: p.construction_error_mm,
+                        error: p.construction_error_mm + stack_error,
                         observed_error: 0.0,
                         objects: vec![],
                     });
@@ -193,10 +264,44 @@ pub fn check(request: &Request, program: &Program, census: &Census, report: &mut
                     }
                 }
             }
+            if !composited {
+                // An unverified output stack can hide an otherwise wrong colour.
+                // Do not turn hidden paint into a confirmed fidelity failure.
+                for (i, a) in observed.iter().enumerate() {
+                    for b in observed.iter().skip(i + 1) {
+                        if a.page != b.page || Colour::read(&a.paint, a.ink.as_deref())?.agrees(&Colour::read(&b.paint, b.ink.as_deref())?) {
+                            continue;
+                        }
+                        let a = a.geometry_mm.as_ref().ok_or("Output geometry missing")?;
+                        let b = b.geometry_mm.as_ref().ok_or("Output geometry missing")?;
+                        if a.to_bezpath().bounding_box().intersect(b.to_bezpath().bounding_box()).area() <= 0.0 {
+                            continue;
+                        }
+                        intersections += 1;
+                        if intersections > 5000 {
+                            return Err("Output-colour overlap measurement budget exceeded".into());
+                        }
+                        let overlap = vectorcraft_pathops::try_boolean_for_measurement(
+                            a,
+                            vectorcraft_geom::FillRule::NonZero,
+                            b,
+                            vectorcraft_geom::FillRule::NonZero,
+                            vectorcraft_pathops::BoolOp::Intersect,
+                        )
+                        .map_err(|e| e.to_string())?;
+                        if !overlap.is_empty() {
+                            return Err("Overlapping output colours need verified opaque paint-order compositing".into());
+                        }
+                    }
+                }
+            }
             let mut wrong = vec![];
             let mut location = None;
             let mut wrong_count = 0usize;
-            for p in observed {
+            for (p, path) in observed.iter().zip(observed_paths) {
+                if path.is_empty() {
+                    continue;
+                }
                 let colour = Colour::read(&p.paint, p.ink.as_deref())?;
                 let page = p.page.ok_or("Output page unresolved")?;
                 let matches: Vec<_> = groups.iter().enumerate().filter(|(_, g)| g.page == page && g.colour.agrees(&colour)).map(|(i, _)| i).collect();
@@ -204,9 +309,7 @@ pub fn check(request: &Request, program: &Program, census: &Census, report: &mut
                     return Err("Output colour is numerically ambiguous between expected colours".into());
                 }
                 if let Some(g) = matches.first().and_then(|i| groups.get_mut(*i)) {
-                    if let Some(path) = &p.geometry_mm {
-                        g.observed.push(path.clone());
-                    }
+                    g.observed.push(path);
                     g.observed_error = g.observed_error.max(p.geometry_error_mm);
                     if g.objects.len() < 64 {
                         g.objects.push(p.id);
@@ -268,7 +371,7 @@ pub fn check(request: &Request, program: &Program, census: &Census, report: &mut
             }
             Ok((
                 status,
-                json!({"wrong_paint_count":wrong_count,"wrong_paint_sample":wrong,"per_colour_coverage":measurements,"decoder_relative_envelope":4.0*f64::from(f32::EPSILON)}),
+                json!({"wrong_paint_count":wrong_count,"wrong_paint_sample":wrong,"per_colour_coverage":measurements,"opaque_knockout_composited":composited,"stack_error_mm":stack_error,"decoder_relative_envelope":4.0*f64::from(f32::EPSILON)}),
                 location,
             ))
         })();
@@ -394,6 +497,115 @@ mod tests {
             }
             assert_ne!(report.status, Status::Pass);
         }
+    }
+    fn overlapping() -> (Request, Program) {
+        let mut r = crate::attribution::tests::request();
+        r.recipe.file_links[0].overprint = false;
+        r.acceptance.insert(
+            "geometry_tolerance_mm".into(),
+            Fact {
+                value: json!(0.02),
+                provenance: Provenance::Operator {
+                    actor: "Synthetic author".into(),
+                    at: "2026-10-18".into(),
+                    decision_id: "Synthetic criterion only".into(),
+                    evidence_sha256: "a".repeat(64),
+                },
+            },
+        );
+        r.identity.measurement_sha256 = crate::digest(&r.acceptance).unwrap();
+        let mut p = expected();
+        let pieces = p.outputs.get_mut("output").unwrap();
+        pieces[0].path = program::union(pieces.iter().map(|p| p.path.clone())).unwrap();
+        let mut regions = BTreeMap::new();
+        for (order, piece) in pieces.iter_mut().enumerate() {
+            let id = format!("original-{order}");
+            piece.regions.insert(id.clone());
+            regions.insert(
+                id,
+                program::RegionGeometry {
+                    page: piece.page,
+                    path_mm: piece.path.clone(),
+                    fill_rule: vectorcraft_geom::FillRule::NonZero,
+                    paint: piece.paint.clone(),
+                    geometry_error_mm: 0.0,
+                    source_order: Some(order),
+                },
+            );
+        }
+        r.geometry = Some(program::Inputs { regions });
+        (r, p)
+    }
+    fn paint_status(r: &Request, p: &Program, c: &Census) -> Status {
+        let mut report = crate::begin(r).unwrap();
+        check(r, p, c, &mut report).unwrap();
+        report.findings.iter().find(|f| f.obligation.key == "rule/arbitrary/paint").unwrap().status
+    }
+    #[test]
+    fn opaque_source_order_accepts_flattening_and_rejects_reversed_visible_paint() {
+        let (r, p) = overlapping();
+        for (stream, expected) in [
+            ("1 0 0 0 k 0 0 20 10 re f 0 1 0 0 k 10 0 10 10 re f", Status::Pass),
+            ("1 0 0 0 k 0 0 10 10 re f 0 1 0 0 k 10 0 10 10 re f", Status::Pass),
+            ("0 1 0 0 k 10 0 10 10 re f 1 0 0 0 k 0 0 20 10 re f", Status::Fail),
+            ("0 0 1 0 k 0 0 20 10 re f 1 0 0 0 k 0 0 10 10 re f 0 1 0 0 k 10 0 10 10 re f", Status::Pass),
+        ] {
+            let bytes = fixture(stream);
+            let mut c = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+            crate::ordering::try_reconcile(&bytes, &mut c).unwrap();
+            assert_eq!(paint_status(&r, &p, &c), expected, "{stream}");
+        }
+    }
+    #[test]
+    fn opaque_overlap_needs_bound_source_order_and_verified_non_overprinting_output() {
+        let (r, p) = overlapping();
+        let bytes = fixture("1 0 0 0 k 0 0 20 10 re f 0 1 0 0 k 10 0 10 10 re f");
+        let mut c = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+        assert_eq!(paint_status(&r, &p, &c), Status::Incomplete);
+        crate::ordering::try_reconcile(&bytes, &mut c).unwrap();
+        assert_eq!(paint_status(&r, &p, &c), Status::Pass);
+        let mut missing = r.clone();
+        missing.geometry.as_mut().unwrap().regions.get_mut("original-0").unwrap().source_order = None;
+        assert_eq!(paint_status(&missing, &p, &c), Status::Incomplete);
+        c.paints[1].overprint = true;
+        assert_eq!(paint_status(&r, &p, &c), Status::Incomplete);
+    }
+    #[test]
+    fn unknown_output_stack_does_not_blame_hidden_paint() {
+        let (mut r, _) = overlapping();
+        r.geometry = None;
+        let bytes = fixture("0 0 1 0 k 0 0 20 10 re f 1 0 0 0 k 0 0 10 10 re f 0 1 0 0 k 10 0 10 10 re f");
+        let c = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+        assert_eq!(paint_status(&r, &expected(), &c), Status::Incomplete);
+    }
+    #[test]
+    fn knockout_hole_exposes_the_underlying_colour() {
+        use vectorcraft_geom::{FillRule, Rect};
+        use vectorcraft_pathops::{BoolOp, try_boolean_for_measurement};
+        let outer = PathData::from_bezpath(&Rect::new(0.0, 0.0, 10.0, 10.0).to_path(0.001));
+        let hole = PathData::from_bezpath(&Rect::new(3.0, 3.0, 7.0, 7.0).to_path(0.001));
+        let ring = try_boolean_for_measurement(&outer, FillRule::NonZero, &hole, FillRule::NonZero, BoolOp::Difference).unwrap();
+        let (visible, _) = visible_knockout(&[(0, 0, outer), (0, 1, ring)]).unwrap();
+        assert!(try_boolean_for_measurement(&visible[0], FillRule::NonZero, &hole, FillRule::NonZero, BoolOp::Xor).unwrap().is_empty());
+    }
+    #[test]
+    fn knockout_never_masks_a_different_page() {
+        let p = expected();
+        let left = p.outputs["output"][0].path.clone();
+        let right = p.outputs["output"][1].path.clone();
+        let full = program::union([left.clone(), right.clone()]).unwrap();
+        let (visible, error) = visible_knockout(&[(0, 0, full.clone()), (1, 1, full.clone()), (0, 2, right)]).unwrap();
+        assert!(error > 0.0);
+        assert_eq!(visible[1], full);
+        let difference = vectorcraft_pathops::try_boolean_for_measurement(
+            &visible[0],
+            vectorcraft_geom::FillRule::NonZero,
+            &left,
+            vectorcraft_geom::FillRule::NonZero,
+            vectorcraft_pathops::BoolOp::Xor,
+        )
+        .unwrap();
+        assert!(difference.is_empty());
     }
     #[test]
     fn missing_geometry_criteria_or_unspecified_technical_tint_cannot_pass_paint() {

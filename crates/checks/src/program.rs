@@ -16,6 +16,9 @@ pub struct RegionGeometry {
     pub paint: Value,
     #[serde(default, skip_serializing_if = "zero_error")]
     pub geometry_error_mm: f64,
+    /// Raw original PDF paint order, only when the complete path census reconciles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_order: Option<usize>,
 }
 fn zero_error(n: &f64) -> bool {
     *n == 0.0
@@ -284,6 +287,7 @@ mod tests {
             fill_rule: FillRule::NonZero,
             paint: serde_json::json!({"mode":"cmyk","value":[0,100,0,0]}),
             geometry_error_mm: 0.0,
+            source_order: None,
         };
         r.baseline.as_mut().unwrap().regions[0].geometry_sha256 = digest(&geometry).unwrap();
         r.geometry = Some(Inputs { regions: BTreeMap::from([("region-1".into(), geometry)]) });

@@ -211,6 +211,7 @@ mod tests {
             fill_rule: vectorcraft_geom::FillRule::NonZero,
             paint: json!({"mode":"output_ink"}),
             geometry_error_mm: 0.0,
+            source_order: None,
         };
         r.baseline.as_mut().unwrap().regions[0].geometry_sha256 = crate::digest(&geometry).unwrap();
         r.geometry = Some(Inputs { regions: BTreeMap::from([("region-1".into(), geometry)]) });

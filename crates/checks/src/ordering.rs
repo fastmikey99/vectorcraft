@@ -32,17 +32,20 @@ fn indices(order: &vectorcraft_pdf::PrintOrder, census: &crate::pdf::Census) -> 
 }
 /// Restore real PDF stream order before compositing native per-ink predictions.
 pub fn reconcile(bytes: &[u8], census: &mut crate::pdf::Census) {
-    let result = vectorcraft_pdf::print_order(bytes).map_err(|e| e.to_string()).and_then(|order| indices(&order, census));
-    match result {
-        Ok(indices) => {
-            let ordered: Vec<_> = indices.iter().filter_map(|i| census.paints.get(*i).cloned()).collect();
-            census.paints = ordered;
-            for (i, p) in census.paints.iter_mut().enumerate() {
-                p.order = i;
-            }
-        }
-        Err(reason) => census.unresolved.push(reason),
+    if let Err(reason) = try_reconcile(bytes, census) {
+        census.unresolved.push(reason);
     }
+}
+pub(crate) fn try_reconcile(bytes: &[u8], census: &mut crate::pdf::Census) -> Result<(), String> {
+    census.paint_order_verified = false;
+    let order = vectorcraft_pdf::print_order(bytes).map_err(|e| e.to_string())?;
+    let indices = indices(&order, census)?;
+    census.paints = indices.iter().filter_map(|i| census.paints.get(*i).cloned()).collect();
+    for (i, p) in census.paints.iter_mut().enumerate() {
+        p.order = i;
+    }
+    census.paint_order_verified = true;
+    Ok(())
 }
 
 pub fn check(request: &Request, bytes: &[u8], census: &crate::pdf::Census, report: &mut Report) -> Result<(), String> {
@@ -247,6 +250,12 @@ mod tests {
         assert!(c.unresolved.is_empty(), "{:?}", c.unresolved);
         assert_eq!(c.paints.iter().map(|p| p.layer.as_str()).collect::<Vec<_>>(), vec!["Layer", "Upper", "Layer"]);
         assert_eq!(c.paints.iter().map(|p| p.paint["color"]["c"].as_f64().unwrap()).collect::<Vec<_>>(), vec![1.0, 0.0, 1.0]);
+        assert!(c.paint_order_verified);
+        let draft = crate::prepare::capture(&bytes, "synthetic-original".into(), "job-1".into()).unwrap();
+        let mut original: Vec<_> = draft.geometry.regions.values().collect();
+        original.sort_by_key(|p| p.source_order);
+        assert_eq!(original.iter().map(|p| p.source_order).collect::<Vec<_>>(), vec![Some(0), Some(1), Some(2)]);
+        assert_eq!(original.iter().map(|p| p.paint["color"]["c"].as_f64().unwrap()).collect::<Vec<_>>(), vec![1.0, 0.0, 1.0]);
         c.paints.pop();
         reconcile(&bytes, &mut c);
         assert!(!c.unresolved.is_empty());

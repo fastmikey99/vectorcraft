@@ -36,7 +36,8 @@ pub fn capture(bytes: &[u8], id: String, job_revision: String) -> Result<Draft, 
         &vectorcraft_pdf::ImportOptions { reject_depth_loss: true, text_as: vectorcraft_pdf::TextAs::Outlines, ..Default::default() },
     )
     .map_err(|e| e.to_string())?;
-    let census = pdf::census(&imported.document);
+    let mut census = pdf::census(&imported.document);
+    let ordered = crate::ordering::try_reconcile(bytes, &mut census).is_ok();
     let original = sha256(bytes);
     let (mut diagnostics, notices) = pdf::import_messages(imported.warnings);
     diagnostics.extend(census.unresolved);
@@ -75,6 +76,7 @@ pub fn capture(bytes: &[u8], id: String, job_revision: String) -> Result<Draft, 
             fill_rule: vectorcraft_geom::FillRule::NonZero,
             paint: paint.paint.clone(),
             geometry_error_mm: paint.geometry_error_mm,
+            source_order: ordered.then_some(paint.order),
         };
         let path = artifact.path_mm.to_bezpath();
         let b = path.bounding_box();
@@ -184,6 +186,10 @@ mod tests {
         request.baseline = Some(a.baseline);
         request.geometry = Some(a.geometry);
         assert!(verify_original(&request, &bytes).unwrap().is_empty());
+        let original_order = request.geometry.as_ref().unwrap().regions.values().next().unwrap().source_order;
+        request.geometry.as_mut().unwrap().regions.values_mut().next().unwrap().source_order = Some(999);
+        assert!(!verify_original(&request, &bytes).unwrap().is_empty());
+        request.geometry.as_mut().unwrap().regions.values_mut().next().unwrap().source_order = original_order;
         let original_facts = request.baseline.as_ref().unwrap().regions[0].facts.clone();
         request.baseline.as_mut().unwrap().regions[0].facts.get_mut("paint").unwrap().value = serde_json::json!("changed");
         assert!(verify_original(&request, &bytes).unwrap().iter().any(|i| i.contains("file facts")));
