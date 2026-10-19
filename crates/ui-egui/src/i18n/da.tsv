@@ -5213,3 +5213,10 @@ swatch	Bright Violet	Kraftig violet
 	Show/hide ink (Alt-click: isolate)	Vis/skjul farve (Alt-klik: isoler)
 	Show/hide group in preview	Vis/skjul gruppe i eksemplet
 	Unassigned	Ikke tildelt
+
+# Line weight check and pattern images: original translations, not native-speaker reviewed.
+	Check Line Weight	Kontrollér stregtykkelse
+	Clear Line Weight Check	Ryd kontrol af stregtykkelse
+	Pattern Images	Billeder i mønstre
+	Export Pattern Image	Eksportér billede fra mønster
+	Replace Pattern Image	Erstat billede i mønster

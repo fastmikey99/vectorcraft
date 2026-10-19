@@ -29,8 +29,19 @@ fn square_and_hairline(s: &mut Session) -> (u64, u64) {
     (rect(s, 0.0, 0.0, 1.0, 1.0), rect(s, 1.0, 0.45, 2.0, 0.1))
 }
 
+/// `lineweight.check` with `p` on the whole document (without `ids` it checks the selection, so
+/// the selection the tests' drawing left is set aside for the check and put back after it).
 fn check(s: &mut Session, p: Value) -> Value {
-    s.execute("lineweight.check", &p).unwrap()
+    if p.get("ids").is_some() {
+        return s.execute("lineweight.check", &p).unwrap();
+    }
+    let kept: Vec<u64> = s.doc().unwrap().selection.objects.iter().map(|id| id.0).collect();
+    s.execute("select.none", &json!({})).unwrap();
+    let r = s.execute("lineweight.check", &p).unwrap();
+    if !kept.is_empty() {
+        s.execute("select.set", &json!({ "ids": kept })).unwrap();
+    }
+    r
 }
 
 fn counts(r: &Value) -> (u64, u64) {
@@ -182,6 +193,19 @@ fn ids_limit_the_check_to_those_objects() {
     let r = check(&mut s, json!({"min": "0.2 mm", "ids": [square, line]}));
     assert_eq!((counts(&r), r["checkedObjects"].as_u64()), ((1, 0), Some(2)), "{r}");
     assert_eq!(counts(&check(&mut s, json!({"min": "0.2 mm", "ids": [square]}))), (0, 0));
+}
+
+#[test]
+fn the_selection_limits_the_check_when_no_ids_are_given() {
+    let mut s = session();
+    let (square, line) = square_and_hairline(&mut s);
+    rect(&mut s, 10.0, 0.0, 0.1, 3.0);
+    s.execute("select.set", &json!({"ids": [square, line]})).unwrap();
+    let r = s.execute("lineweight.check", &json!({"min": "0.2 mm"})).unwrap();
+    assert_eq!((counts(&r), r["checkedObjects"].as_u64()), ((1, 0), Some(2)), "{r}");
+    // Nothing selected (as a file opened in the CLI): the whole document.
+    s.execute("select.none", &json!({})).unwrap();
+    assert_eq!(counts(&s.execute("lineweight.check", &json!({"min": "0.2 mm"})).unwrap()), (2, 0));
 }
 
 #[test]

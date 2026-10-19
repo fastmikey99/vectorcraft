@@ -68,7 +68,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Check Line Weight",
             [],
             None,
-            "{min?: pt or a length with its unit (\"0.2 mm\"; default 0.2 mm), ids?: objects to check (default: the whole document), reach?: pt or a length (default 1.5 × min: how far a region must run beyond the art that is wide enough to count; corners sharper than about 29° are reported at the default, about 60° at 0.5 × min), gaps?: bool (default true: also gaps narrower than min), mark?: bool (default false: draw the regions on a locked template layer \"Lineweight Check\" on top, thin parts magenta and gaps cyan, replacing an earlier one; one undo step; it never prints or exports), paths?: bool (default false: each listed region's outline as SVG path data `d`, capped), maxRegions?: count of regions listed per kind (default 200, at most 10000; the counts are always complete), timeLimit?: seconds (default 120)} the parts of the printing art narrower than min (it breaks up when shrunk by half of min) and the gaps narrower than it (they close when it grows by half of min), judged on the union of everything that prints → {min, minMm, reach, thin: {count, regions: [{bounds: [x0, y0, x1, y1], area: pt², d?}]}, gaps: {count, regions}, checkedObjects, skippedImages, segments, complete, stopped?: \"time\"|\"segments\", failed?: [[x0, y0, x1, y1]] (bounds of art whose geometry couldn't be resolved, left unchecked), ms, marked?: layer id}",
+            "{min?: pt or a length with its unit (\"0.2 mm\"; default 0.2 mm), ids?: objects to check (default: the selection, else the whole document), reach?: pt or a length (default 1.5 × min: how far a region must run beyond the art that is wide enough to count; corners sharper than about 29° are reported at the default, about 60° at 0.5 × min), gaps?: bool (default true: also gaps narrower than min), mark?: bool (default false: draw the regions on a locked template layer \"Lineweight Check\" on top, thin parts magenta and gaps cyan, replacing an earlier one; one undo step; it never prints or exports), paths?: bool (default false: each listed region's outline as SVG path data `d`, capped), maxRegions?: count of regions listed per kind (default 200, at most 10000; the counts are always complete), timeLimit?: seconds (default 120)} the parts of the printing art narrower than min (it breaks up when shrunk by half of min) and the gaps narrower than it (they close when it grows by half of min), judged on the union of everything that prints → {min, minMm, reach, thin: {count, regions: [{bounds: [x0, y0, x1, y1], area: pt², d?}]}, gaps: {count, regions}, checkedObjects, skippedImages, segments, complete, stopped?: \"time\"|\"segments\", failed?: [[x0, y0, x1, y1]] (bounds of art whose geometry couldn't be resolved, left unchecked), ms, marked?: layer id}",
             has_doc,
             check
         ),
@@ -359,7 +359,15 @@ fn check(s: &mut Session, p: &Value) -> Result<Value> {
     if !(0.0..=MAX_REGIONS as f64).contains(&max_regions) {
         return Err(bad(C, "maxRegions must be from 0 to 10000"));
     }
-    let ids = if p.get("ids").is_some_and(|v| !v.is_null()) { Some(checked_ids_param(s, p, "ids", C)?) } else { None };
+    // `ids` stand in for the selection, as in other commands: an object listed with a group that
+    // holds it counts once (`edit::roots_of`). Neither: the whole document.
+    let ids = if p.get("ids").is_some_and(|v| !v.is_null()) {
+        Some(checked_ids_param(s, p, "ids", C)?)
+    } else {
+        Some(s.doc()?.selection.objects.clone()).filter(|sel| !sel.is_empty())
+    };
+    let doc = &s.doc()?.doc;
+    let ids = ids.map(|ids| super::edit::roots_of(doc, ids));
     let (gaps, mark, with_path) = (bool_or(p, "gaps", true), bool_or(p, "mark", false), bool_or(p, "paths", false));
 
     let clock = Clock::new(limit);

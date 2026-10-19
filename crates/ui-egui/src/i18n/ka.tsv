@@ -5140,3 +5140,11 @@ imageTrace	Outline	კონტური
 @msg	Invalid separation context or too many entries	სეპარაციის არასწორი კონტექსტი ან ზედმეტად ბევრი ჩანაწერი
 @msg	Invalid or duplicate separation name/component	სეპარაციის არასწორი ან განმეორებული სახელი/კომპონენტი
 @msg	{what}: this editor works on one file only	{what}: ეს რედაქტორი მხოლოდ ერთ ფაილთან მუშაობს
+
+# Line weight check and pattern images: original translations, not native-speaker reviewed.
+	Check Line Weight	ხაზის სისქის შემოწმება
+	Clear Line Weight Check	ხაზის სისქის შემოწმების გასუფთავება
+	Pattern Images	ნიმუშის გამოსახულებები
+	Export Pattern Image	ნიმუშის გამოსახულების ექსპორტი
+	Replace Pattern Image	ნიმუშის გამოსახულების ჩანაცვლება
+@msg	Line weight check failed: {e}	ხაზის სისქის შემოწმება ვერ მოხერხდა: {e}

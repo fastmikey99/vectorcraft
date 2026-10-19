@@ -5197,3 +5197,11 @@ mark-style	Japanese	Japanilainen
 	Unassigned	Ei määritetty
 @msg	Invalid separation context or too many entries	Virheellinen värierottelukonteksti tai liikaa merkintöjä
 @msg	Invalid or duplicate separation name/component	Virheellinen tai päällekkäinen värierottelun nimi tai osa
+
+# Line weight check and pattern images: original translations, not native-speaker reviewed.
+	Check Line Weight	Tarkista viivanpaksuus
+	Clear Line Weight Check	Tyhjennä viivanpaksuuden tarkistus
+	Pattern Images	Kuviokuvat
+	Export Pattern Image	Vie kuviokuva
+	Replace Pattern Image	Korvaa kuviokuva
+@msg	Line weight check failed: {e}	Viivanpaksuuden tarkistus epäonnistui: {e}
