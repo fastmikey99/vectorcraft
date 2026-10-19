@@ -927,6 +927,24 @@ fn fit_to_artwork_bounds_fits_each_artboard_to_its_own_art() {
     assert_eq!(boards(&s), [Rect::new(100.0, 100.0, 1050.0, 280.0), was[1], was[2]], "the first artboard by default");
 }
 
+/// `document: true` fits ALL the art the document prints, not just the art on the artboard: a
+/// print-preparation script measuring a customer file must not lose art that lies off its page
+/// (the Supacolour prep worker; upstream's fit is per artboard, as Illustrator's).
+#[test]
+fn fit_to_art_with_document_takes_the_art_off_the_artboard_too() {
+    let mut s = session();
+    s.execute("artboard.setProps", &json!({"index": 0, "x": 0, "y": 0, "width": 100, "height": 100})).unwrap();
+    rect(&mut s, 10.0, 10.0, 20.0, 20.0);
+    rect(&mut s, 120.0, 10.0, 20.0, 20.0);
+    let board = |s: &Session| s.doc().unwrap().doc.artboards[0].rect;
+    s.execute("artboard.fitToArt", &json!({})).unwrap();
+    assert_eq!(board(&s), Rect::new(9.5, 9.5, 30.5, 30.5), "the art on the artboard (with its 1 pt stroke)");
+    s.execute("edit.undo", &json!({})).unwrap();
+    s.execute("artboard.fitToArt", &json!({"document": true})).unwrap();
+    assert_eq!(board(&s), Rect::new(9.5, 9.5, 140.5, 30.5), "all the art");
+    assert!(s.execute("artboard.fitToArt", &json!({"document": "yes"})).is_err());
+}
+
 /// Artboard Options and Fit to Selected Art fail with `no such artboard` on an `index` that names
 /// no artboard (past the last, negative, fractional, a string or null), and the artboards stay as
 /// they were. Artboard Options needs an `index`; Fit to Selected Art without one fits the first
