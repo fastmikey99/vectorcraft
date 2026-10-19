@@ -7,6 +7,7 @@ use vectorcraft_pathops::BoolOp;
 pub(crate) struct Coverage {
     pub path: PathData,
     pub construction_allowance_mm: f64,
+    pub paint_object_ids: Vec<u64>,
 }
 fn elements(path: &PathData) -> usize {
     path.anchor_count().saturating_add(path.subpaths.len().saturating_mul(2))
@@ -18,16 +19,10 @@ fn boolean(a: &PathData, b: &PathData, op: BoolOp) -> Result<PathData, String> {
     }
     Ok(out)
 }
-/// Requires complete supported vector accounting. No threshold converts a partial
-/// tint into solid ink; unsupported channels, masks and colour conversion refuse.
-#[cfg(test)]
-pub(crate) fn solid(census: &Census, page: usize, ink: &str) -> Result<Coverage, String> {
-    solid_with_budget(census, page, ink, &mut crate::feature_offset::WorkBudget::new())
-}
-pub(crate) fn solid_with_budget(census: &Census, page: usize, ink: &str, budget: &mut crate::feature_offset::WorkBudget) -> Result<Coverage, String> {
-    if page >= census.pages
-        || ink.is_empty()
-        || matches!(ink, "All" | "None")
+/// Shared completeness gate for physical presence, absence and comparison.
+/// Object inventory alone cannot establish the result after PDF compositing.
+pub(crate) fn reconciled_vector_census(census: &Census) -> Result<(), String> {
+    if census.pages == 0
         || !census.paint_order_verified
         || census.budget_exhausted
         || census.image_objects != 0
@@ -37,12 +32,26 @@ pub(crate) fn solid_with_budget(census: &Census, page: usize, ink: &str, budget:
         || census.raw_audit_error.is_some()
         || census.raw_audit.as_ref().is_none_or(|a| a.issue_count != 0 || a.image_use_count != 0 || a.path_paint_count != census.paints.len())
     {
-        return Err("Complete reconciled vector census is required for physical feature coverage".into());
+        return Err("Complete reconciled vector census is required for physical coverage".into());
     }
+    Ok(())
+}
+/// Requires complete supported vector accounting. No threshold converts a partial
+/// tint into solid ink; unsupported channels, masks and colour conversion refuse.
+#[cfg(test)]
+pub(crate) fn solid(census: &Census, page: usize, ink: &str) -> Result<Coverage, String> {
+    solid_with_budget(census, page, ink, &mut crate::feature_offset::WorkBudget::new())
+}
+pub(crate) fn solid_with_budget(census: &Census, page: usize, ink: &str, budget: &mut crate::feature_offset::WorkBudget) -> Result<Coverage, String> {
+    if page >= census.pages || ink.is_empty() || matches!(ink, "All" | "None") {
+        return Err("Physical coverage page or ink is invalid".into());
+    }
+    reconciled_vector_census(census)?;
     let mut path = PathData::default();
     let mut construction_allowance_mm = 0.0f64;
     let mut cost = 0usize;
     let mut count = 0usize;
+    let mut paint_object_ids = std::collections::BTreeSet::new();
     for paint in &census.paints {
         let source = paint.source_space.and_then(|i| census.paint_sources.get(i)).ok_or("Physical coverage source identity missing")?;
         let tones = crate::tone::source_tones(paint, source)?;
@@ -66,13 +75,14 @@ pub(crate) fn solid_with_budget(census: &Census, page: usize, ink: &str, budget:
         let Some(tone) = crate::tone::overpaint(&tones, ink, paint.overprint, crate::tone::skip_zero_process(paint, source)) else {
             continue;
         };
+        paint_object_ids.insert(paint.id);
         let sweep = vectorcraft_pathops::measurement_boolean_epsilon(&path, shape).map_err(|e| e.to_string())?;
         path = boolean(&path, shape, if tone == 1.0 { BoolOp::Union } else { BoolOp::Difference })?;
         // Retain input error and a Boolean construction allowance (not a certified enclosure); never use it as
         // a manufacturing tolerance or suppress a small component.
         construction_allowance_mm += paint.geometry_error_mm + 2.0 * sweep;
     }
-    Ok(Coverage { path, construction_allowance_mm })
+    Ok(Coverage { path, construction_allowance_mm, paint_object_ids: paint_object_ids.into_iter().collect() })
 }
 
 #[cfg(test)]
@@ -83,7 +93,7 @@ mod tests {
         let bytes = crate::pdf::tests::fixture_mode(true, mode, "Exact#20ink", extra, None);
         let doc = vectorcraft_pdf::import(&bytes).unwrap();
         let mut census = crate::pdf::census(&doc);
-        crate::ordering::try_reconcile(&bytes, &mut census).unwrap();
+        crate::ordering::try_reconcile(&bytes, &mut census)?;
         solid(&census, 0, ink)
     }
     fn contains(c: &Coverage, x: f64, y: f64) -> bool {
@@ -118,6 +128,22 @@ mod tests {
         census.unaccounted_objects.push("unresolved".into());
         assert!(solid(&census, 0, "Exact ink").is_err());
     }
+    #[test]
+    fn differences_retain_small_holes_and_narrow_remaining_ink() {
+        // The editable PDF importer substitutes a stroke for this sub-threshold fill.
+        // Refuse that mismatch instead of claiming its physical coverage is known.
+        assert!(coverage("0 scn 15 15 0.0001 0.0001 re f", 1, "Exact ink").is_err());
+        let hole = coverage("0 scn 15 15 0.1 0.1 re f", 1, "Exact ink").unwrap();
+        assert_eq!(hole.path.subpaths.len(), 2);
+        assert!(!contains(&hole, 15.05, 15.05));
+        let remnant = coverage("0 scn 10 10 19.9999 20 re f", 1, "Exact ink").unwrap();
+        assert!(!remnant.path.is_empty());
+        assert!(contains(&remnant, 29.99995, 15.0));
+        let edge = coverage("0 scn 20 10 10 20 re f", 1, "Exact ink").unwrap();
+        assert_eq!(edge.path.subpaths.len(), 1);
+        assert!(contains(&edge, 15.0, 15.0));
+        assert!(!contains(&edge, 25.0, 15.0));
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -130,13 +156,26 @@ mod independent_tests {
         let base = std::env::var_os("CHECK_FEATURE_EVIDENCE_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
         let run = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let mut evidence = vec![];
-        for (name, overprint, mode, extra, ink) in [
+        let mut cases: Vec<_> = [
             ("spot-zero", true, 1, "0 scn 15 15 5 5 re f", "Exact ink"),
             ("spot-knockout", false, 1, "0 0 0 0 k 15 15 5 5 re f", "Exact ink"),
             ("process-opm0", true, 0, "0 0 0 0 k 0 0 50 50 re f", "Cyan"),
             ("process-opm1", true, 1, "0 0 0 0 k 0 0 50 50 re f", "Cyan"),
+        ]
+        .into_iter()
+        .map(|(name, op, mode, extra, ink)| (name, crate::pdf::tests::fixture_mode(op, mode, "Exact#20ink", extra, None), ink))
+        .collect();
+        for (name, second, overprint, second_page, reverse) in [
+            ("stream-full-knockout", "0 0 0 0 k 0 0 100 100 re f", false, false, false),
+            ("stream-partial-knockout", "0 0 0 0 k 15 15 5 5 re f", false, false, false),
+            ("other-spot-knockout", "/Other cs 1 scn 0 0 100 100 re f", false, false, false),
+            ("other-spot-overprint", "/Other cs 1 scn 0 0 100 100 re f", true, false, false),
+            ("knockout-before-ink", "0 0 0 0 k 0 0 100 100 re f", false, false, true),
+            ("different-page-knockout", "0 0 0 0 k 0 0 100 100 re f", false, true, false),
         ] {
-            let bytes = crate::pdf::tests::fixture_mode(overprint, mode, "Exact#20ink", extra, None);
+            cases.push((name, crate::pdf::tests::ordered_ink_fixture(second, overprint, 1, second_page, reverse), "Exact ink"));
+        }
+        for (name, bytes, ink) in cases {
             let mut census = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
             crate::ordering::try_reconcile(&bytes, &mut census).unwrap();
             let coverage = solid(&census, 0, ink).unwrap();

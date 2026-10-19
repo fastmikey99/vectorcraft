@@ -560,6 +560,34 @@ pub(crate) mod tests {
         }
         objects_pdf(&objects)
     }
+    /// Original synthetic streams: a named square and a separate ordered paint.
+    pub(crate) fn ordered_ink_fixture(second: &str, overprint: bool, mode: u8, second_page: bool, reverse: bool) -> Vec<u8> {
+        let first = "/OC /Layer BDC /GS gs /Ink cs 1 scn 10 10 20 20 re f EMC";
+        let second = format!("q /KO gs {second} Q");
+        let resources = "/Resources << /ColorSpace << /Ink [/Separation /Exact#20ink /DeviceCMYK 5 0 R] /Other [/Separation /Other /DeviceCMYK 5 0 R] >> /Properties << /Layer 6 0 R >> /ExtGState << /GS 7 0 R /KO 8 0 R >> >>";
+        let contents = if second_page {
+            "4 0 R"
+        } else if reverse {
+            "[9 0 R 4 0 R]"
+        } else {
+            "[4 0 R 9 0 R]"
+        };
+        let mut objects = vec![
+            "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [6 0 R] /D << /Order [6 0 R] /ON [6 0 R] >> >> >>".into(),
+            if second_page { "<< /Type /Pages /Kids [3 0 R 10 0 R] /Count 2 >>".into() } else { "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into() },
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] {resources} /Contents {contents} >>"),
+            format!("<< /Length {} >>\nstream\n{first}\nendstream", first.len()),
+            "<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 1 0 0] /N 1 >>".into(),
+            "<< /Type /OCG /Name (Layer) >>".into(),
+            "<< /Type /ExtGState /op true /OP true /OPM 1 >>".into(),
+            format!("<< /Type /ExtGState /op {overprint} /OP {overprint} /OPM {mode} >>"),
+            format!("<< /Length {} >>\nstream\n{second}\nendstream", second.len()),
+        ];
+        if second_page {
+            objects.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] {resources} /Contents 9 0 R >>"));
+        }
+        objects_pdf(&objects)
+    }
     pub(crate) fn objects_pdf(objects: &[String]) -> Vec<u8> {
         let mut out = b"%PDF-1.7\n".to_vec();
         let mut offsets = vec![0];

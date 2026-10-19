@@ -70,16 +70,38 @@ pub fn check(request: &Request, program: &Program, report: &mut Report) -> Resul
         if report.findings.iter().any(|f| f.obligation.key == key && f.status == Status::NotApplicable) {
             continue;
         }
+        let empty_required = report.findings.iter().any(|f| f.obligation.key == key && !f.obligation.conditional)
+            && program.outputs.get(&link.key).is_some_and(|pieces| pieces.iter().all(|p| p.path.is_empty()));
+        if empty_required {
+            let coverage = format!("file/{}/coverage", link.key);
+            // A physical plate can pass with no ink, or with ink from another
+            // contribution. Neither proves a source-empty unconditional link.
+            // Keep independently established failures instead of weakening them.
+            if report.findings.iter().any(|f| f.obligation.key == coverage && f.status != Status::Fail) {
+                report.record(
+                    &coverage,
+                    Status::Incomplete,
+                    "Unconditional contribution has proven empty expected source; physical plate conformity cannot establish its coverage",
+                    json!({"source_rule":link.source_rule,"expected_source_empty":true}),
+                    evidence.clone(),
+                )?;
+            }
+        }
         let measured = references(&BTreeSet::from([link.key.as_str()]));
         let status = if program.outputs.contains_key(&link.key) {
             combine(measured.iter().map(|p| if p.status == Status::Pass || direct(p) { p.status } else { Status::Incomplete }))
         } else {
             Status::Incomplete
         };
+        let status = if empty_required && status == Status::Pass { Status::Incomplete } else { status };
         report.record(
             &key,
             status,
-            "Contribution evaluated through the complete physical output; a failing merged output does not identify which contribution is wrong",
+            if empty_required && status == Status::Incomplete {
+                "Unconditional contribution has proven empty expected source; physical plate conformity cannot establish its contribution"
+            } else {
+                "Contribution evaluated through the complete physical output; a failing merged output does not identify which contribution is wrong"
+            },
             json!({"physical_findings":measured.iter().map(|f| &f.obligation.key).collect::<Vec<_>>(),"source_rule":link.source_rule}),
             evidence.clone(),
         )?;
@@ -125,7 +147,15 @@ pub fn check(request: &Request, program: &Program, report: &mut Report) -> Resul
         };
         let observed = json!({"physical_findings":measured.iter().map(|f| &f.obligation.key).collect::<Vec<_>>(),"complete_rule_routing":complete,"unresolved_construction":program.unresolved.get(&rule.rule_key)});
         for (facet, status) in [("geometry", geometry), ("topology", topology)] {
-            report.record(&format!("rule/{}/{facet}", rule.rule_key), status, "Rule assessed through all mapped physical outputs; shared boundaries covered by other authorised contributions need no separate objects", observed.clone(), evidence.clone())?;
+            let reason = if facet == "topology"
+                && status == Status::Incomplete
+                && measured.iter().any(|p| p.reason == "Unconditionally required physical plate is empty after ordered ink compositing")
+            {
+                "Physical plate absence is established; topology was not measured"
+            } else {
+                "Rule assessed through all mapped physical outputs; shared boundaries covered by other authorised contributions need no separate objects"
+            };
+            report.record(&format!("rule/{}/{facet}", rule.rule_key), status, reason, observed.clone(), evidence.clone())?;
             if let Some(f) = report.findings.iter_mut().find(|f| f.obligation.key == format!("rule/{}/{facet}", rule.rule_key)) {
                 f.location = measured.iter().find_map(|p| p.location.clone());
                 f.uncertainty_mm = measured.iter().filter_map(|p| p.uncertainty_mm).reduce(f64::max);

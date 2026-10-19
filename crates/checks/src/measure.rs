@@ -17,42 +17,38 @@ fn evidence(request: &Request) -> Vec<Evidence> {
         },
     ]
 }
-/// A PDF layer is a file-structure obligation, not a physical ink boundary.
-/// Include process paint anywhere in the PDF. A named ink can be excluded only
-/// when a different declared exact plate accounts for it. Ambiguous routing is
-/// unresolved; never manufacture a physical Pass from a layer-local subset.
-fn physical_paints<'a>(
+fn record_physical(
     request: &Request,
-    plate: &Value,
-    plates: &[Value],
-    pieces: &[&program::Piece],
-    census: &'a Census,
-) -> Result<Vec<&'a crate::pdf::PaintedObject>, String> {
-    let mode = plate.get("name_mode").and_then(Value::as_str);
-    let ink = plate.get("name").and_then(Value::as_str);
-    if mode == Some("exact") {
-        return Ok(census.paints.iter().filter(|p| p.ink.as_deref() == ink).collect());
+    report: &mut Report,
+    key: &str,
+    links: &[&str],
+    status: Status,
+    reason: &str,
+    observed: Value,
+) -> Result<(), String> {
+    for key in std::iter::once(format!("plate/{key}")).chain(links.iter().map(|l| format!("file/{l}/coverage"))) {
+        if report.findings.iter().any(|f| f.obligation.key == key && f.status == Status::NotApplicable) {
+            continue;
+        }
+        report.record(&key, status, reason, observed.clone(), evidence(request))?;
     }
-    let active: Vec<_> = plates.iter().filter(|p| p.get("garment").and_then(Value::as_str).is_some_and(|g| request.garment.matches(g))).collect();
-    if active.iter().filter(|p| p.get("name_mode").and_then(Value::as_str) != Some("exact")).count() != 1 {
-        return Err("Physical process/source routing across multiple destinations requires independent separation evidence".into());
+    Ok(())
+}
+fn exact_expected(pieces: &[&program::Piece], ink: &str) -> Result<(), String> {
+    if ["All", "None", "Cyan", "Magenta", "Yellow", "Black"].contains(&ink) {
+        return Err("Special/process exact plate names require explicit physical-channel reconciliation".into());
     }
-    let mut objects = vec![];
-    for paint in &census.paints {
-        if paint.process || pieces.iter().any(|p| p.ink.is_some() && p.ink == paint.ink) {
-            objects.push(paint);
-        } else if let Some(name) = paint.ink.as_deref() {
-            if !active
-                .iter()
-                .any(|p| p.get("name_mode").and_then(Value::as_str) == Some("exact") && p.get("name").and_then(Value::as_str) == Some(name))
-            {
-                return Err(format!("Named ink {name:?} has no proven physical output route"));
-            }
-        } else {
-            return Err("Observed paint has no proven physical output route".into());
+    for piece in pieces {
+        let output_ink = piece.paint.get("mode").and_then(Value::as_str) == Some("output_ink");
+        let solid = piece.paint.get("type").and_then(Value::as_str) == Some("solid");
+        if piece.ink.as_deref() != Some(ink)
+            || (!output_ink && !solid)
+            || crate::tone::tones(&piece.paint, piece.ink.as_deref())?.get(ink) != Some(&1.0)
+        {
+            return Err("Exact physical plate expectations require matching, binary-solid named-ink pieces".into());
         }
     }
-    Ok(objects)
+    Ok(())
 }
 pub fn check(request: &Request, plan: &Plan, census: &Census, report: &mut Report) -> Result<(), String> {
     let program = match program::execute(request, plan) {
@@ -79,45 +75,93 @@ pub fn check(request: &Request, plan: &Plan, census: &Census, report: &mut Repor
     };
     let mut any_failure = false;
     let mut all_geometry = true;
+    let mut coverage_budget = crate::feature_offset::WorkBudget::new();
     for plate in plates.iter().filter(|p| p.get("garment").and_then(Value::as_str).is_some_and(|g| request.garment.matches(g))) {
         let key = plate.get("key").and_then(Value::as_str).ok_or("Plate key missing")?;
         let links: Vec<_> = plate.get("links").and_then(Value::as_array).ok_or("Plate links missing")?.iter().filter_map(Value::as_str).collect();
         let ready = links.iter().all(|k| program.outputs.contains_key(*k));
         let pieces: Vec<_> = links.iter().flat_map(|k| program.outputs.get(*k).into_iter().flatten()).collect();
         let ink = plate.get("name").and_then(Value::as_str);
-        let objects = match physical_paints(request, plate, plates, &pieces, census) {
-            Ok(objects) => objects,
+        let required = plate.get("required").and_then(Value::as_bool) == Some(true);
+        let basis = "opaque binary named ink reconstructed in complete raw PDF paint order";
+        let reconstructed = (|| -> Result<_, String> {
+            crate::coverage::reconciled_vector_census(census)?;
+            if plate.get("name_mode").and_then(Value::as_str) != Some("exact") {
+                return Err(
+                    "Process and source destinations require qualified positive-support reconstruction and an explicit expected channel model".into(),
+                );
+            }
+            if !ready {
+                return Err("Complete expected contribution geometry is required".into());
+            }
+            let ink = ink.filter(|s| !s.is_empty()).ok_or("Exact physical ink name missing")?;
+            exact_expected(&pieces, ink)?;
+            let mut pages: BTreeSet<_> =
+                pieces.iter().map(|p| p.page).chain(census.paints.iter().filter(|p| p.ink.as_deref() == Some(ink)).filter_map(|p| p.page)).collect();
+            // Even an apparently absent ink needs full tonal/census validation;
+            // unsupported named channels must not manufacture an empty-plate Fail.
+            if pages.is_empty() {
+                pages.insert(0);
+            }
+            let mut result = std::collections::BTreeMap::new();
+            for page in pages {
+                result.insert(page, crate::coverage::solid_with_budget(census, page, ink, &mut coverage_budget)?);
+            }
+            Ok(result)
+        })();
+        let reconstructed = match reconstructed {
+            Ok(value) => value,
             Err(reason) => {
-                report.record(&format!("plate/{key}"), Status::Incomplete, reason, Value::Null, evidence(request))?;
+                record_physical(request, report, key, &links, Status::Incomplete, &reason, json!({"basis":basis}))?;
                 all_geometry = false;
                 continue;
             }
         };
-        let printable = objects.iter().any(|p| p.geometry_mm.as_ref().is_some_and(|g| !g.is_empty()));
-        let required = plate.get("required").and_then(Value::as_bool) == Some(true);
-        let complete = census.unresolved.is_empty() && ready && objects.iter().all(|p| p.geometry_mm.is_some() && p.page.is_some());
-        if !complete {
-            all_geometry = false;
-            continue;
-        }
+        let printable = reconstructed.values().any(|c| !c.path.is_empty());
+        let reconstruction = json!({"basis":basis,"pages_examined":reconstructed.keys().collect::<Vec<_>>(),
+            "other_pages":"no expected piece or named-ink paint; complete global tonal census validated",
+            "paint_object_ids":reconstructed.values().flat_map(|c| &c.paint_object_ids).copied().collect::<BTreeSet<_>>()});
         if required && !printable {
-            report.record(
-                &format!("plate/{key}"),
+            record_physical(
+                request,
+                report,
+                key,
+                &links,
                 Status::Fail,
-                "Unconditionally required physical plate is empty",
-                json!({"ink":ink}),
-                evidence(request),
+                "Unconditionally required physical plate is empty after ordered ink compositing",
+                reconstruction,
             )?;
+            let page = pieces.iter().find(|p| !p.path.is_empty()).map(|p| p.page).or_else(|| reconstructed.keys().next().copied()).unwrap_or(0);
+            let bounds_mm = pieces.iter().find(|p| p.page == page && !p.path.is_empty()).map(|p| {
+                let b = p.path.to_bezpath().bounding_box();
+                [b.x0, b.y0, b.x1, b.y1]
+            });
+            let location = Location {
+                page,
+                bounds_mm,
+                object_ids: reconstructed.get(&page).map(|c| c.paint_object_ids.iter().take(64).copied().collect()).unwrap_or_default(),
+            };
+            for finding in &mut report.findings {
+                if finding.status == Status::Fail
+                    && (finding.obligation.key == format!("plate/{key}")
+                        || links.iter().any(|l| finding.obligation.key == format!("file/{l}/coverage")))
+                {
+                    finding.location = Some(location.clone());
+                }
+            }
             any_failure = true;
             all_geometry = false;
             continue;
         }
-        if pieces.iter().all(|p| p.path.is_empty()) && !printable && !required {
+        let named_objects = census.paints.iter().any(|p| p.ink.as_deref() == ink);
+        if pieces.iter().all(|p| p.path.is_empty()) && !printable && !required && !named_objects {
+            // Plate optionality does not imply contribution optionality. Attribution
+            // alone waives conditional links; unconditional link findings stay visible.
             report.record(
                 &format!("plate/{key}"),
                 Status::NotApplicable,
-                "All declared contributions proven empty from the original census",
-                json!({"links":links}),
+                "All contributions proven empty and complete physical census contains no named-ink paint",
+                reconstruction,
                 evidence(request),
             )?;
             continue;
@@ -127,7 +171,7 @@ pub fn check(request: &Request, plan: &Plan, census: &Census, report: &mut Repor
                 &format!("plate/{key}"),
                 Status::Incomplete,
                 "Approved geometric acceptance is required for measured conformity",
-                json!({"objects":objects.len()}),
+                reconstruction.clone(),
                 evidence(request),
             )?;
             all_geometry = false;
@@ -138,14 +182,14 @@ pub fn check(request: &Request, plan: &Plan, census: &Census, report: &mut Repor
         let mut status = Status::Pass;
         let mut location = None;
         let mut uncertainty = 0.0f64;
-        let pages: BTreeSet<_> = pieces.iter().map(|p| p.page).chain(objects.iter().filter_map(|p| p.page)).collect();
-        for page in pages {
+        for (page, coverage) in &reconstructed {
+            let page = *page;
             let expected = program::union(pieces.iter().filter(|p| p.page == page).map(|p| p.path.clone()))?;
-            let observed = program::union(objects.iter().filter(|p| p.page == Some(page)).filter_map(|p| p.geometry_mm.clone()))?;
-            let construction_error = pieces.iter().filter(|p| p.page == page).map(|p| p.construction_error_mm).fold(0.0, f64::max)
-                + objects.iter().filter(|p| p.page == Some(page)).map(|p| p.geometry_error_mm).fold(0.0, f64::max);
+            let observed = &coverage.path;
+            let construction_error =
+                pieces.iter().filter(|p| p.page == page).map(|p| p.construction_error_mm).fold(0.0, f64::max) + coverage.construction_allowance_mm;
             let precision = (tolerance / 16.0).clamp(0.000001, 0.001);
-            match geometry::compare(&expected, &observed, tolerance, precision) {
+            match geometry::compare(&expected, observed, tolerance, precision) {
                 Ok(mut m) => {
                     m.lower_mm = (m.lower_mm - construction_error).max(0.0);
                     m.upper_mm += construction_error;
@@ -172,11 +216,11 @@ pub fn check(request: &Request, plan: &Plan, census: &Census, report: &mut Repor
                         location = Some(Location {
                             page,
                             bounds_mm: Some(bounds),
-                            object_ids: objects.iter().filter(|p| p.page == Some(page)).take(64).map(|p| p.id).collect(),
+                            object_ids: coverage.paint_object_ids.iter().take(64).copied().collect(),
                         });
                     }
                     uncertainty = uncertainty.max(m.uncertainty_mm);
-                    measurements.push(json!({"page":page,"measurement":m}));
+                    measurements.push(json!({"page":page,"measurement":m,"coverage_construction_allowance_mm":coverage.construction_allowance_mm,"paint_object_ids":coverage.paint_object_ids}));
                 }
                 Err(reason) => {
                     if status != Status::Fail {
@@ -197,8 +241,8 @@ pub fn check(request: &Request, plan: &Plan, census: &Census, report: &mut Repor
             report.record(
                 &k,
                 status,
-                "Combined physical coverage compared against the complete recipe graph",
-                json!({"acceptance_mm":tolerance,"measurements":measurements}),
+                "Final ordered binary physical ink coverage compared against the complete recipe graph",
+                json!({"acceptance_mm":tolerance,"measurements":measurements,"reconstruction":reconstruction}),
                 evidence(request),
             )?;
             if let Some(f) = report.findings.iter_mut().find(|f| f.obligation.key == k) {
@@ -214,7 +258,7 @@ pub fn check(request: &Request, plan: &Plan, census: &Census, report: &mut Repor
         "global/file_structure",
         if any_failure { Status::Fail } else { Status::Incomplete },
         if all_geometry {
-            "Physical coverage measured; actual painting order and independent print semantics still require reconciliation"
+            "Opaque binary named-ink coverage follows verified paint order; independent interpreter and broader print semantics remain separate"
         } else {
             "Physical output coverage findings retained with unresolved areas"
         },
@@ -290,31 +334,32 @@ mod tests {
         }
     }
     #[test]
-    fn physical_process_coverage_includes_unexpected_layers_and_keeps_exact_inks_separate() {
-        let bytes = crate::pdf::tests::pdf(true);
-        let r = request(&bytes);
-        let mut census = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
-        let exact = json!({"key":"technical","garment":"dark","name_mode":"exact","name":"Exact ink"});
-        let composite = json!({"key":"art","garment":"dark","name_mode":"composite"});
-        let source = json!({"key":"source","garment":"dark","name_mode":"source"});
-        let mut process = census.paints[0].clone();
-        process.ink = None;
-        process.process = true;
-        process.layer = "Unexpected OCG".into();
-        census.paints.push(process);
-        let plates = [exact.clone(), composite.clone()];
-        let observed = physical_paints(&r, &composite, &plates, &[], &census).unwrap();
-        assert_eq!(observed.len(), 2);
-        assert!(observed.iter().any(|p| p.layer == "Unexpected OCG"));
-        assert!(observed.iter().all(|p| p.process));
-        let exact_observed = physical_paints(&r, &exact, &plates, &[], &census).unwrap();
-        assert_eq!(exact_observed.len(), 1);
-        assert_eq!(exact_observed[0].ink.as_deref(), Some("Exact ink"));
-        // No declared route for the technical ink: do not discard it and pass.
-        assert!(physical_paints(&r, &composite, std::slice::from_ref(&composite), &[], &census).is_err());
-        // Process ink cannot be assigned to two destinations from OCG names.
-        assert!(physical_paints(&r, &composite, &[exact.clone(), composite.clone(), source.clone()], &[], &census).is_err());
-        assert_eq!(physical_paints(&r, &source, &[exact, source.clone()], &[], &census).unwrap().len(), 2);
+    fn source_and_composite_destinations_do_not_claim_physical_support_from_object_outlines() {
+        for mode in ["source", "composite"] {
+            let bytes = crate::pdf::tests::pdf(true);
+            let mut r = request(&bytes);
+            let destination = if mode == "composite" { "Indigo" } else { "Screen" };
+            r.recipe.required_screens = Some(vec![]);
+            r.recipe.file_links[0].name_mode = "source".into();
+            r.recipe.file_links[0].separation_name = None;
+            r.recipe.file_links[0].destination = destination.into();
+            let foundation = r.recipe.foundation.as_mut().unwrap();
+            foundation["treatments"]["arbitrary"]["paint"] = json!({"mode":"source"});
+            for p in foundation["verification"]["plates"].as_array_mut().unwrap() {
+                p["name_mode"] = json!(mode);
+                p["name"] = Value::Null;
+                p["required"] = json!(false);
+                p["destination"] = json!(destination);
+            }
+            r.identity.recipe_sha256 = crate::digest(&r.recipe).unwrap();
+            assert!(r.recipe.contract_issues(r.garment).is_empty(), "{:?}", r.recipe.contract_issues(r.garment));
+            crate::attribution::resolve(&r).unwrap();
+            let report = crate::pdf::check(&r, &bytes).unwrap();
+            assert_eq!(report.findings.iter().find(|f| f.obligation.key == "plate/dark-output").unwrap().status, Status::Incomplete);
+            {
+                assert!(report.findings.iter().find(|f| f.obligation.key == "plate/dark-output").unwrap().reason.contains("positive-support"));
+            }
+        }
     }
     #[test]
     fn missing_or_changed_acceptance_never_gets_a_geometry_pass() {
@@ -373,5 +418,240 @@ mod tests {
             assert_eq!(report.findings.iter().find(|f| f.obligation.key == key).unwrap().status, Status::NotApplicable, "{key}");
         }
         assert_eq!(report.findings.iter().find(|f| f.obligation.key == "plate/dark-output").unwrap().status, Status::Pass);
+    }
+    #[test]
+    fn final_ink_geometry_obeys_knockout_zero_tint_and_overprint() {
+        for (overprint, mode, extra, expected) in [
+            (false, 1, "0 0 0 0 k 0 0 100 100 re f", Status::Fail),
+            (false, 1, "0 0 0 0 k 15 15 5 5 re f", Status::Fail),
+            (true, 0, "0 0 0 0 k 15 15 5 5 re f", Status::Pass),
+            (true, 1, "0 0 0 0 k 15 15 5 5 re f", Status::Pass),
+            (true, 1, "0 scn 15 15 5 5 re f", Status::Fail),
+            (true, 1, "0 scn 10 10 20 20 re f", Status::Fail),
+            (true, 1, "0.5 scn 15 15 5 5 re f", Status::Incomplete),
+            (false, 1, "0 0 0 0 k 0 0 100 100 re f /Ink cs 1 scn 10 10 20 20 re f", Status::Pass),
+        ] {
+            let bytes = crate::pdf::tests::fixture_mode(overprint, mode, "Exact#20ink", extra, None);
+            let r = request(&bytes);
+            let report = crate::pdf::check(&r, &bytes).unwrap();
+            let f = report.findings.iter().find(|f| f.obligation.key == "plate/dark-output").unwrap();
+            assert_eq!(f.status, expected, "{overprint} {mode} {extra}: {f:?}");
+            assert_ne!(report.status, Status::Pass);
+            if f.reason == "Unconditionally required physical plate is empty after ordered ink compositing" {
+                assert!(f.location.as_ref().is_some_and(|l| !l.object_ids.is_empty()));
+                let topology = report.findings.iter().find(|f| f.obligation.key == "rule/arbitrary/topology").unwrap();
+                assert_eq!(topology.status, Status::Incomplete);
+                assert!(topology.reason.contains("topology was not measured"));
+            }
+            for key in ["file/output/coverage", "file/output/contribution", "rule/arbitrary/geometry"] {
+                assert_eq!(report.findings.iter().find(|f| f.obligation.key == key).unwrap().status, expected, "{key}: {extra}");
+            }
+            if expected == Status::Fail && extra.contains("15 15") {
+                let mut census = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+                crate::ordering::try_reconcile(&bytes, &mut census).unwrap();
+                let knockout = census.paints.last().unwrap().id;
+                assert!(f.location.as_ref().unwrap().object_ids.contains(&knockout), "specific knockout paint must be included in diagnostics");
+            }
+        }
+    }
+    #[test]
+    fn zero_only_ink_and_incomplete_census_cannot_manufacture_presence_or_absence() {
+        let bytes = String::from_utf8(crate::pdf::tests::pdf(true)).unwrap().replace("/Ink cs 1 scn", "/Ink cs 0 scn").into_bytes();
+        let r = request(&bytes);
+        let report = crate::pdf::check(&r, &bytes).unwrap();
+        assert_eq!(report.findings.iter().find(|f| f.obligation.key == "plate/dark-output").unwrap().status, Status::Fail);
+        for missing in [0, 1, 2] {
+            let mut census = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+            crate::ordering::try_reconcile(&bytes, &mut census).unwrap();
+            match missing {
+                0 => census.paint_order_verified = false,
+                1 => census.raw_audit.as_mut().unwrap().path_paint_count += 1,
+                _ => census.unaccounted_objects.push("unresolved paint".into()),
+            }
+            let mut report = crate::begin(&r).unwrap();
+            check(&r, &crate::attribution::resolve(&r).unwrap(), &census, &mut report).unwrap();
+            assert_eq!(report.findings.iter().find(|f| f.obligation.key == "plate/dark-output").unwrap().status, Status::Incomplete);
+        }
+    }
+    #[test]
+    fn nonbinary_expected_named_ink_cannot_be_compared_as_a_solid_shape() {
+        let bytes = crate::pdf::tests::pdf(true);
+        let mut r = request(&bytes);
+        r.recipe.foundation.as_mut().unwrap()["treatments"]["arbitrary"]["paint"] = json!({"mode":"source"});
+        let g = r.geometry.as_mut().unwrap().regions.get_mut("region-1").unwrap();
+        g.paint = json!({"type":"solid","color":{"model":"cmyk","c":0.0,"m":1.0,"y":0.0,"k":0.0},"tint":0.5});
+        r.baseline.as_mut().unwrap().regions[0].geometry_sha256 = crate::digest(g).unwrap();
+        r.identity.baseline_sha256 = crate::digest(r.baseline.as_ref().unwrap()).unwrap();
+        r.identity.recipe_sha256 = crate::digest(&r.recipe).unwrap();
+        let report = crate::pdf::check(&r, &bytes).unwrap();
+        let f = report.findings.iter().find(|f| f.obligation.key == "plate/dark-output").unwrap();
+        assert_eq!(f.status, Status::Incomplete);
+        assert!(f.reason.contains("binary-solid"), "{}", f.reason);
+    }
+    #[test]
+    fn separate_streams_and_pages_use_paint_order_not_layer_order() {
+        for (second, overprint, second_page, reverse, expected) in [
+            ("0 0 0 0 k 0 0 100 100 re f", false, false, false, Status::Fail),
+            ("0 0 0 0 k 15 15 5 5 re f", false, false, false, Status::Fail),
+            ("0 0 0 0 k 0 0 100 100 re f", true, false, false, Status::Pass),
+            ("/Other cs 1 scn 0 0 100 100 re f", false, false, false, Status::Fail),
+            ("/Other cs 1 scn 0 0 100 100 re f", true, false, false, Status::Pass),
+            ("/Ink cs 0 scn 0 0 100 100 re f", true, false, false, Status::Fail),
+            ("0 0 0 0 k 0 0 100 100 re f", false, true, false, Status::Pass),
+            ("0 0 0 0 k 0 0 100 100 re f", false, false, true, Status::Pass),
+        ] {
+            let bytes = crate::pdf::tests::ordered_ink_fixture(second, overprint, 1, second_page, reverse);
+            let report = crate::pdf::check(&request(&bytes), &bytes).unwrap();
+            let f = report.findings.iter().find(|f| f.obligation.key == "plate/dark-output").unwrap();
+            assert_eq!(f.status, expected, "{second}, overprint={overprint}, second_page={second_page}, reverse={reverse}: {f:?}");
+            assert_ne!(report.status, Status::Pass);
+        }
+    }
+    #[test]
+    fn repeated_paint_allowance_prevents_dense_geometry_pass() {
+        for (count, expected) in [(1, Status::Pass), (200, Status::Incomplete)] {
+            let extra = "10 10 20 20 re f ".repeat(count - 1);
+            let bytes = crate::pdf::tests::fixture(true, "Exact#20ink", &extra, None);
+            let mut r = request(&bytes);
+            r.acceptance.get_mut("geometry_tolerance_mm").unwrap().value = json!(0.001);
+            r.identity.measurement_sha256 = crate::digest(&r.acceptance).unwrap();
+            let report = crate::pdf::check(&r, &bytes).unwrap();
+            let f = report.findings.iter().find(|f| f.obligation.key == "plate/dark-output").unwrap();
+            assert_eq!(f.status, expected, "count={count}: {f:?}");
+            assert_ne!(report.status, Status::Pass);
+        }
+    }
+    #[test]
+    fn optional_empty_contributions_do_not_hide_unexpected_physical_ink() {
+        for (tint, expected) in [("0", Status::Pass), ("1", Status::Fail)] {
+            let bytes =
+                String::from_utf8(crate::pdf::tests::pdf(true)).unwrap().replace("/Ink cs 1 scn", &format!("/Ink cs {tint} scn")).into_bytes();
+            let mut r = request(&bytes);
+            r.recipe.required_screens = Some(vec![]);
+            let f = r.recipe.foundation.as_mut().unwrap();
+            f["treatments"]["arbitrary"]["select"] = json!([[{"field":"coverage_exception","operator":"equals","value":true}]]);
+            for plate in f["verification"]["plates"].as_array_mut().unwrap() {
+                plate["required"] = json!(false);
+            }
+            r.identity.recipe_sha256 = crate::digest(&r.recipe).unwrap();
+            assert!(r.recipe.contract_issues(r.garment).is_empty());
+            let report = crate::pdf::check(&r, &bytes).unwrap();
+            let f = report.findings.iter().find(|f| f.obligation.key == "plate/dark-output").unwrap();
+            assert_eq!(f.status, expected, "tint={tint}: {f:?}");
+            for key in ["file/output/contribution", "file/output/coverage"] {
+                assert_eq!(report.findings.iter().find(|f| f.obligation.key == key).unwrap().status, Status::NotApplicable);
+            }
+        }
+    }
+    #[test]
+    fn optional_empty_plate_does_not_waive_an_unconditional_contribution() {
+        for (kind, plate_status, link_status) in [
+            ("absent", Status::NotApplicable, Status::Incomplete),
+            ("zero", Status::Pass, Status::Incomplete),
+            ("positive", Status::Fail, Status::Fail),
+        ] {
+            let bytes = if kind == "absent" {
+                crate::pdf::tests::fixture(true, "Other", "", None)
+            } else if kind == "zero" {
+                String::from_utf8(crate::pdf::tests::pdf(true)).unwrap().replace("/Ink cs 1 scn", "/Ink cs 0 scn").into_bytes()
+            } else {
+                crate::pdf::tests::pdf(true)
+            };
+            let mut r = request(&bytes);
+            r.recipe.required_screens = Some(vec![]);
+            let f = r.recipe.foundation.as_mut().unwrap();
+            f["treatments"]["arbitrary"]["select"] = json!([[{"field":"coverage_exception","operator":"equals","value":true}]]);
+            f["verification"]["contributions"]["output"]["emptiness"] = json!("required");
+            for plate in f["verification"]["plates"].as_array_mut().unwrap() {
+                plate["required"] = json!(false);
+            }
+            r.identity.recipe_sha256 = crate::digest(&r.recipe).unwrap();
+            assert!(r.recipe.contract_issues(r.garment).is_empty());
+            let denominator = crate::begin(&r).unwrap().findings.len();
+            let report = crate::pdf::check(&r, &bytes).unwrap();
+            assert_eq!(report.findings.len(), denominator);
+            assert_eq!(report.findings.iter().find(|f| f.obligation.key == "plate/dark-output").unwrap().status, plate_status);
+            for key in ["file/output/contribution", "file/output/coverage"] {
+                let f = report.findings.iter().find(|f| f.obligation.key == key).unwrap();
+                assert!(!f.obligation.conditional);
+                assert_eq!(f.status, link_status, "{kind} {key}: {f:?}");
+                if link_status == Status::Incomplete {
+                    assert!(f.reason.contains("proven empty"));
+                }
+            }
+        }
+    }
+    #[test]
+    fn a_printing_merged_plate_cannot_prove_its_empty_required_contribution() {
+        let bytes = crate::pdf::tests::pdf(true);
+        let mut r = merged(&bytes, true);
+        r.recipe.foundation.as_mut().unwrap()["verification"]["contributions"]["second-output"]["emptiness"] = json!("required");
+        r.identity.recipe_sha256 = crate::digest(&r.recipe).unwrap();
+        assert!(r.recipe.contract_issues(r.garment).is_empty());
+        let report = crate::pdf::check(&r, &bytes).unwrap();
+        for key in ["plate/dark-output", "file/output/contribution", "file/output/coverage"] {
+            assert_eq!(report.findings.iter().find(|f| f.obligation.key == key).unwrap().status, Status::Pass);
+        }
+        for key in ["file/second-output/contribution", "file/second-output/coverage"] {
+            let f = report.findings.iter().find(|f| f.obligation.key == key).unwrap();
+            assert_eq!(f.status, Status::Incomplete);
+            assert!(f.reason.contains("proven empty"));
+        }
+    }
+    #[test]
+    fn coincident_knockout_edge_and_small_remnant_have_measure_level_verdicts() {
+        for (extra, adjusted, expected) in [("0 scn 20 10 10 20 re f", true, Status::Pass), ("0 scn 10 10 19.9999 20 re f", false, Status::Fail)] {
+            let bytes = crate::pdf::tests::fixture(true, "Exact#20ink", extra, None);
+            let mut r = request(&bytes);
+            if adjusted {
+                let k = 25.4 / 72.0;
+                let g = r.geometry.as_mut().unwrap().regions.get_mut("region-1").unwrap();
+                g.path_mm =
+                    vectorcraft_geom::PathData::from_bezpath(&vectorcraft_geom::Rect::new(10.0 * k, 70.0 * k, 20.0 * k, 90.0 * k).to_path(0.000001));
+                r.baseline.as_mut().unwrap().regions[0].geometry_sha256 = crate::digest(g).unwrap();
+                r.identity.baseline_sha256 = crate::digest(r.baseline.as_ref().unwrap()).unwrap();
+            }
+            let report = crate::pdf::check(&r, &bytes).unwrap();
+            let f = report.findings.iter().find(|f| f.obligation.key == "plate/dark-output").unwrap();
+            assert_eq!(f.status, expected, "{extra}: {f:?}");
+        }
+    }
+    #[test]
+    fn expected_and_actual_ink_pages_are_both_examined() {
+        let bytes = crate::pdf::tests::ordered_ink_fixture("/Ink cs 1 scn 10 10 20 20 re f", true, 1, true, false);
+        let bytes = String::from_utf8(bytes).unwrap().replacen("/Ink cs 1 scn", "/Ink cs 0 scn", 1).into_bytes();
+        let report = crate::pdf::check(&request(&bytes), &bytes).unwrap();
+        let f = report.findings.iter().find(|f| f.obligation.key == "plate/dark-output").unwrap();
+        assert_eq!(f.status, Status::Fail, "{f:?}");
+        assert_eq!(f.observed["reconstruction"]["pages_examined"], json!([0, 1]));
+        assert_eq!(f.observed["measurements"].as_array().unwrap().len(), 2);
+    }
+    #[test]
+    fn unbalanced_marked_content_never_proves_plate_presence_or_absence() {
+        let bytes = crate::pdf::tests::fixture(true, "Exact#20ink", "EMC", None);
+        let report = crate::pdf::check(&request(&bytes), &bytes).unwrap();
+        let f = report.findings.iter().find(|f| f.obligation.key == "plate/dark-output").unwrap();
+        assert_eq!(f.status, Status::Incomplete, "{f:?}");
+    }
+
+    #[test]
+    fn physical_knockout_follows_content_even_when_ocg_declaration_order_disagrees() {
+        for (clear_last, expected) in [(true, Status::Fail), (false, Status::Pass)] {
+            let ink = "/OC /Lower BDC /Ink cs 1 scn 10 10 20 20 re f EMC";
+            let clear = "/OC /Upper BDC 0 0 0 0 k 0 0 100 100 re f EMC";
+            let stream = if clear_last { format!("{ink} {clear}") } else { format!("{clear} {ink}") };
+            let objects = vec![
+                "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R 6 0 R] /D << /Order [6 0 R 5 0 R] /ON [5 0 R 6 0 R] >> >> >>".into(),
+                "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /Properties << /Lower 5 0 R /Upper 6 0 R >> /ColorSpace << /Ink [/Separation /Exact#20ink /DeviceCMYK << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 1 0 0] /N 1 >>] >> >> /Contents 4 0 R >>".into(),
+                format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
+                "<< /Type /OCG /Name (Layer) >>".into(),
+                "<< /Type /OCG /Name (Upper) >>".into(),
+            ];
+            let bytes = crate::pdf::tests::objects_pdf(&objects);
+            let report = crate::pdf::check(&request(&bytes), &bytes).unwrap();
+            let f = report.findings.iter().find(|f| f.obligation.key == "plate/dark-output").unwrap();
+            assert_eq!(f.status, expected, "clear_last={clear_last}: {f:?}");
+        }
     }
 }
