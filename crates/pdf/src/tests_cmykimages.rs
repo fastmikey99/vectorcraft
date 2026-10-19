@@ -74,6 +74,43 @@ fn cmyk_dict(w: u32, h: u32, more: &str) -> String {
 
 const INVERTED: &str = "/Decode [1 0 1 0 1 0 1 0]";
 
+/// A CMYK JPEG with a soft mask, opened (its original JPEG kept) and exported in every mode, the
+/// Hybrid editor's Preserve Source included, keeps its transparency: the original JPEG can't carry
+/// the mask, so it isn't reused for a masked image (the mask was dropped and the image went opaque).
+#[test]
+fn a_masked_cmyk_jpeg_keeps_its_mask_through_every_export() {
+    let jpg = cmyk_jpeg(&flat([0, 102, 255, 0], 16 * 16), 16, 16);
+    let alpha: Vec<u8> = (0..16 * 16).map(|i| if i % 16 < 8 { 0 } else { 255 }).collect();
+    let mask = stream("/Type /XObject /Subtype /Image /Width 16 /Height 16 /ColorSpace /DeviceGray /BitsPerComponent 8", &alpha);
+    let source = pdf_with_images(&[(cmyk_dict(16, 16, "/Filter /DCTDecode /SMask 6 0 R"), jpg)], &[mask]);
+    let mut doc = import(&source).unwrap();
+    assert!(masked(&doc).iter().all(|(_, m)| m.is_some()), "opens masked");
+    // Moved a point (an edit): written afresh, not passed through as it came.
+    let id = doc.layers[0].children().unwrap().iter().find(|n| matches!(n.kind, NodeKind::Image(_))).unwrap().id;
+    doc.node_mut(id).unwrap().transform(Affine::translate((1.0, 0.0)), vectorcraft_doc::Scaling::default());
+    let roundtrip = builtin_presets().into_iter().find(|p| p.name == "Separation Roundtrip").unwrap().settings;
+    let preserve_source = |mut s: PdfSettings| {
+        s.output.conversion = crate::ColorConversion::PreserveSource;
+        s
+    };
+    for (name, settings) in [
+        ("default", PdfSettings::default()),
+        ("Separation Roundtrip, Preserve Source", preserve_source(roundtrip.clone())),
+        ("Separation Roundtrip", roundtrip),
+    ] {
+        let out = export_with_report(&doc, &PdfOptions { settings, ..Default::default() }).unwrap();
+        // The CMYK image is written with its mask as its /SMask.
+        let file = Pdf::new(Arc::new(out.bytes.clone())).unwrap();
+        let smask = file.objects().into_iter().any(|o| match o {
+            Object::Stream(s) => {
+                s.dict().get::<Name<'_>>(b"ColorSpace").is_some_and(|n| n.as_ref() == b"DeviceCMYK") && s.dict().get::<Stream<'_>>(b"SMask").is_some()
+            }
+            _ => false,
+        });
+        assert!(smask, "{name}: the CMYK image has its /SMask");
+    }
+}
+
 #[test]
 fn hard_edge_export_disables_interpolation_on_images_and_their_masks() {
     let mask = stream("/Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8", &[0, 255]);

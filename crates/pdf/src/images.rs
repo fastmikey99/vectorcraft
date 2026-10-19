@@ -291,7 +291,10 @@ pub(crate) fn recode_cmyk(
     alpha: Option<Vec<u8>>,
 ) -> Recoded {
     let rule = rule(c, Kind::Color);
+    // The original JPEG as it is only without `alpha`: it can't carry a soft mask, and the caller
+    // leaves out the enclosing mask when the image takes it (a mask lost, the image fully opaque).
     if convert.is_none()
+        && alpha.is_none()
         && let Some(j) = blob.source_jpeg.as_ref().filter(|j| j.decoded_key == blob.content_key())
     {
         let dims = ImageReader::new(Cursor::new(blob.bytes.as_slice())).with_guessed_format().ok().and_then(|r| r.into_dimensions().ok());
