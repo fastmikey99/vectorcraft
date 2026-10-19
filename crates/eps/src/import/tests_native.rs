@@ -1070,11 +1070,7 @@ fn art_the_page_doesnt_draw_makes_it_come_in_as_its_page() {
     let bar = "0 0 0 1 k\n20 10 m\n20.5 10 L\n20.5 90 L\n20 90 L\nf\n";
     let r = import(&page_in_pieces_and_layers(bar)).unwrap();
     assert_ne!(names(&r.document), ["Art"], "{:?}", r.warnings);
-    assert!(
-        r.warnings.iter().any(|w| w.contains("(the art on them differs from the page's in 0.4% of it)")),
-        "{:?}",
-        r.warnings
-    );
+    assert!(r.warnings.iter().any(|w| w.contains("(the art on them differs from the page's in 0.4% of it)")), "{:?}", r.warnings);
     assert!(!r.warnings.iter().any(|w| w.contains("differs from the file's own page")), "{:?}", r.warnings);
 }
 
