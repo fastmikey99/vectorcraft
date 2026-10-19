@@ -359,6 +359,60 @@ fn a_coons_patch_mesh_becomes_a_gradient_mesh() {
     assert!(!all(&d).iter().any(|n| matches!(n.kind, NodeKind::Group { clip: true, .. })), "the mesh lies inside the page");
 }
 
+/// A grid of Coons patches: `n`×`n` cells over (10, 10)–(90, 90), corner colours a red→blue ramp.
+fn mesh_doc(n: u32, opacity: f32) -> Document {
+    let mut d = Document::new(100.0, 100.0);
+    let m = vectorcraft_doc::live::GradientMesh::from_surface(n, n, &|u, v| kurbo::Point::new(10.0 + 80.0 * u, 10.0 + 80.0 * v), &|u, v| {
+        Color::rgb(u as f32, 0.0, v as f32)
+    });
+    let mut m = m;
+    for p in &mut m.points {
+        p.opacity = opacity;
+    }
+    add(&mut d, Node::new(NodeId(0), NodeKind::Mesh(m)));
+    d
+}
+
+#[test]
+fn a_gradient_mesh_is_written_as_one_mesh_shading_and_reads_back_as_meshes() {
+    let d = mesh_doc(20, 1.0);
+    let pdf = export(&d, &PdfOptions::default()).unwrap();
+    let text = String::from_utf8_lossy(&pdf);
+    // One Coons patch mesh shading, not 20 × 20 × 64 flat-colour pieces.
+    assert_eq!(text.matches("/ShadingType 6").count(), 1, "one mesh shading");
+    assert!(pdf.len() < 40_000, "a 400-patch mesh stays small: {} bytes", pdf.len());
+    let back = open(&pdf);
+    let meshes: Vec<vectorcraft_doc::live::GradientMesh> =
+        all(&back).into_iter().filter_map(|n| if let NodeKind::Mesh(m) = n.kind { Some(m) } else { None }).collect();
+    assert_eq!(meshes.len(), 400, "each patch reads back as a mesh");
+    // The corner of the ramp keeps its colour (8-bit components), and its place.
+    let corner = meshes.iter().flat_map(|m| m.points.iter()).find(|p| (p.p - kurbo::Point::new(90.0, 90.0)).hypot() < 0.01).expect("the far corner");
+    let [r, g, b] = corner.color.to_rgb();
+    assert!((r - 1.0).abs() < 0.01 && g.abs() < 0.01 && (b - 1.0).abs() < 0.01, "{:?}", corner.color);
+}
+
+#[test]
+fn a_gradient_mesh_group_is_one_shading_and_opacity_is_a_soft_mask() {
+    // Two meshes side by side in a group: one shading for both.
+    let mut d = mesh_doc(2, 1.0);
+    let a = all(&d).into_iter().find(|n| matches!(n.kind, NodeKind::Mesh(_))).unwrap();
+    let mut b = a.clone();
+    if let NodeKind::Mesh(m) = &mut b.kind {
+        for p in &mut m.points {
+            p.p.x += 100.0;
+        }
+    }
+    let mut d2 = Document::new(200.0, 100.0);
+    add(&mut d2, Node::group(NodeId(0), vec![Arc::new(a), Arc::new(b)]));
+    let text = String::from_utf8_lossy(&export(&d2, &PdfOptions::default()).unwrap()).into_owned();
+    assert_eq!(text.matches("/ShadingType 6").count(), 1, "the group is one shading");
+    // Half-transparent corners: the colour shading plus a gray one inside a luminosity soft mask.
+    d = mesh_doc(2, 0.5);
+    let text = String::from_utf8_lossy(&export(&d, &PdfOptions::default()).unwrap()).into_owned();
+    assert_eq!(text.matches("/ShadingType 6").count(), 2, "colour and opacity shadings");
+    assert!(text.contains("/Luminosity"), "a luminosity soft mask carries the opacity");
+}
+
 #[test]
 fn gradient_stop_opacity_round_trips() {
     let mut d = Document::new(100.0, 100.0);

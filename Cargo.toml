@@ -115,3 +115,4 @@ codegen-units = 1
 # (vendor/hayro-interpret/src/interpret/path.rs, apply_pending_clip). Drop when hayro ships the fix.
 [patch.crates-io]
 hayro-interpret = { path = "vendor/hayro-interpret" }
+krilla = { git = "https://github.com/fastmikey99/craft-libs", rev = "ee70fcdc6758acfd5c02b4bf990f44b5de681aea" }
