@@ -22,7 +22,8 @@ fn cmyk_profiles_convert_like_the_cms() {
         assert_eq!(parse(&bytes).color_space, moxcms::DataColorSpace::Cmyk);
         let p = IccProfile::from_bytes(None, &bytes).unwrap();
         assert_eq!((p.name.as_str(), p.kind), (name, ProfileKind::Cmyk));
-        let cms = Cms::new(&ColorSettings { cmyk: name.into(), ..Default::default() }).unwrap();
+        // The encoded profile converts without black-point compensation, so compare without it.
+        let cms = Cms::new(&ColorSettings { cmyk: name.into(), bpc: false, ..Default::default() }).unwrap();
         for cmyk in [[0.0; 4], [1.0, 0.0, 0.0, 0.0], [0.2, 0.7, 0.1, 0.3], [0.0, 0.0, 0.0, 1.0], [0.5, 0.5, 0.5, 0.0]] {
             let want = cms.cmyk_to_srgb(cmyk, false);
             let got = p.to_srgb(&cmyk, Intent::RelativeColorimetric).unwrap();
@@ -139,6 +140,23 @@ fn written_profiles_align_their_tags() {
     }
 }
 
+/// #2707: the CMYK profiles written here carry every tag ICC.1 requires of an output profile (the
+/// tables of all three intents and the gamut tag): Windows rejects one without them, and Photos
+/// then can't show a CMYK TIFF that embeds it.
+#[test]
+fn cmyk_profiles_have_the_tags_of_an_output_profile() {
+    for name in BUILTIN_CMYK {
+        let icc = icc_bytes(name).unwrap();
+        let be = |at: usize| u32::from_be_bytes([icc[at], icc[at + 1], icc[at + 2], icc[at + 3]]) as usize;
+        let tags: Vec<&[u8]> = (0..be(128)).map(|i| &icc[132 + 12 * i..136 + 12 * i]).collect();
+        for want in [b"desc", b"cprt", b"wtpt", b"A2B0", b"A2B1", b"A2B2", b"B2A0", b"B2A1", b"B2A2", b"gamt"] {
+            assert!(tags.contains(&&want[..]), "{name}: no {}", String::from_utf8_lossy(want));
+        }
+        let p = parse(&icc);
+        assert!(p.lut_a_to_b_saturation.is_some() && p.lut_b_to_a_saturation.is_some() && p.gamut.is_some(), "{name}");
+    }
+}
+
 #[test]
 fn icc_cmyk_converts_into_another_icc_cmyk_directly() {
     // The same profile under two names. Where sRGB holds a colour, the direct conversion and a
@@ -190,9 +208,9 @@ fn direct_cmyk_compensation_only_remaps_relative_black() {
     for intent in [Intent::Perceptual, Intent::AbsoluteColorimetric] {
         assert_eq!(convert(intent, true, [0.05; 3]), convert(intent, false, [0.05; 3]));
     }
-    // This generated profile has no saturation table: the caller must use its fallback.
+    // The generated CMYK profiles carry a saturation table (#2707): saturation converts directly.
     for bpc in [true, false] {
-        assert!(src.to_cmyk_of(&dest, &[0.05; 3], Intent::Saturation, bpc).is_none());
+        assert!(src.to_cmyk_of(&dest, &[0.05; 3], Intent::Saturation, bpc).is_some());
     }
     assert!(src.to_cmyk_of(&src, &[0.0; 3], relative, true).is_none());
 }

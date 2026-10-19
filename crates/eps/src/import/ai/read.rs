@@ -13,6 +13,8 @@
 //! - Artboards: the `ArtboardArray` of the `/Document` dictionary, else `%AI3_Cropmarks`, else
 //!   the art size around the template box's centre, else (a file in the legacy format another
 //!   app wrote) the bounding box.
+//! - Variables: the variable library, XML nodes of the `/Document` dictionary, isn't read; a note
+//!   gives how many variables and data sets it has ([`VariableLibrary`]).
 //! - Images: `%AI5_BeginRaster`, the colour space `XN`, `[matrix] bounds w h bits type alpha …`
 //!   and the samples after `XI`. 8-bit CMYK samples keep their ink amounts in a CMYK TIFF, and
 //!   an alpha channel that hides part of such an image becomes its opacity mask; other samples
@@ -184,6 +186,98 @@ fn artboards_read(data: &[u8]) -> Vec<(String, Rect)> {
     r.artboards
 }
 
+/// How many variables and data sets the variable library of the editing data has: XML nodes
+/// (`/XMLNode`) of the `/Document` dictionary, a `variableSets` element holding `variableSet`s, each
+/// with its `variables` (`variable` elements) and `sampleDataSets` (`sampleDataSet` elements).
+/// VectorCraft doesn't read them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VariableLibrary {
+    pub variables: usize,
+    pub data_sets: usize,
+}
+
+impl VariableLibrary {
+    /// The import's note that the library wasn't read, when it has a variable or a data set.
+    pub fn note(self) -> Option<String> {
+        let Self { variables, data_sets } = self;
+        // Counts after a colon need no plural, so every language can translate the note whole.
+        (variables + data_sets > 0).then(|| {
+            format!("the file's variables and data sets weren't read (variables: {variables}, data sets: {data_sets}): the Variables panel doesn't list them")
+        })
+    }
+}
+
+/// The variable library of the editing data `data` ([`VariableLibrary`]), for a file whose layers
+/// [`read`] can't read. Data without a `variableSets` element isn't read.
+pub fn variables(data: &[u8]) -> VariableLibrary {
+    if super::find(data, b"variableSets").is_none() {
+        return VariableLibrary::default();
+    }
+    let mut r = Reader::new(data);
+    let _ = r.run();
+    // A `/Document` still open when reading stopped.
+    let open: Vec<Obj> = r.frames.iter().filter_map(|f| if let Kind::Obj(o) = &f.kind { Some((**o).clone()) } else { None }).collect();
+    for o in open.iter().filter(|o| o.ty == "Document") {
+        variable_library(o, 0, &mut r.variables);
+    }
+    if r.variables != VariableLibrary::default() {
+        return r.variables;
+    }
+    // Reading can stop before the library: read its node on its own.
+    variable_sets_node(data).map_or(r.variables, |node| {
+        let mut alone = b"%_/Document :\n%_/Dictionary :\n%_/Array :\n".to_vec();
+        alone.extend_from_slice(node);
+        alone.extend_from_slice(b"\n%_; (xmlnode-children) ,\n%_; /Recorded ,\n%_;\n");
+        let mut r = Reader::new(&alone);
+        let _ = r.run();
+        r.variables
+    })
+}
+
+/// The `variableSets` XML node of the editing data `data`, from its `/XMLNode :` line to the line
+/// that closes it: found from its name back, counting the dictionaries and arrays it holds.
+fn variable_sets_node(data: &[u8]) -> Option<&[u8]> {
+    const NAME: &[u8] = b"variableSets) /String (xmlnode-nodename) ,";
+    let at = data.windows(NAME.len()).position(|w| w == NAME)?;
+    let opens = |text: &[u8]| text.starts_with(b"/") && text.windows(2).any(|w| w == b" :");
+    let closes = |text: &[u8]| text.starts_with(b";") || text.starts_with(b"/Def ;");
+    let mut depth = 0usize;
+    let mut line_end = data.get(..at)?.iter().rposition(|&b| b == b'\n' || b == b'\r')?;
+    let start = loop {
+        let line_start = data.get(..line_end)?.iter().rposition(|&b| b == b'\n' || b == b'\r').map_or(0, |at| at + 1);
+        if let Some(text) = data.get(line_start..line_end)?.strip_prefix(b"%_") {
+            if closes(text) {
+                depth += 1;
+            } else if opens(text) {
+                match depth.checked_sub(1) {
+                    Some(d) => depth = d,
+                    None => break line_start,
+                }
+            }
+        }
+        line_end = line_start.checked_sub(1)?;
+    };
+    let mut line_start = start;
+    loop {
+        let rest = data.get(line_start..)?;
+        let line_end = line_start + rest.iter().position(|&b| b == b'\n' || b == b'\r').unwrap_or(rest.len());
+        if let Some(text) = data.get(line_start..line_end)?.strip_prefix(b"%_") {
+            if closes(text) {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return data.get(start..line_end);
+                }
+            } else if opens(text) {
+                depth += 1;
+            }
+        }
+        if line_end >= data.len() {
+            return None;
+        }
+        line_start = line_end + 1;
+    }
+}
+
 #[derive(Clone, Debug)]
 struct GState {
     fill: Paint,
@@ -272,6 +366,7 @@ enum Kind {
     Group,
     Compound,
     Clip,
+    Mask,
     Obj(Box<Obj>),
 }
 
@@ -290,6 +385,8 @@ struct Frame {
     base: usize,
     /// The clipping paths' indexes among the children.
     clips: Vec<usize>,
+    /// A compound member group explicitly declares its subpaths' winding with `D`.
+    compound_members: bool,
 }
 
 /// What a reader of a pattern's definition has of its head, `(name) llx lly urx ury`: the operands
@@ -344,6 +441,8 @@ struct Reader<'a> {
     to_doc: Option<Affine>,
     cropmarks: Option<Rect>,
     artboards: Vec<(String, Rect)>,
+    /// The variables and data sets of the `/Document` dictionary's variable library.
+    variables: VariableLibrary,
     gradients: HashMap<String, Gradient>,
     gradient_def: Option<GradientDef>,
     instance: Option<Instance>,
@@ -383,6 +482,10 @@ struct Reader<'a> {
     clip_fills: HashSet<NodeId>,
     /// Groups closed as an object's drawn look (`9 () XW`).
     looks: HashSet<NodeId>,
+    /// Legacy compound member groups, even when followed by the generic `9 () XW` marker.
+    compound_groups: HashSet<NodeId>,
+    /// Groups of a text object and its look (see [`Self::style_marker`]), which aren't a look.
+    text_looks: HashSet<NodeId>,
     /// The gradient mesh being read (`/Mesh X!` … `/End X!`), and whether it started on a `%_` line.
     mesh: Option<(super::mesh::MeshReader, bool)>,
     /// The art styles (`%AI9_BeginArtStyles`), by name.
@@ -425,9 +528,6 @@ const IGNORED: &[&str] = &[
     "Xh",
     "XH",
     "XF",
-    "D",
-    "X=",
-    "X+",
     "Bc",
     "XP",
     "Np",
@@ -504,6 +604,7 @@ impl<'a> Reader<'a> {
             to_doc: None,
             cropmarks: None,
             artboards: Vec::new(),
+            variables: VariableLibrary::default(),
             gradients: HashMap::new(),
             gradient_def: None,
             instance: None,
@@ -529,6 +630,8 @@ impl<'a> Reader<'a> {
             hidden_ids: HashSet::new(),
             clip_fills: HashSet::new(),
             looks: HashSet::new(),
+            compound_groups: HashSet::new(),
+            text_looks: HashSet::new(),
             group_ended: false,
             layer_state: None,
             styles: HashMap::new(),
@@ -785,7 +888,16 @@ impl<'a> Reader<'a> {
             self.ensure_space();
         }
         let base = if matches!(kind, Kind::Obj(_)) { self.stack.len() } else { self.frames.last().map_or(0, |f| f.base) };
-        self.frames.push(Frame { kind, children: Vec::new(), hidden, after: self.after_object, gs: self.gs.clone(), base, clips: Vec::new() });
+        self.frames.push(Frame {
+            kind,
+            children: Vec::new(),
+            hidden,
+            after: self.after_object,
+            gs: self.gs.clone(),
+            base,
+            clips: Vec::new(),
+            compound_members: false,
+        });
         self.after_object = false;
         Ok(())
     }
@@ -836,7 +948,7 @@ impl<'a> Reader<'a> {
             "*U" => self.close(what, |k| matches!(k, Kind::Compound))?,
             _ => self.close(what, |k| matches!(k, Kind::Clip))?,
         };
-        let Frame { kind, children: kids, gs, clips, hidden: opened_hidden, .. } = f;
+        let Frame { kind, children: kids, gs, clips, hidden: opened_hidden, compound_members, .. } = f;
         // A group holding only clipping paths (`q … u <path> W n U … Q`) doesn't clip on its own: `u`/`U` don't save
         // the graphics state as `q`/`Q` do, so its paths clip the clipping group around it, as the file's PDF part draws it.
         if matches!(kind, Kind::Group)
@@ -858,7 +970,9 @@ impl<'a> Reader<'a> {
         let mut painted = None;
         let node = match kind {
             // A compound path holding a group (its drawn look) is that look: its paths paint apart.
-            Kind::Compound if kids.iter().any(|k| self.looks.contains(&k.id)) => {
+            // Some files mark every group so, the plain one holding the subpaths too (#980): one
+            // paint for all its paths keeps it one compound path, its holes cut.
+            Kind::Compound if kids.iter().any(|k| self.looks.contains(&k.id) && paints_apart(k)) => {
                 let (children, clip) = self.clip_first(kids, &clips);
                 self.new_node(NodeKind::Group { children, clip }, &gs)
             }
@@ -878,6 +992,9 @@ impl<'a> Reader<'a> {
         };
         if clipping && let Some(f) = self.frames.last_mut() {
             f.clips.push(f.children.len());
+        }
+        if compound_members {
+            self.compound_groups.insert(node.id);
         }
         self.add(node, opened_hidden || hidden)?;
         if let Some(p) = painted {
@@ -994,6 +1111,16 @@ impl<'a> Reader<'a> {
                 return Ok(());
             }
             ";" => return self.end_obj(),
+            "X=" => {
+                if !matches!(self.frames.last(), Some(Frame { kind: Kind::Obj(o), .. }) if o.ty == "Mask") {
+                    // `X=` also introduces legacy text frame art, read by `text_frames`.
+                    return Ok(());
+                }
+                self.end_path_quietly();
+                return self.open(Kind::Mask, hidden);
+            }
+            "X+" if self.frames.iter().any(|f| matches!(f.kind, Kind::Mask)) => return self.end_mask(),
+            "X+" => return Ok(()),
             _ => {}
         }
         // What follows an object (its name, transparency and style) ends with anything else. The
@@ -1105,6 +1232,19 @@ impl<'a> Reader<'a> {
                 }
             }
             "d" => self.dash(&vals),
+            "D" => {
+                // The published Adobe Illustrator File Format Specification (version 3.0), §6.8,
+                // permits `u` groups of compound members.
+                // Their explicit winding declarations describe subpaths, not separate paints;
+                // modern streams can also end these groups with `9 () XW`.
+                let n = self.frames.len();
+                if n >= 2
+                    && self.frames.get(n - 2).is_some_and(|f| matches!(f.kind, Kind::Compound))
+                    && let Some(f) = self.frames.last_mut().filter(|f| matches!(f.kind, Kind::Group))
+                {
+                    f.compound_members = true;
+                }
+            }
             // Transparency and state.
             "Xy" => self.transparency(&vals),
             // A group's own state (`Xd`, `6 () XW`) without an `Xy` keeps the current transparency, as
@@ -1224,6 +1364,23 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
+    /// Capture mask art in document coordinates, without adding it to the owner's siblings.
+    fn end_mask(&mut self) -> Result<(), String> {
+        self.end_path_quietly();
+        let f = self.close("X+", |k| matches!(k, Kind::Mask))?;
+        let (children, clip) = self.clip_first(f.children, &f.clips);
+        let art = self.new_node(NodeKind::Group { children, clip }, &f.gs);
+        self.gs = f.gs;
+        self.after_object = f.after;
+        let Some(Frame { kind: Kind::Obj(o), .. }) = self.frames.last_mut() else {
+            return Err("mask art ends outside a mask dictionary".into());
+        };
+        if o.art.replace(Arc::new(art)).is_some() {
+            return Err("a mask has more than one art block".into());
+        }
+        Ok(())
+    }
+
     /// `;`: the innermost dictionary closes.
     fn end_obj(&mut self) -> Result<(), String> {
         if !matches!(self.frames.last(), Some(Frame { kind: Kind::Obj(_), .. })) {
@@ -1266,6 +1423,9 @@ impl<'a> Reader<'a> {
         let gs = self.gs.clone();
         let mut n = self.new_node(NodeKind::Group { children: vec![], clip: false }, &gs);
         n.name = Some(story.map_or_else(|| TEXT_SLOT.to_string(), |s| format!("{TEXT_SLOT}{s}:{frame}")));
+        // The type takes the state's transparency, as a path does; an `Xy` after it sets the slot's own.
+        n.opacity = gs.opacity;
+        n.blend = gs.blend;
         let hidden = self.obj_hidden;
         self.add(n, hidden)
     }
@@ -1371,6 +1531,29 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// Drop the object just read when it is an envelope's own mesh: a group on `%_` lines holding
+    /// only gradient meshes. Whether it was dropped.
+    fn drop_envelope_mesh(&mut self) -> bool {
+        fn only_meshes(n: &Node) -> bool {
+            match &n.kind {
+                NodeKind::Mesh(_) => true,
+                NodeKind::Group { children, .. } => !children.is_empty() && children.iter().all(|c| only_meshes(c)),
+                _ => false,
+            }
+        }
+        let Some(n) = self.last_object() else { return false };
+        let id = n.id;
+        if !matches!(n.kind, NodeKind::Group { .. }) || !only_meshes(n) || !self.hidden_ids.contains(&id) {
+            return false;
+        }
+        if let Some(f) = self.frames.last_mut() {
+            f.children.pop();
+        }
+        self.hidden_ids.remove(&id);
+        self.after_object = false;
+        true
+    }
+
     /// Do the layers being read show?
     fn shown(&self) -> bool {
         self.frames.iter().all(|f| !matches!(&f.kind, Kind::Layer(a) if !a.visible))
@@ -1379,13 +1562,25 @@ impl<'a> Reader<'a> {
     /// An object's dictionary: its name (`AIArtName`, or the XML id `AI10_ArtUID`), and the
     /// opacity mask it may carry.
     fn art_dictionary(&mut self, o: &Obj) {
-        // A mask (`/Mask`, keyed `AI9_Mask`): its art is on `X=` … `X+` lines, and drawing the
-        // object without it shows what the mask hides, so it must be named (#2004). A mask that
-        // is disabled changes nothing.
-        if let Some(mask) = o.obj("AI9_Mask").or_else(|| o.obj("Mask"))
-            && mask.nums("Disabled").first().copied() != Some(1.0)
-        {
-            self.unreadable("opacity masks");
+        // An envelope (a distortion, `AIDeformStyle` / `DeformValue`) is written on `%_` lines as
+        // a group holding the mesh that shapes it; the distorted art the file's PDF part draws
+        // follows on plain lines. That mesh isn't art, so it goes (#2405).
+        if (o.get("AIDeformStyle").is_some() || o.get("DeformValue").is_some()) && self.drop_envelope_mesh() {
+            return;
+        }
+        if let Some(mask) = o.obj("AI9_Mask").or_else(|| o.obj("Mask")) {
+            if let Some(art) = &mask.art {
+                let on = |key: &str| mask.nums(key).first().copied() == Some(1.0);
+                let value =
+                    OpacityMask { art: art.clone(), clip: on("Clipping"), invert: on("Inverted"), disabled: on("Disabled"), linked: on("Linked") };
+                if let Some(n) = self.last_object().filter(|n| !matches!(n.kind, NodeKind::Layer { .. })) {
+                    n.extras_mut().mask = Some(Box::new(value));
+                } else if !on("Disabled") {
+                    self.unreadable("opacity masks without an owning object");
+                }
+            } else if mask.nums("Disabled").first().copied() != Some(1.0) {
+                self.unreadable("opacity masks without readable art");
+            }
         }
         let name = match o.text("AIArtName") {
             Some(name) => name,
@@ -1403,8 +1598,10 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// The `/Document` dictionary: the artboards.
+    /// The `/Document` dictionary: the artboards, and how many variables and data sets its variable
+    /// library has.
     fn document(&mut self, o: &Obj) {
+        variable_library(o, 0, &mut self.variables);
         let Some(list) = find_entry(o, "ArtboardArray", 0) else { return };
         for (i, ab) in list.items().enumerate().take(1000) {
             let (p1, p2) = (ab.nums("PositionPoint1"), ab.nums("PositionPoint2"));
@@ -1542,7 +1739,11 @@ impl<'a> Reader<'a> {
         let style = vals.iter().rev().find_map(V::text).unwrap_or_default();
         let after = std::mem::take(&mut self.after_object);
         if code == 9.0
-            && let Some(look) = self.frames.last().and_then(|f| f.children.last()).filter(|n| matches!(n.kind, NodeKind::Group { .. }))
+            && let Some(look) = self
+                .frames
+                .last()
+                .and_then(|f| f.children.last())
+                .filter(|n| matches!(n.kind, NodeKind::Group { .. }) && !self.compound_groups.contains(&n.id))
         {
             self.looks.insert(look.id);
         }
@@ -1557,6 +1758,7 @@ impl<'a> Reader<'a> {
         // The look is a group of paths, or one image where an effect (a blur, a shadow) rasterizes it.
         if !self.hidden_ids.contains(&object.id)
             || self.hidden_ids.contains(&look.id) != hidden
+            || self.text_looks.contains(&look.id)
             || !matches!(look.kind, NodeKind::Group { clip: false, .. } | NodeKind::Image(_))
         {
             return;
@@ -1574,7 +1776,7 @@ impl<'a> Reader<'a> {
             return;
         }
         let is_text = slot_of(object.name.as_deref()).is_some();
-        let Some(object) = f.children.pop() else { return };
+        let Some(mut object) = f.children.pop() else { return };
         let Some(look) = f.children.last_mut() else { return };
         // Inside a copy on `%_` lines everything is, so nothing tells the look's own copies apart.
         if !hidden {
@@ -1582,11 +1784,27 @@ impl<'a> Reader<'a> {
         }
         if is_text {
             // A text object stays the type it is: over what else its look draws, or in place of a
-            // look that was only its type.
-            if look.children().is_some_and(|c| c.is_empty()) {
-                *look = object;
-            } else {
-                f.children.push(object);
+            // look that was only its type. Its transparency is written on its look.
+            let empty = look.children().is_some_and(|c| c.is_empty());
+            if empty || (look.opacity >= 1.0 && look.blend == BlendMode::Normal && !look.isolate) {
+                (object.opacity, object.blend, object.isolate, object.knockout) = (look.opacity, look.blend, look.isolate, look.knockout);
+                if empty {
+                    *look = object;
+                } else {
+                    f.children.push(object);
+                }
+                return;
+            }
+            // The look and the type go into a group that has the transparency.
+            let Some(mut look) = f.children.pop() else { return };
+            let state = (look.opacity, look.blend, look.isolate, look.knockout);
+            (look.opacity, look.blend, look.isolate, look.knockout) = (1.0, BlendMode::Normal, false, Knockout::Neutral);
+            (object.opacity, object.blend, object.isolate) = (1.0, BlendMode::Normal, false);
+            let mut group = Node::group(self.doc.alloc_id(), vec![Arc::new(look), Arc::new(object)]);
+            (group.opacity, group.blend, group.isolate, group.knockout) = state;
+            self.text_looks.insert(group.id);
+            if let Some(f) = self.frames.last_mut() {
+                f.children.push(group);
             }
             return;
         }
@@ -1794,9 +2012,15 @@ impl<'a> Reader<'a> {
     /// An image of operands `vals` and samples `data`.
     fn image_from(&mut self, vals: Vec<V>, data: &[u8]) -> Result<(), String> {
         let space = self.raster.as_ref().and_then(|r| r.space.clone()).unwrap_or_default();
-        let Some(m) = vals.iter().find_map(|v| if let V::Arr(a) = v { Some(Self::nums(a)) } else { None }) else { return Ok(()) };
+        let Some(m) = vals.iter().find_map(|v| if let V::Arr(a) = v { Some(Self::nums(a)) } else { None }) else {
+            self.warn("an image VectorCraft can't read was left out");
+            return Ok(());
+        };
         let n = Self::nums(&vals);
-        let [_, _, _, _, w, h, bits, kind, alpha, _, binary, ..] = n.as_slice() else { return Ok(()) };
+        let [_, _, _, _, w, h, bits, kind, alpha, _, binary, ..] = n.as_slice() else {
+            self.warn("an image VectorCraft can't read was left out");
+            return Ok(());
+        };
         let (w, h) = (*w as u64, *h as u64);
         if w == 0 || h == 0 || w.saturating_mul(h) > MAX_PIXELS || ![1.0, 8.0].contains(bits) {
             self.warn("an image VectorCraft can't read was left out");
@@ -1862,7 +2086,10 @@ impl<'a> Reader<'a> {
                 rgba.extend_from_slice(&[px[0], px[1], px[2], a]);
             }
         }
-        let Some(img) = image::RgbaImage::from_raw(w as u32, h as u32, rgba) else { return Ok(()) };
+        let Some(img) = image::RgbaImage::from_raw(w as u32, h as u32, rgba) else {
+            self.warn("an image VectorCraft can't read was left out");
+            return Ok(());
+        };
         let mut png = vec![];
         if img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).is_err() {
             self.warn("an image VectorCraft can't read was left out");
@@ -1878,10 +2105,14 @@ impl<'a> Reader<'a> {
         // The matrix is an art-space matrix (y up) applied to the pixels with their rows running
         // downwards, (u, -v): pixels → (u, -v) → art space. Flipping the matrix's result instead
         // gives the same place only when the image isn't rotated (b = c = 0).
-        let [a, b, c, d, tx, ty] = m else { return Ok(()) };
+        let [a, b, c, d, tx, ty] = m else {
+            self.warn("an image VectorCraft can't read was left out");
+            return Ok(());
+        };
         let to_doc = self.space();
         let xf = to_doc * Affine::new([*a, *b, *c, *d, *tx, *ty]) * FLIP;
         if !xf.as_coeffs().iter().all(|v| v.is_finite()) || xf.determinant().abs() < 1e-12 {
+            self.warn("an image VectorCraft can't read was left out");
             return Ok(());
         }
         let mask = alpha.and_then(|a| self.alpha_mask(a, w, h, xf));
@@ -2063,6 +2294,7 @@ impl<'a> Reader<'a> {
                 self.drawn_looks
             ));
         }
+        warnings.extend(self.variables.note());
         Ok(Structure {
             doc,
             to_doc,
@@ -2138,6 +2370,19 @@ fn ungrouped(kids: Vec<Node>) -> Vec<Node> {
     out
 }
 
+/// Whether `look`'s paths don't all paint the same.
+fn paints_apart(look: &Node) -> bool {
+    fn leaves<'a>(n: &'a Node, out: &mut Vec<&'a Node>) {
+        match &n.kind {
+            NodeKind::Group { children, .. } => children.iter().for_each(|c| leaves(c, out)),
+            _ => out.push(n),
+        }
+    }
+    let mut paths = vec![];
+    leaves(look, &mut paths);
+    paths.windows(2).any(|w| matches!(w, [a, b] if a.appearance != b.appearance))
+}
+
 fn path_rule(n: &Node) -> FillRule {
     match &n.kind {
         NodeKind::Path { rule, .. } | NodeKind::Compound { rule, .. } => *rule,
@@ -2183,6 +2428,35 @@ fn find_entry<'o>(o: &'o Obj, key: &str, depth: usize) -> Option<&'o Obj> {
         return None;
     }
     o.obj(key).or_else(|| o.entries.iter().flat_map(|(_, v)| v.iter()).filter_map(V::obj).find_map(|c| find_entry(c, key, depth + 1)))
+}
+
+/// Add the variables and data sets of the variable libraries in `o` or the dictionaries it holds
+/// (see [`VariableLibrary`]) to `found`.
+fn variable_library(o: &Obj, depth: usize, found: &mut VariableLibrary) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    if o.ty == "XMLNode" && element_name(o).as_deref() == Some("variableSets") {
+        for set in elements(o, "variableSet") {
+            found.variables += elements(set, "variables").flat_map(|v| elements(v, "variable")).count();
+            found.data_sets += elements(set, "sampleDataSets").flat_map(|d| elements(d, "sampleDataSet")).count();
+        }
+        return;
+    }
+    for c in o.items() {
+        variable_library(c, depth + 1, found);
+    }
+}
+
+/// The name of the XML node `o` (its `xmlnode-nodename`) without a namespace prefix (`v:`).
+fn element_name(o: &Obj) -> Option<String> {
+    let name = o.text("xmlnode-nodename")?;
+    Some(name.rsplit(':').next().unwrap_or(&name).to_string())
+}
+
+/// The child nodes named `name` (see [`element_name`]) of the XML node `o`.
+fn elements<'o>(o: &'o Obj, name: &'o str) -> impl Iterator<Item = &'o Obj> {
+    o.obj("xmlnode-children").into_iter().flat_map(Obj::items).filter(move |c| c.ty == "XMLNode" && element_name(c).as_deref() == Some(name))
 }
 
 /// A placed file's preview as a PNG, with its size: `w h rowBytes 32 n ` (each number followed by

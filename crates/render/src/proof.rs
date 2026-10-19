@@ -12,7 +12,7 @@
 //!   the working profile. Bitmap previews are cached by ink selection and colour settings.
 //! * **Overprint Preview** (and Separations Preview, which implies it): fills and strokes that
 //!   overprint ([`vectorcraft_doc::FillLayer::overprint`], characters' too) are drawn with
-//!   Multiply, which approximates their inks printing over the inks below: a zero ink lets the
+//!   Darken, which approximates their inks printing over the inks below: a zero ink lets the
 //!   inks below show through, where a knockout would replace them.
 //!
 //! The app's current view state lives in [`view`] / [`set_view`]; the canvas copies it into
@@ -27,7 +27,7 @@ pub use vectorcraft_color::cms::{Intent, ProofSetup, ProofTarget};
 use vectorcraft_color::{Color, Swatch, SwatchGroup};
 use vectorcraft_doc::inks::visit_paint;
 pub use vectorcraft_doc::inks::{Inks, Link, Plate, inks, map_document_colors, map_node_colors, plates, spot_color};
-use vectorcraft_doc::overprint::multiply_overprints;
+use vectorcraft_doc::overprint::darken_overprints;
 use vectorcraft_doc::{Document, Node, NodeId, Shared};
 
 use crate::RenderOptions;
@@ -112,8 +112,8 @@ impl PartialEq for Plates {
     }
 }
 
-/// What [`prepare`] does to the fills and strokes of each node: overprinting ones multiply
-/// ([`multiply_overprints`]), and with Separations Preview every color shows as the visible plates
+/// What [`prepare`] does to the fills and strokes of each node: overprinting ones darken
+/// ([`darken_overprints`]), and with Separations Preview every color shows as the visible plates
 /// print it ([`plate_color`]).
 struct How<'a> {
     doc: &'a Document,
@@ -137,7 +137,7 @@ impl How<'_> {
     /// Change the fills, strokes and other colors of node `a`, which holds no members.
     fn apply(&self, a: &mut Arc<Node>) {
         if self.multiply {
-            multiply_overprints(a, self.discard_white);
+            darken_overprints(a, self.discard_white);
         } else if let Some((c, proof, visible)) = self.plates.filter(|_| self.drop_hidden) {
             self.drop_hidden_plate_paints(a, c, proof, visible);
         }
