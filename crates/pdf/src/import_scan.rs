@@ -232,6 +232,9 @@ pub(crate) fn text_string(b: &[u8]) -> String {
 /// One page as the interpreter walks it.
 #[derive(Default)]
 pub(crate) struct Scan {
+    /// A page/form resource scope declares a Gray substitution. Editable image
+    /// import must not relabel its converted preview as uncalibrated DeviceGray.
+    pub gray_override: bool,
     /// Each marked-content sequence: its tag ([`tag_key`]) and the group (index into
     /// [`Ocgs::list`]) it marks.
     pub tags: Vec<(u64, Option<usize>)>,
@@ -846,6 +849,11 @@ impl Walker<'_, '_> {
     }
 
     fn note_fonts(&mut self, res: &Resources<'_>) {
+        let mut scope = Some(res);
+        while let Some(resources) = scope {
+            self.out.gray_override |= resources.color_spaces.contains_key(b"DefaultGray");
+            scope = resources.parent();
+        }
         for key in res.fonts.keys() {
             if let Some(f) = res.fonts.get::<Dict<'_>>(key.as_ref())
                 && let Some(name) = f.get::<Name<'_>>(b"BaseFont")

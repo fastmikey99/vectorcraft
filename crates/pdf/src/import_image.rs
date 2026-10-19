@@ -15,6 +15,26 @@ use vectorcraft_doc::cmyk::{Inks, MAX_CMYK_PIXELS, jpeg_components};
 /// A CMYK image read as RGB: why.
 pub(crate) const UNREAD: &str = "CMYK images whose samples couldn't be read in CMYK were imported in RGB";
 
+/// Only explicit device-Gray bases qualify for a Gray working image. Neutral
+/// RGB, calibrated/ICC Gray and a Separation named Black are different spaces.
+/// Resource substitutions and nested mask/pattern interpretation are excluded
+/// by the caller; this predicate never resolves an arbitrary colour-space name.
+pub(crate) fn device_gray(st: &Stream<'_>) -> bool {
+    let d = st.dict();
+    if d.contains_key(b"ColorSpace") && d.contains_key(b"CS") {
+        return false;
+    }
+    let cs = key(d, b"ColorSpace", b"CS");
+    if let Some(n) = d.get::<Name<'_>>(cs) {
+        return matches!(n.as_ref(), b"DeviceGray" | b"G");
+    }
+    let Some(a) = d.get::<Array<'_>>(cs) else { return false };
+    let mut it = a.flex_iter();
+    a.iter::<Object<'_>>().take(5).count() == 4
+        && it.next::<Name<'_>>().is_some_and(|n| matches!(n.as_ref(), b"Indexed" | b"I"))
+        && it.next::<Name<'_>>().is_some_and(|n| matches!(n.as_ref(), b"DeviceGray" | b"G"))
+}
+
 /// The Decode array of a JPEG kept as it is.
 const INVERTED: [(f32, f32); 4] = [(1.0, 0.0); 4];
 

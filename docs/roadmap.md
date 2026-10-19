@@ -468,3 +468,9 @@ All nine CI gates, 229 checker tests, 345 PDF tests and 652 native/WASI cases pa
 Prepared single-image continuity now accepts exact Indexed DeviceGray/DeviceCMYK bases, lossless palette/index remapping and equivalent direct encodings while retaining original replay, sample/alpha/grid and route/placement gates. Actual decoded base identity is separate from OPM semantics and never inferred from named colourants.
 
 All nine CI gates, 232 checker tests, 345 PDF tests and 678 native/WASI cases pass; 607 inherited verdicts and denominators stay unchanged. New controls include 24 source-continuity cases, twelve actual interpreter positives with identical equivalent-encoding pixels, and twelve changed-pixel negatives. Codex implementation and harness reviews found no material findings. The full agreed checker remains unfinished; broader colour/preparation/compositing, numerical and production/runtime qualification gaps remain. Headline parity/readiness estimates are unchanged.
+
+## HC38 — Preserve Gray samples through editor save (2026-10-20)
+
+Fresh browser qualification exposed Indexed DeviceGray being saved as RGB, with different independent print planes. Explicit device-Gray images now retain Gray/GrayAlpha working samples, guarded against resource substitutions and cache reuse across incompatible scopes. Before/after saved-PDF comparisons at two resolutions verify the fix; calibrated/named/RGB sources are not inferred to be DeviceGray.
+
+All nine CI gates, 349 PDF tests and 232 checker tests pass. Current core native/WASI and the full frozen 1,910-case recipe catalogue are replayed. Codex found no material issues; additional cache/source-exclusion tests close its principal verification gap. Source preparation identity changes require fresh original replay. Broader clip/opacity-group and full production qualification remain open; headline readiness/parity estimates are unchanged.

@@ -1854,6 +1854,25 @@ fn rgba_png(rgba: Vec<u8>, w: u32, h: u32) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Retain a known device-Gray image as Gray (with its existing decoded alpha),
+/// rather than expanding it into an RGB PNG. A non-neutral decoded preview is
+/// never coerced to Gray. The source-space decision is made before this helper.
+fn device_gray_png(rgba: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
+    let (pixels, tail) = rgba.as_chunks::<4>();
+    if !tail.is_empty() || pixels.len() as u64 != u64::from(w) * u64::from(h) || pixels.iter().any(|p| p[0] != p[1] || p[0] != p[2]) {
+        return None;
+    }
+    let mut out = Vec::new();
+    if pixels.iter().all(|p| p[3] == 255) {
+        let img = image::GrayImage::from_raw(w, h, pixels.iter().map(|p| p[0]).collect())?;
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).ok()?;
+    } else {
+        let img = image::GrayAlphaImage::from_raw(w, h, pixels.iter().flat_map(|p| [p[0], p[3]]).collect())?;
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).ok()?;
+    }
+    Some(out)
+}
+
 fn resize_alpha(a: &LumaData, w: u32, h: u32) -> Vec<u8> {
     if a.width == w && a.height == h {
         return a.data.clone();
@@ -2083,6 +2102,7 @@ impl<'a> Device<'a> for Builder<'_> {
                 let key = craft_pdf::interpret::CacheKey::cache_key(&r) ^ if white { WHITE_KEY } else { 0 };
                 let st = r.stream();
                 let (w, h) = (r.width(), r.height());
+                let gray = !white && self.nested == 0 && !self.scan.gray_override && crate::import_image::device_gray(st);
                 // CMYK images keep their samples (read once per image).
                 let known = !white && self.cmyk_keys.contains(&key);
                 let cmyk = if known || white {
@@ -2135,7 +2155,19 @@ impl<'a> Device<'a> for Builder<'_> {
                     return;
                 };
                 let xf = transform * Affine::scale_non_uniform(sf.0 as f64, sf.1 as f64);
-                self.add_image(key, || rgba_png(rgba, w, h).map(|png| (ImageBlob::new("image/png", png), w, h)), xf);
+                // The same stream can occur in scopes with different resource
+                // substitutions. Keep the Gray and preview-RGB cache entries separate.
+                let key = key ^ if gray { 0x6772_6179_7072_6573_6572_7665 } else { 0 };
+                self.add_image(
+                    key,
+                    || {
+                        gray.then(|| device_gray_png(&rgba, w, h))
+                            .flatten()
+                            .or_else(|| rgba_png(rgba, w, h))
+                            .map(|png| (ImageBlob::new("image/png", png), w, h))
+                    },
+                    xf,
+                );
             }
             Image::Stencil(s) => {
                 let white = self.white_images;
