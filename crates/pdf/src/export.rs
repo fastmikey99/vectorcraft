@@ -580,6 +580,50 @@ fn to_path(s: &Surface, bp: &BezPath) -> Option<Path> {
     pb.finish()
 }
 
+/// The sixteen tensor-product control points a Coons patch `cp` (in its PDF order) equals: its
+/// twelve boundary points and the four inner ones ISO 32000-1 §8.7.4.5.8 derives from them.
+pub(crate) fn coons_net(cp: &[kurbo::Point; 12]) -> [kurbo::Point; 16] {
+    // p[i][j]: i along v (cp0 → cp3), j along u (cp0 → cp9).
+    let p = |i: usize, j: usize| -> kurbo::Vec2 {
+        let k = match (i, j) {
+            (0, 0) => 0,
+            (1, 0) => 1,
+            (2, 0) => 2,
+            (3, 0) => 3,
+            (3, 1) => 4,
+            (3, 2) => 5,
+            (3, 3) => 6,
+            (2, 3) => 7,
+            (1, 3) => 8,
+            (0, 3) => 9,
+            (0, 2) => 10,
+            _ => 11, // (0, 1)
+        };
+        cp[k].to_vec2()
+    };
+    let inner = |a: (usize, usize),
+                 n1: (usize, usize),
+                 n2: (usize, usize),
+                 f1: (usize, usize),
+                 f2: (usize, usize),
+                 m1: (usize, usize),
+                 m2: (usize, usize),
+                 o: (usize, usize)| {
+        ((-4.0 * p(a.0, a.1) + 6.0 * (p(n1.0, n1.1) + p(n2.0, n2.1)) - 2.0 * (p(f1.0, f1.1) + p(f2.0, f2.1)) + 3.0 * (p(m1.0, m1.1) + p(m2.0, m2.1))
+            - p(o.0, o.1))
+            / 9.0)
+            .to_point()
+    };
+    let p11 = inner((0, 0), (0, 1), (1, 0), (0, 3), (3, 0), (3, 1), (1, 3), (3, 3));
+    let p12 = inner((0, 3), (0, 2), (1, 3), (0, 0), (3, 3), (3, 2), (1, 0), (3, 0));
+    let p21 = inner((3, 0), (3, 1), (2, 0), (3, 3), (0, 0), (0, 1), (2, 3), (0, 3));
+    let p22 = inner((3, 3), (3, 2), (2, 3), (3, 0), (0, 3), (0, 2), (2, 0), (0, 0));
+    let mut out = [kurbo::Point::ZERO; 16];
+    out[..12].copy_from_slice(cp);
+    out[12..].copy_from_slice(&[p11, p12, p21, p22]);
+    out
+}
+
 /// The meshes of `children` when every one is a plain gradient mesh — visible, opaque, normal
 /// blending, no mask, effects or appearance of its own — that is, art a single shading draws the
 /// same; else none.
@@ -1109,21 +1153,26 @@ impl Exporter<'_> {
         if valid.is_empty() || valid.len() != meshes.len() {
             return false;
         }
-        // One colour space for every corner, as for gradient stops: mixed models go through RGB,
-        // or stay CMYK in a CMYK document, where `col` separates the rest.
-        let corners = || valid.iter().flat_map(|m| m.points.iter().map(|p| p.color));
-        let first = corners().next().map(|c| c.model());
-        let mixed = corners().any(|c| Some(c.model()) != first);
+        // Several meshes are one shading only when they are opaque: a later patch replaces an
+        // earlier one inside a shading, so translucent ones overlapping would lose what is under
+        // them (each is then written on its own, with its soft mask, as Illustrator writes them).
+        if valid.len() > 1 && valid.iter().any(|m| m.points.iter().any(|p| p.opacity < 1.0)) {
+            return false;
+        }
         let cmyk_doc = self.doc.color_mode == vectorcraft_doc::ColorMode::Cmyk;
-        let one = |c: Color| match c {
-            Color::Cmyk { .. } if cmyk_doc => c,
-            _ if mixed => c.in_model(vectorcraft_color::cms::Model::Rgb),
-            _ => c,
-        };
         let mut patches = Vec::new();
         let mut bounds: Option<Rect> = None;
         let mut space = None;
         for m in valid {
+            // One colour space for a mesh's corners, as for gradient stops: mixed models go
+            // through RGB, or stay CMYK in a CMYK document, where `col` separates the rest. Meshes
+            // whose written colours then differ in model stay separate shadings.
+            let mixed = m.points.iter().any(|p| p.color.model() != m.points[0].color.model());
+            let one = |c: Color| match c {
+                Color::Cmyk { .. } if cmyk_doc => c,
+                _ if mixed => c.in_model(vectorcraft_color::cms::Model::Rgb),
+                _ => c,
+            };
             let out: Vec<Color> = m.points.iter().map(|p| self.col_out(&one(p.color))).collect();
             // The PDF writer needs one colour space for the whole shading.
             if out.iter().any(|c| c.model() != out[0].model()) || space.is_some_and(|m| m != out[0].model()) {
@@ -1154,7 +1203,9 @@ impl Exporter<'_> {
                     if !in_range(&cp.iter().flat_map(|p| [p.x, p.y]).collect::<Vec<_>>()) {
                         return false;
                     }
-                    for p in cp {
+                    // The twelve boundary points don't bound a folded patch: the tensor-product net
+                    // that the patch equals does (a Bézier surface lies inside its control net).
+                    for p in coons_net(&cp) {
                         bounds = Some(bounds.map_or(Rect::from_points(p, p), |b| b.union_pt(p)));
                     }
                     patches.push(MeshPatch {
