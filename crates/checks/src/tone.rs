@@ -35,7 +35,7 @@ pub(crate) fn source_tones(paint: &crate::pdf::PaintedObject, source: &vectorcra
     use vectorcraft_pdf::PrintColorSpace;
     let mut values = tones(&paint.paint, paint.ink.as_deref())?;
     let model = paint.paint.get("color").and_then(|c| c.get("model")).and_then(Value::as_str);
-    match source.color_space {
+    let decoded = match source.color_space {
         PrintColorSpace::DeviceCmyk if paint.ink.is_none() && model == Some("cmyk") => Ok(values),
         PrintColorSpace::DeviceGray if paint.ink.is_none() && model == Some("gray") => Ok(values),
         PrintColorSpace::Separation | PrintColorSpace::DeviceN => {
@@ -62,8 +62,38 @@ pub(crate) fn source_tones(paint: &crate::pdf::PaintedObject, source: &vectorcra
             }
             Ok(values)
         }
-        _ => Err("Original colour space/profile needs a qualified tonal prediction".into()),
+        _ => Err(String::from("Original colour space/profile needs a qualified tonal prediction")),
+    }?;
+    let components = source.components.as_ref().ok_or("Raw colour components are unavailable")?;
+    if components.iter().any(|v| !v.is_finite() || !(0.0..=1.0).contains(v)) {
+        return Err("Raw colour components exceed the supported unit interval".into());
     }
+    let raw: BTreeMap<String, f64> = match source.color_space {
+        PrintColorSpace::DeviceCmyk if components.len() == 4 => {
+            ["Cyan", "Magenta", "Yellow", "Black"].into_iter().map(String::from).zip(components.iter().copied()).collect()
+        }
+        PrintColorSpace::DeviceGray if components.len() == 1 => {
+            let gray = components.first().copied().ok_or("Raw gray component missing")?;
+            BTreeMap::from([("Cyan".into(), 0.0), ("Magenta".into(), 0.0), ("Yellow".into(), 0.0), ("Black".into(), 1.0 - gray)])
+        }
+        PrintColorSpace::Separation | PrintColorSpace::DeviceN if components.len() == source.colorants.len() => {
+            source.colorants.iter().cloned().zip(components.iter().copied()).collect()
+        }
+        _ => return Err("Raw colour component count differs from the decoded source space".into()),
+    };
+    if raw.len() != decoded.len()
+        || raw.iter().any(|(name, expected)| {
+            decoded.get(name).is_none_or(|actual| {
+                !actual.is_finite()
+                    || (actual - expected).abs() > DECODED_COLOUR_ENVELOPE
+                    || (*actual == 0.0) != (*expected == 0.0)
+                    || (*actual == 1.0) != (*expected == 1.0)
+            })
+        })
+    {
+        return Err("Decoded paint colour differs from the original PDF components".into());
+    }
+    Ok(decoded)
 }
 
 /// Result of one opaque paint on one physical ink. None means unchanged.

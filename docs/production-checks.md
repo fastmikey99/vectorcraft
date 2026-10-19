@@ -1,6 +1,6 @@
 # Recipe-driven production checks
 
-Status: 19 October 2026, implementation in progress. This is not a qualified production-release checker. Existing parity scores and estimates are unchanged.
+Status: 20 October 2026, implementation in progress. This is not a qualified production-release checker. Existing parity scores and estimates are unchanged.
 
 `vectorcraft-checks` provides a shared, headless Rust contract and measurement core. The editor exposes it through `production.checks.configure`, `production.checks.run`, cancellation and finding selection. The Checks panel shows the full obligation denominator, expected and measured evidence, unresolved work, validity and page-local finding locations. Preview visibility cannot change a request's obligations.
 
@@ -272,3 +272,15 @@ Codex replaced Fable/Opus for reviews at the user's request. Verified findings a
 Local Chrome verification passes for the current-engine Check/Save workflow and the actual recipe editor: the mapping warning remains visible while a valid unchanged synthetic recipe remains eligible for publication. Native accessibility controls and screenshots were used; no Playwright. These are synthetic local workflows, not deployed publication or full production lifecycle qualification. An earlier-engine worker run had one cleanup AggregateError; its evidence is retained, an isolated retry passed, and the complete final pinned worker replay passed. Its original cause remains unconfirmed. Current changes concern checker matching and Reporter validation; earlier renderer/performance evidence remains historical.
 
 The catalogue qualifies exact-ink/layer-family/overprint facets and label invariance, not source fidelity, geometry, isolated contributor ownership or whole recipes. Broader PDF/profile/codec support, numerical/topology certification, original preparation, six empty BP/SP regional foundations, approved manufacturing criteria, full runtime/RIP qualification and rollout remain open. No production-readiness score changes, migration, deployment or merge.
+
+## HC33 — original colour operands and exact named identities (2026-10-20)
+
+The raw PDF paint audit now retains original colour components, including initial/reset values and fill/stroke state across graphics saves, content windows and nested forms. Operand counts must match the active space. Named arrays reject non-name entries, duplicate decoded identities and names that cannot be represented losslessly; spelling, spacing and case are not normalized. Supported decoded tonal predictions must reconcile with the retained raw values before they can establish conformity. Ordinary editable import remains unchanged.
+
+The source dictionary has a 4,096-entry limit and a 4 MiB aggregate retained colourant-name limit, checked before copying. A candidate page can temporarily add another 4 MiB while it is checked against the accumulated report. These are audit bounds, not a general PDF-memory qualification.
+
+All nine Rust CI gates pass; focused checker/PDF suites pass 217/344 tests. The 607 inherited native/WASI cases agree exactly with zero finding-status or denominator changes from HC32. Thirty-two original raw-audit cases and two complete-report regressions bring the distinct current native/WASI inventory to 641. Twelve previously unreported malformed cases now carry explicit audit issues; the complete-report extra-operand case changes its three scoped facets from Pass to Incomplete. Nine actual-worker/database tests and isolated packaged-runtime loading pass. The portable qualification runner pins its complete manifest and input/output identities, rejects old summaries, and bounds both native and WASI execution/output; three adversarial harness tests pass, including an infinite-loop WASM timeout.
+
+Codex reviewed implementation, closure and the portable harness. Verified findings were fixed: aggregate name-copy amplification and unbounded WASI/version execution. Restoration/nested-form and downstream-verdict coverage was added. The closure review found no additional material implementation defect; subsequent harness fixes were verified by regression tests and the complete final replay. No Fable or Opus review was used. Before/after 50,000-path performance budget smoke results are retained; they are not a controlled comparative benchmark.
+
+The 1,910-case catalogue and Chrome lifecycle checks remain historical HC32 evidence. This checkpoint does not qualify broad DeviceN, profiles, transparency, full source preparation, numerical/topology acceptance, manufacturing limits, the six empty BP/SP foundations, the independent runtime/RIP or rollout. No production-readiness score change, migration, deployment or merge.

@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(kinds, [DeviceCmyk, Separation, DeviceN, Separation, DeviceCmyk]);
         assert_eq!(raw.sources[raw.source_indices[0][1]].colorants, ["Cyan"]);
         assert_eq!(raw.sources[raw.source_indices[0][2]].colorants, ["Cyan", "Magenta"]);
-        // DeviceCMYK with different overprint/OPM states has distinct raw identities.
+        // Original components and overprint/OPM states have distinct raw identities.
         assert_eq!(raw.sources.len(), 4);
         assert_eq!(
             raw.source_indices[0].iter().map(|i| (raw.sources[*i].overprint, raw.sources[*i].overprint_mode)).collect::<Vec<_>>(),
@@ -315,6 +315,96 @@ mod tests {
             assert_ne!(source.color_space, vectorcraft_pdf::PrintColorSpace::DeviceCmyk);
         }
     }
+    #[test]
+    fn named_colour_operand_count_cannot_be_repaired_into_a_proof() {
+        for content in [
+            "/Duo cs 1 scn 10 10 20 20 re f",
+            "/Duo cs 1 0 1 scn 10 10 20 20 re f",
+            "/Spot cs 1 0 scn 10 10 20 20 re f",
+            "/Alias cs 1 0 sc 10 10 20 20 re f",
+        ] {
+            let raw = vectorcraft_pdf::print_order(&source_pdf(content, 1, "")).unwrap();
+            assert!(raw.issues.iter().any(|s| s.contains("Colour component count")), "{content}: {:?}", raw.issues);
+        }
+    }
+    #[test]
+    fn source_tones_require_original_components_as_well_as_space_names() {
+        let c = captured(&source_pdf("/Duo cs 0.25 0.5 scn 10 10 20 20 re f", 1, ""));
+        let paint = c.paints.last().unwrap();
+        let source = &c.paint_sources[paint.source_space.unwrap()];
+        assert_eq!(source.components, Some(vec![0.25, 0.5]));
+        assert!(source_tones(paint, source).is_ok());
+        for components in [None, Some(vec![0.25]), Some(vec![0.5, 0.25]), Some(vec![0.0, 0.5]), Some(vec![f64::NAN, 0.5])] {
+            let mut changed = source.clone();
+            changed.components = components;
+            assert!(source_tones(paint, &changed).is_err());
+        }
+        let mut changed = paint.clone();
+        changed.paint["color"]["c"] = serde_json::json!(0.5);
+        assert!(source_tones(&changed, source).is_err());
+    }
+    #[test]
+    fn decoded_tones_match_raw_defaults_resets_forms_and_content_windows() {
+        let pad = "% bounded content-window control\n".repeat(3000);
+        let stream = format!(
+            "/Duo cs .25 .5 scn 10 10 2 2 re f q /Spot CS .75 SCN 1 w 10 10 m 30 30 l S Q {pad} /Duo cs 10 10 2 2 re f /Form Do /Duo CS .25 .5 SCN 10 10 m 30 30 l S /Duo CS 10 10 m 30 30 l S"
+        );
+        let c = captured(&source_pdf(&stream, 1, ""));
+        assert_eq!(c.paints.len(), 7);
+        for p in &c.paints {
+            let source = &c.paint_sources[p.source_space.unwrap()];
+            assert!(source_tones(p, source).is_ok(), "{source:?}: {:?}", p.paint);
+        }
+        let values: Vec<_> = c.paints.iter().map(|p| c.paint_sources[p.source_space.unwrap()].components.clone().unwrap()).collect();
+        assert_eq!(values, [vec![1.0; 4], vec![0.25, 0.5], vec![0.75], vec![1.0, 1.0], vec![0.0], vec![0.25, 0.5], vec![1.0, 1.0]]);
+    }
+
+    #[test]
+    fn nested_forms_restore_both_colour_spaces_and_components_before_painting() {
+        let page = "/D cs .2 .4 scn /D CS .6 .8 SCN 1 w q /S cs .5 scn /S CS .25 SCN /Outer Do Q 10 10 2 2 re B";
+        let outer = ".75 scn 10 10 2 2 re B /Inner Do 10 10 2 2 re B";
+        let inner = "/D cs .1 .9 scn /D CS .3 .7 SCN 10 10 2 2 re B";
+        let stream = |s: &str| format!("<< /Length {} >>\nstream\n{s}\nendstream", s.len());
+        let form = |s: &str| format!("<< /Type /XObject /Subtype /Form /BBox [0 0 72 72] /Length {} >>\nstream\n{s}\nendstream", s.len());
+        let bytes = crate::pdf::tests::objects_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Resources << /ColorSpace << /S [/Separation /Cyan /DeviceCMYK 5 0 R] /D [/DeviceN [/Cyan /Magenta] /DeviceCMYK 6 0 R] >> /XObject << /Outer 7 0 R /Inner 8 0 R >> >> /Contents 4 0 R >>".into(),
+            stream(page),
+            "<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 0 0 0] /N 1 >>".into(),
+            "<< /FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1 0 1] /Length 7 >>\nstream\n{ 0 0 }\nendstream".into(),
+            form(outer), form(inner),
+        ]);
+        let c = captured(&bytes);
+        let values: Vec<_> = c
+            .paints
+            .iter()
+            .map(|p| {
+                let source = &c.paint_sources[p.source_space.unwrap()];
+                assert!(source_tones(p, source).is_ok(), "{source:?}: {:?}", p.paint);
+                source.components.clone().unwrap()
+            })
+            .collect();
+        assert_eq!(values, [vec![0.75], vec![0.25], vec![0.1, 0.9], vec![0.3, 0.7], vec![0.75], vec![0.25], vec![0.2, 0.4], vec![0.6, 0.8]]);
+    }
+
+    #[test]
+    fn malformed_named_operands_keep_every_scoped_obligation_unresolved() {
+        for (extra, expected) in [("0.5 scn 10 10 2 2 re f", Status::Pass), ("0.5 0.5 scn 10 10 2 2 re f", Status::Incomplete)] {
+            let bytes = crate::pdf::tests::fixture_mode(true, 1, "Exact#20ink", extra, None);
+            let mut request = crate::tests::request();
+            request.identity.pdf_sha256 = crate::sha256(&bytes);
+            request.identity.recipe_sha256 = crate::digest(&request.recipe).unwrap();
+            let report = crate::pdf::check(&request, &bytes).unwrap();
+            assert_eq!(report.coverage.total, crate::enumerate(&request).unwrap().len());
+            for facet in ["identity", "layer", "overprint"] {
+                let key = format!("file/output/{facet}");
+                assert_eq!(report.findings.iter().find(|f| f.obligation.key == key).unwrap().status, expected, "{extra}: {key}");
+            }
+            assert_ne!(report.status, Status::Pass);
+        }
+    }
+
     #[test]
     fn default_space_substitution_is_not_assumed_to_be_direct_device_cmyk() {
         let raw = vectorcraft_pdf::print_order(&source_pdf("/Alias cs 0 0 0 0 sc 10 10 20 20 re f", 1, "/DefaultCMYK [/ICCBased 9 0 R]")).unwrap();
@@ -359,6 +449,12 @@ mod tests {
                     let mut wrong = c.clone();
                     let index = wrong.paints.last().unwrap().source_space.unwrap();
                     wrong.paint_sources[index].color_space = vectorcraft_pdf::PrintColorSpace::DeviceCmyk;
+                    // Inconsistent source metadata is now refused before pixel comparison.
+                    assert_eq!(compare(&wrong, &render, Some(0.6)).unwrap().status, Status::Incomplete);
+                    // Keep the older adversarial model check too: a coherently forged
+                    // direct-CMYK source must disagree with the real named-ink planes.
+                    let colour = &wrong.paints.last().unwrap().paint["color"];
+                    wrong.paint_sources[index].components = Some(["c", "m", "y", "k"].iter().map(|k| colour[k].as_f64().unwrap()).collect());
                     assert_eq!(compare(&wrong, &render, Some(0.6)).unwrap().status, Status::Fail, "wrong model {label}/{mode}/{dpi}");
                     wrong.paint_order_verified = false;
                     assert_eq!(compare(&wrong, &render, Some(0.6)).unwrap().status, Status::Incomplete);

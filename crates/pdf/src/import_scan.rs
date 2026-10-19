@@ -384,6 +384,8 @@ struct State {
     /// The inks of fills and of strokes.
     inks: [Inks; 2],
     spaces: [PrintColorSpace; 2],
+    /// Interned raw colour operands; absent means the space's initial colour.
+    colour_values: [Option<u32>; 2],
     matrix: Option<vectorcraft_geom::Affine>,
     clip_context: bool,
     image_compositing_unresolved: bool,
@@ -447,6 +449,9 @@ fn blank_tail(mut bytes: &[u8]) -> bool {
     }
 }
 
+// Space, named-ink dictionary, operand dictionary, stroke, overprint, OPM.
+type PrintSourceKey = (PrintColorSpace, Option<u32>, Option<u32>, bool, bool, u8);
+
 struct Walker<'w, 'p> {
     ocgs: &'w mut Ocgs,
     /// The groups that are off for the interpreter (none once [`all_on`] turned them on).
@@ -473,7 +478,9 @@ struct Walker<'w, 'p> {
     ink_index: HashMap<Vec<String>, u32>,
     /// More inks or changes of ink than are kept: the page's inks are left out.
     inks_cut: bool,
-    print_sources: HashMap<(PrintColorSpace, Option<u32>, bool, bool, u8), usize>,
+    print_sources: HashMap<PrintSourceKey, usize>,
+    colour_values: Vec<Vec<f64>>,
+    colour_index: HashMap<Vec<u64>, u32>,
 }
 
 impl Walker<'_, '_> {
@@ -605,14 +612,20 @@ impl Walker<'_, '_> {
         }
         let kind = state.spaces[usize::from(stroke)];
         let ink = state.inks[usize::from(stroke)].space;
+        let value_index = state.colour_values[usize::from(stroke)];
         let overprint = if stroke { state.stroke } else { state.fill };
         let overprint_mode = u8::from(state.nonzero);
         if let Some(order) = &mut self.out.print_order {
-            let source = if let Some(&i) = self.print_sources.get(&(kind, ink, stroke, overprint, overprint_mode)) {
+            let source = if let Some(&i) = self.print_sources.get(&(kind, ink, value_index, stroke, overprint, overprint_mode)) {
                 i
             } else {
                 let names = ink.and_then(|i| self.out.inks.get(i as usize)).map(Vec::as_slice).unwrap_or_default();
-                if order.sources.len() >= 4096 || names.len() > 32 || names.iter().map(String::len).sum::<usize>() > 64 * 1024 {
+                let name_bytes = names.iter().map(String::len).sum::<usize>();
+                if order.sources.len() >= 4096
+                    || names.len() > 32
+                    || name_bytes > 64 * 1024
+                    || order.source_name_bytes.saturating_add(name_bytes) > crate::print_order::MAX_SOURCE_NAME_BYTES
+                {
                     self.out.cut = true;
                     return;
                 }
@@ -620,8 +633,13 @@ impl Walker<'_, '_> {
                     order.issues.insert("Reserved All/None colourant coverage requires print-semantic reconciliation".into());
                 }
                 let i = order.sources.len();
-                order.sources.push(PrintPaintSource { stroke, overprint, overprint_mode, color_space: kind, colorants: names.to_vec() });
-                self.print_sources.insert((kind, ink, stroke, overprint, overprint_mode), i);
+                let components = match value_index {
+                    Some(index) => self.colour_values.get(index as usize).cloned(),
+                    None => initial_components(kind, names.len()),
+                };
+                order.source_name_bytes += name_bytes;
+                order.sources.push(PrintPaintSource { stroke, overprint, overprint_mode, color_space: kind, colorants: names.to_vec(), components });
+                self.print_sources.insert((kind, ink, value_index, stroke, overprint, overprint_mode), i);
                 i
             };
             if order.layers.len() >= 50_000 {
@@ -686,11 +704,41 @@ impl Walker<'_, '_> {
         }
     }
 
-    /// The color space of fills (or of `stroke`s) is in ink `ink` from now on.
+    /// Retain bounded typed operands before editable conversion.
+    fn record_colour(&mut self, stroke: bool, values: Vec<f64>) {
+        let state = self.state();
+        let kind = state.spaces[usize::from(stroke)];
+        let names = state.inks[usize::from(stroke)].space.and_then(|i| self.out.inks.get(i as usize));
+        if component_count(kind, names.map_or(0, Vec::len)).is_some_and(|count| count != values.len()) {
+            self.order_issue("Colour component count differs from the active source colour space");
+        }
+        if values.len() > 32 || values.iter().any(|v| !v.is_finite()) {
+            self.order_issue("Colour component values exceed the finite operand budget");
+            return;
+        }
+        let key: Vec<_> = values.iter().map(|v| v.to_bits()).collect();
+        let index = if let Some(index) = self.colour_index.get(&key) {
+            *index
+        } else {
+            if self.colour_values.len() >= 4096 {
+                self.out.cut = true;
+                return;
+            }
+            let index = self.colour_values.len() as u32;
+            self.colour_index.insert(key, index);
+            self.colour_values.push(values);
+            index
+        };
+        if let Some(s) = self.states.last_mut() {
+            s.colour_values[usize::from(stroke)] = Some(index);
+        }
+    }
+
     fn set_space(&mut self, stroke: bool, ink: Option<u32>, kind: PrintColorSpace) {
         if let Some(s) = self.states.last_mut() {
             s.inks[usize::from(stroke)].space = ink;
             s.spaces[usize::from(stroke)] = kind;
+            s.colour_values[usize::from(stroke)] = None;
         }
     }
 
@@ -756,6 +804,12 @@ impl Walker<'_, '_> {
     /// colorant names noted when new.
     fn ink_of(&mut self, o: &Object<'_>) -> Option<u32> {
         let Object::Array(a) = o else { return None };
+        if self.out.print_order.is_some()
+            && let Err(reason) = crate::print_color::validate_named_space(a)
+        {
+            self.order_issue(reason);
+            return None;
+        }
         let (_, names) = ink_names(&mut a.flex_iter())?;
         if let Some(i) = self.ink_index.get(&names) {
             return Some(*i);
@@ -1124,9 +1178,33 @@ impl Walker<'_, '_> {
                 if let Err(reason) = colour_endpoints_preserved(data.get(start..iter.committed()).unwrap_or_default(), &operands, gray) {
                     self.order_issue(reason);
                 }
+                self.record_colour(stroke, operands);
             }
         }
     }
+}
+
+// ISO 32000-1 §8.6.8: setting CS/cs resets the colour to the space's
+// initial value. Named colourants start at 1; device spaces start at black.
+fn component_count(kind: PrintColorSpace, names: usize) -> Option<usize> {
+    match kind {
+        PrintColorSpace::DeviceGray => Some(1),
+        PrintColorSpace::DeviceRgb => Some(3),
+        PrintColorSpace::DeviceCmyk => Some(4),
+        PrintColorSpace::Separation => Some(1),
+        PrintColorSpace::DeviceN if names > 0 && names <= 32 => Some(names),
+        _ => None,
+    }
+}
+fn initial_components(kind: PrintColorSpace, names: usize) -> Option<Vec<f64>> {
+    Some(match kind {
+        PrintColorSpace::DeviceGray => vec![0.0],
+        PrintColorSpace::DeviceRgb => vec![0.0; 3],
+        PrintColorSpace::DeviceCmyk => vec![0.0, 0.0, 0.0, 1.0],
+        PrintColorSpace::Separation if names == 1 => vec![1.0],
+        PrintColorSpace::DeviceN if names > 0 && names <= 32 => vec![1.0; names],
+        _ => return None,
+    })
 }
 
 fn colour_operands(op: &TypedInstruction<'_, '_>) -> Option<(Vec<f64>, bool)> {
@@ -1287,6 +1365,8 @@ fn walk_page<'w, 'p>(
         ink_index: HashMap::new(),
         inks_cut: false,
         print_sources: HashMap::new(),
+        colour_values: Vec::new(),
+        colour_index: HashMap::new(),
     };
     w.page(page);
     if !w.layers.is_empty() {
