@@ -70,6 +70,12 @@ struct Paint {
 }
 pub(crate) use crate::tone::source_tones;
 pub fn compare(census: &Census, render: &Render, tolerance_mm: Option<f64>) -> Result<Comparison, String> {
+    compare_prediction(census, render, tolerance_mm, false)
+}
+pub(crate) fn compare_named(census: &Census, render: &Render, tolerance_mm: Option<f64>) -> Result<Comparison, String> {
+    compare_prediction(census, render, tolerance_mm, true)
+}
+fn compare_prediction(census: &Census, render: &Render, tolerance_mm: Option<f64>, raw_named: bool) -> Result<Comparison, String> {
     let uncertainty_mm = render.pixel_pitch_mm * 2.0f64.sqrt() + 0.000002 + census.paints.iter().map(|p| p.geometry_error_mm).fold(0.0, f64::max);
     let mut issues = census.unresolved.clone();
     if !census.paint_order_verified {
@@ -94,7 +100,8 @@ pub fn compare(census: &Census, render: &Render, tolerance_mm: Option<f64>) -> R
             issues.push(format!("{}: raw PDF source colour space is unavailable", p.id));
             continue;
         };
-        match (Boundary::new(path, FillRule::NonZero, 0.000001), source_tones(p, source)) {
+        let tones = if raw_named { crate::raw_named::prediction_tones(p, source) } else { source_tones(p, source) };
+        match (Boundary::new(path, FillRule::NonZero, 0.000001), tones) {
             (Ok(boundary), Ok(tones)) => {
                 if let Err(reason) = retain_boundary(&boundary, &mut retained_segments) {
                     issues.push(reason);

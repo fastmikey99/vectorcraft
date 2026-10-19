@@ -43,3 +43,16 @@ pub(crate) fn validate_named_space(array: &Array<'_>) -> Result<(), &'static str
     }
     Ok(())
 }
+
+/// Retain optional attributes without invalidating structural name/order facets.
+/// Physical predictors decide whether these extra semantics are qualified.
+pub(crate) fn has_devicen_attributes(array: &Array<'_>) -> bool {
+    let mut items = array.flex_iter();
+    if items.next::<Name<'_>>().as_deref() != Some(b"DeviceN") {
+        return false;
+    }
+    let _names = items.next::<Object<'_>>();
+    let _alternate = items.next::<Object<'_>>();
+    let _transform = items.next::<Object<'_>>();
+    items.next::<Object<'_>>().is_some()
+}

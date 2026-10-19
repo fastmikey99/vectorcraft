@@ -272,7 +272,10 @@ fn verify_with_renderer(
     )
     .map_err(|e| e.to_string())?;
     let mut census = crate::pdf::census(&imported.document);
-    census.unresolved.extend(crate::pdf::import_messages(imported.warnings).0);
+    // The ordinary report above retains all import loss. This census is used
+    // only for independent physical prediction: exact raw DeviceN operands
+    // replace this one known RGB-preview conversion, never any other warning.
+    census.unresolved.extend(crate::pdf::import_messages(imported.warnings).0.into_iter().filter(|w| w != crate::raw_named::PREVIEW_NOTICE));
     crate::ordering::reconcile(bytes, &mut census);
     let tolerance = request.acceptance.get("geometry_tolerance_mm").filter(|f| f.evidenced()).and_then(|f| f.value.as_f64());
     let mut renderings = vec![];
@@ -304,7 +307,7 @@ fn verify_with_renderer(
         let comparison = if census.raw_audit.as_ref().is_some_and(|a| a.image_use_count > 0) {
             crate::raster_images::compare(bytes, &rendering, tolerance)
         } else {
-            crate::raster::compare(&census, &rendering, tolerance)
+            crate::raster::compare_named(&census, &rendering, tolerance)
         }
         .unwrap_or_else(|reason| crate::raster::Comparison {
             status: crate::Status::Incomplete,

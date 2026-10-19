@@ -34,6 +34,10 @@ pub struct PrintPaintSource {
     /// source space has no supported initial value; it never means black or zero.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub components: Option<Vec<f64>>,
+    /// Extra DeviceN/NChannel semantics are retained, not silently discarded.
+    /// Their presence does not by itself invalidate names, flags or paint order.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub devicen_attributes: bool,
 }
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PageOrder {
@@ -150,6 +154,39 @@ mod budget_tests {
         assert!(audit.issues.is_empty(), "{:?}", audit.issues);
         let values: Vec<_> = audit.source_indices[0].iter().map(|i| audit.sources[*i].components.clone().unwrap()).collect();
         assert_eq!(values, [vec![0.0], vec![0.0, 0.0, 0.0, 1.0], vec![1.0], vec![0.25], vec![0.5], vec![1.0], vec![1.0, 1.0], vec![0.2, 0.7]]);
+    }
+
+    #[test]
+    fn devicen_attributes_keep_separate_sources_and_follow_saved_fill_stroke_state() {
+        use vectorcraft_testkit::pdf::{PdfPage, pdf_with};
+        let mut page = PdfPage::new(
+            72.0,
+            72.0,
+            "/A cs .25 .75 scn 0 0 2 2 re f q /B cs .25 .75 scn 0 0 2 2 re f /A CS .25 .75 SCN 0 0 2 2 re S 0 G 0 0 2 2 re S Q 0 0 2 2 re f /B cs .25 .75 scn 0 0 2 2 re f 0 g 0 0 2 2 re f",
+        );
+        page.resources = "/ColorSpace << /A [/DeviceN [/Cyan /Magenta] /DeviceCMYK 5 0 R << /Subtype /NChannel >>] /B [/DeviceN [/Cyan /Magenta] /DeviceCMYK 5 0 R] >>".into();
+        let audit = print_order(&pdf_with(&[page], &[TWO_INK_FUNCTION], None)).unwrap();
+        assert!(audit.issues.is_empty(), "Attributes must not invalidate structural names/order: {:?}", audit.issues);
+        let sources: Vec<_> = audit.source_indices[0].iter().map(|i| &audit.sources[*i]).collect();
+        assert_eq!(sources.iter().map(|s| s.devicen_attributes).collect::<Vec<_>>(), [true, false, true, false, true, false, false]);
+        assert_ne!(audit.source_indices[0][0], audit.source_indices[0][1]);
+        assert_eq!(sources[0].components, sources[1].components);
+        assert_eq!(sources[0].colorants, sources[1].colorants);
+        let mut nested_page = PdfPage::new(72.0, 72.0, "/A cs .25 .75 scn /Outer Do 0 0 2 2 re f");
+        nested_page.resources = "/ColorSpace << /A [/DeviceN [/Cyan /Magenta] /DeviceCMYK 5 0 R 6 0 R] >> /XObject << /Outer 7 0 R >>".into();
+        let outer_content = "0 0 2 2 re f q /B cs .25 .75 scn /Inner Do Q 0 0 2 2 re f";
+        let outer = format!(
+            "<< /Type /XObject /Subtype /Form /BBox [0 0 72 72] /Resources << /ColorSpace << /B [/DeviceN [/Cyan /Magenta] /DeviceCMYK 5 0 R] >> /XObject << /Inner 8 0 R >> >> /Length {} >>\nstream\n{outer_content}\nendstream",
+            outer_content.len()
+        );
+        let inner_content = "0 0 2 2 re f";
+        let inner = format!(
+            "<< /Type /XObject /Subtype /Form /BBox [0 0 72 72] /Resources << >> /Length {} >>\nstream\n{inner_content}\nendstream",
+            inner_content.len()
+        );
+        let nested = print_order(&pdf_with(&[nested_page], &[TWO_INK_FUNCTION, "<< /Subtype /NChannel >>", &outer, &inner], None)).unwrap();
+        assert!(nested.issues.is_empty(), "{:?}", nested.issues);
+        assert_eq!(nested.source_indices[0].iter().map(|i| nested.sources[*i].devicen_attributes).collect::<Vec<_>>(), [true, false, true, true]);
     }
 
     #[test]

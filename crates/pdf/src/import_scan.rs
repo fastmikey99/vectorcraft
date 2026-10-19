@@ -386,6 +386,7 @@ struct State {
     spaces: [PrintColorSpace; 2],
     /// Interned raw colour operands; absent means the space's initial colour.
     colour_values: [Option<u32>; 2],
+    devicen_attributes: [bool; 2],
     matrix: Option<vectorcraft_geom::Affine>,
     clip_context: bool,
     image_compositing_unresolved: bool,
@@ -449,8 +450,8 @@ fn blank_tail(mut bytes: &[u8]) -> bool {
     }
 }
 
-// Space, named-ink dictionary, operand dictionary, stroke, overprint, OPM.
-type PrintSourceKey = (PrintColorSpace, Option<u32>, Option<u32>, bool, bool, u8);
+// Space, named-ink dictionary, operand dictionary, attributes, stroke, overprint, OPM.
+type PrintSourceKey = (PrintColorSpace, Option<u32>, Option<u32>, bool, bool, bool, u8);
 
 struct Walker<'w, 'p> {
     ocgs: &'w mut Ocgs,
@@ -613,10 +614,11 @@ impl Walker<'_, '_> {
         let kind = state.spaces[usize::from(stroke)];
         let ink = state.inks[usize::from(stroke)].space;
         let value_index = state.colour_values[usize::from(stroke)];
+        let devicen_attributes = state.devicen_attributes[usize::from(stroke)];
         let overprint = if stroke { state.stroke } else { state.fill };
         let overprint_mode = u8::from(state.nonzero);
         if let Some(order) = &mut self.out.print_order {
-            let source = if let Some(&i) = self.print_sources.get(&(kind, ink, value_index, stroke, overprint, overprint_mode)) {
+            let source = if let Some(&i) = self.print_sources.get(&(kind, ink, value_index, devicen_attributes, stroke, overprint, overprint_mode)) {
                 i
             } else {
                 let names = ink.and_then(|i| self.out.inks.get(i as usize)).map(Vec::as_slice).unwrap_or_default();
@@ -638,8 +640,16 @@ impl Walker<'_, '_> {
                     None => initial_components(kind, names.len()),
                 };
                 order.source_name_bytes += name_bytes;
-                order.sources.push(PrintPaintSource { stroke, overprint, overprint_mode, color_space: kind, colorants: names.to_vec(), components });
-                self.print_sources.insert((kind, ink, value_index, stroke, overprint, overprint_mode), i);
+                order.sources.push(PrintPaintSource {
+                    stroke,
+                    overprint,
+                    overprint_mode,
+                    color_space: kind,
+                    colorants: names.to_vec(),
+                    components,
+                    devicen_attributes,
+                });
+                self.print_sources.insert((kind, ink, value_index, devicen_attributes, stroke, overprint, overprint_mode), i);
                 i
             };
             if order.layers.len() >= 50_000 {
@@ -739,6 +749,17 @@ impl Walker<'_, '_> {
             s.inks[usize::from(stroke)].space = ink;
             s.spaces[usize::from(stroke)] = kind;
             s.colour_values[usize::from(stroke)] = None;
+            s.devicen_attributes[usize::from(stroke)] = false;
+        }
+    }
+
+    fn set_named_space(&mut self, stroke: bool, name: &Name<'_>, res: &Resources<'_>) {
+        let ink = self.space_ink(name, res);
+        self.set_space(stroke, ink, Self::source_space(name, res));
+        let attributes = self.out.print_order.is_some()
+            && matches!(res.get_color_space(name), Some(Object::Array(a)) if crate::print_color::has_devicen_attributes(&a));
+        if let Some(state) = self.states.last_mut() {
+            state.devicen_attributes[usize::from(stroke)] = attributes;
         }
     }
 
@@ -1053,12 +1074,10 @@ impl Walker<'_, '_> {
                     }
                 }
                 TypedInstruction::ColorSpaceNonStroke(cs) => {
-                    let ink = self.space_ink(cs.0, res);
-                    self.set_space(false, ink, Self::source_space(cs.0, res));
+                    self.set_named_space(false, cs.0, res);
                 }
                 TypedInstruction::ColorSpaceStroke(cs) => {
-                    let ink = self.space_ink(cs.0, res);
-                    self.set_space(true, ink, Self::source_space(cs.0, res));
+                    self.set_named_space(true, cs.0, res);
                 }
                 // A pattern by name; without one, `scn` sets a color in the space set before.
                 TypedInstruction::NonStrokeColorNamed(c) => {

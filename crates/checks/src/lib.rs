@@ -30,6 +30,8 @@ mod raster_fidelity;
 #[cfg(not(target_arch = "wasm32"))]
 mod raster_images;
 pub mod raster_prepare;
+#[cfg(not(target_arch = "wasm32"))]
+mod raw_named;
 pub mod recipe;
 mod routes;
 mod specification;
