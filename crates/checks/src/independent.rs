@@ -46,13 +46,123 @@ pub struct Render {
 fn io(e: std::io::Error) -> String {
     e.to_string()
 }
+/// Process settings are part of the measurement contract, not inherited job input.
+/// In particular GS_OPTIONS may contain executable options or additional input files.
+fn isolated_command(binary: &Path, output: &Path) -> Command {
+    let mut command = Command::new(binary);
+    command.env_clear().current_dir(output).env("LC_ALL", "C").env("LANG", "C");
+    for name in ["HOME", "USERPROFILE", "TEMP", "TMP", "TMPDIR", "XDG_CACHE_HOME"] {
+        command.env(name, output);
+    }
+    command
+}
+const MAX_INTERPRETER_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_DIAGNOSTIC_BYTES: u64 = 2 * 1024 * 1024;
+fn open_regular(path: &Path) -> Result<fs::File, String> {
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{Mode, OFlags, open};
+        // A replaced executable may be a FIFO. Opening it must never wait for a writer.
+        fs::File::from(open(path, OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC, Mode::empty()).map_err(|e| e.to_string())?)
+    };
+    #[cfg(not(unix))]
+    let file = {
+        if !fs::metadata(path).map_err(io)?.is_file() {
+            return Err("Independent interpreter is not a regular file".into());
+        }
+        fs::File::open(path).map_err(io)?
+    };
+    if !file.metadata().map_err(io)?.is_file() {
+        return Err("Independent evidence/interpreter is not a regular file".into());
+    }
+    Ok(file)
+}
+fn interpreter_hash(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let file = open_regular(path)?;
+    let metadata = file.metadata().map_err(io)?;
+    if !metadata.is_file() || metadata.len() > MAX_INTERPRETER_BYTES {
+        return Err("Independent interpreter is not a bounded regular file".into());
+    }
+    let mut reader = file.take(MAX_INTERPRETER_BYTES + 1);
+    let mut buffer = [0u8; 32 * 1024];
+    let mut hash = Sha256::new();
+    let mut count = 0u64;
+    loop {
+        let length = reader.read(&mut buffer).map_err(io)?;
+        if length == 0 {
+            break;
+        }
+        count += length as u64;
+        if count > MAX_INTERPRETER_BYTES {
+            return Err("Independent interpreter exceeds identity budget".into());
+        }
+        hash.update(&buffer[..length]);
+    }
+    if count != metadata.len() {
+        return Err("Independent interpreter changed during identity read".into());
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+fn diagnostic_text(path: &Path, limit: u64) -> Result<String, String> {
+    use std::io::Read;
+    let file = open_regular(path)?;
+    if file.metadata().map_err(io)?.len() > limit {
+        return Err("Independent diagnostic output exceeded its bounded text budget".into());
+    }
+    let mut text = String::new();
+    file.take(limit + 1).read_to_string(&mut text).map_err(io)?;
+    if text.len() as u64 > limit {
+        return Err("Independent diagnostic output grew beyond its bounded text budget".into());
+    }
+    Ok(text)
+}
+fn diagnostics_within_budget(stdout: &Path, stderr: &Path) -> bool {
+    [stdout, stderr].iter().all(|path| fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() <= MAX_DIAGNOSTIC_BYTES))
+}
+
 fn disk_bytes(dir: &Path) -> Result<u64, String> {
     let mut total = 0u64;
-    for entry in fs::read_dir(dir).map_err(io)? {
-        total = total.saturating_add(entry.map_err(io)?.metadata().map_err(io)?.len());
+    let mut entries = 0usize;
+    let mut pending = vec![(dir.to_path_buf(), 0usize)];
+    while let Some((directory, depth)) = pending.pop() {
+        if depth > 32 {
+            return Err("Independent output directory depth exceeds budget".into());
+        }
+        let children = match fs::read_dir(directory) {
+            Ok(children) => children,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(io(e)),
+        };
+        for entry in children {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(io(e)),
+            };
+            entries += 1;
+            if entries > 65_536 {
+                return Err("Independent output file count exceeds budget".into());
+            }
+            let metadata = match fs::symlink_metadata(entry.path()) {
+                Ok(metadata) => metadata,
+                // Ghostscript removes its own temporary files while this scan runs.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(io(e)),
+            };
+            if metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+            } else if metadata.is_dir() {
+                pending.push((entry.path(), depth + 1));
+            } else {
+                return Err("Independent output contains a symbolic link or nonregular file".into());
+            }
+        }
     }
     Ok(total)
 }
+
 pub fn render(config: &Configuration, pdf: &[u8], output: &Path) -> Result<Render, String> {
     if config.version != "10.07.1"
         || config.dpi == 0
@@ -64,18 +174,20 @@ pub fn render(config: &Configuration, pdf: &[u8], output: &Path) -> Result<Rende
     {
         return Err("Unqualified interpreter configuration or invalid resource bounds".into());
     }
-    if !config.binary.is_absolute() || sha256(&fs::read(&config.binary).map_err(io)?) != config.binary_sha256 {
+    if !config.binary.is_absolute() || interpreter_hash(&config.binary)? != config.binary_sha256 {
         return Err("Independent interpreter binary identity mismatch".into());
     }
     // Caller creates no content at this path: exclusive creation prevents stale plane reuse.
     fs::create_dir(output).map_err(io)?;
+    let absolute_output = fs::canonicalize(output).map_err(io)?;
+    let output = absolute_output.as_path();
     let started = Instant::now();
     let exact = output.join("input.pdf");
     fs::write(&exact, pdf).map_err(io)?;
     let stdout = output.join("stdout.log");
     let stderr = output.join("stderr.log");
     let version_path = output.join("version.log");
-    let mut version = Command::new(&config.binary)
+    let mut version = isolated_command(&config.binary, output)
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(fs::File::create(&version_path).map_err(io)?)
@@ -86,7 +198,10 @@ pub fn render(config: &Configuration, pdf: &[u8], output: &Path) -> Result<Rende
         if let Some(status) = version.try_wait().map_err(io)? {
             break status;
         }
-        if started.elapsed() > Duration::from_millis(config.timeout_ms.min(5000)) || !disk_bytes(output).is_ok_and(|n| n <= config.max_output_bytes) {
+        if started.elapsed() > Duration::from_millis(config.timeout_ms.min(5000))
+            || !disk_bytes(output).is_ok_and(|n| n <= config.max_output_bytes)
+            || !fs::metadata(&version_path).is_ok_and(|m| m.len() <= 1024)
+        {
             let killed = version.kill();
             let waited = version.wait();
             return Err(format!("Interpreter version probe exceeded resource budget; kill={killed:?}; wait={waited:?}"));
@@ -96,10 +211,13 @@ pub fn render(config: &Configuration, pdf: &[u8], output: &Path) -> Result<Rende
     if fs::metadata(&version_path).map_err(io)?.len() > 1024 {
         return Err("Invalid interpreter version response".into());
     }
-    if !version_status.success() || fs::read_to_string(version_path).map_err(io)?.trim() != config.version {
+    if !version_status.success() || diagnostic_text(&version_path, 1024)?.trim() != config.version {
         return Err("Independent interpreter version mismatch".into());
     }
-    let mut child = Command::new(&config.binary)
+    if interpreter_hash(&config.binary)? != config.binary_sha256 {
+        return Err("Independent interpreter changed after its version probe".into());
+    }
+    let mut child = isolated_command(&config.binary, output)
         .args([
             "-dSAFER",
             "-dBATCH",
@@ -129,17 +247,23 @@ pub fn render(config: &Configuration, pdf: &[u8], output: &Path) -> Result<Rende
             break status;
         }
         let size = disk_bytes(output);
-        if started.elapsed() > Duration::from_millis(config.timeout_ms) || !size.as_ref().is_ok_and(|n| *n <= config.max_output_bytes) {
+        if started.elapsed() > Duration::from_millis(config.timeout_ms)
+            || !size.as_ref().is_ok_and(|n| *n <= config.max_output_bytes)
+            || !diagnostics_within_budget(&stdout, &stderr)
+        {
             let killed = child.kill();
             let waited = child.wait();
-            return Err(format!("Independent renderer resource limit; kill={killed:?}; wait={waited:?}"));
+            return Err(format!("Independent renderer resource limit; output_scan={size:?}; kill={killed:?}; wait={waited:?}"));
         }
         std::thread::sleep(Duration::from_millis(20));
     };
+    if interpreter_hash(&config.binary)? != config.binary_sha256 {
+        return Err("Independent interpreter changed during rendering".into());
+    }
     if disk_bytes(output)? > config.max_output_bytes {
         return Err("Independent output exceeded budget".into());
     }
-    let log = format!("{}\n{}", fs::read_to_string(stdout).map_err(io)?, fs::read_to_string(stderr).map_err(io)?);
+    let log = format!("{}\n{}", diagnostic_text(&stdout, MAX_DIAGNOSTIC_BYTES)?, diagnostic_text(&stderr, MAX_DIAGNOSTIC_BYTES)?);
     let mut diagnostics = vec![];
     let mut spot_names = vec![];
     for line in log.lines() {
@@ -625,5 +749,175 @@ mod runtime_tests {
             assert!(output.join("measurements.json").exists());
             fs::remove_dir_all(output).unwrap();
         }
+    }
+}
+#[cfg(test)]
+#[cfg(unix)]
+mod isolation_tests {
+    use super::*;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    fn root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir()
+            .join(format!("vc-runtime-{label}-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&root).unwrap();
+        root
+    }
+    fn script(root: &Path, body: &str) -> Configuration {
+        let binary = root.join("interpreter");
+        fs::write(&binary, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        Configuration {
+            binary_sha256: interpreter_hash(&binary).unwrap(),
+            binary,
+            version: "10.07.1".into(),
+            dpi: 72,
+            timeout_ms: 5000,
+            max_output_bytes: 32 * 1024 * 1024,
+            qualification_sha256: None,
+        }
+    }
+    #[test]
+    fn diagnostic_floods_are_refused_before_unbounded_text_loading() {
+        for version in [false, true] {
+            let root = root("diagnostics");
+            let body = if version {
+                "/usr/bin/head -c 3145728 /dev/zero"
+            } else {
+                "if [ \"$1\" = --version ]; then printf '10.07.1\\n'; exit 0; fi\n/usr/bin/head -c 3145728 /dev/zero"
+            };
+            let config = script(&root, body);
+            let reason = render(&config, b"original synthetic input", &root.join("evidence")).unwrap_err();
+            assert!(reason.contains("budget") || reason.contains("version response") || reason.contains("resource limit"), "{reason}");
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[test]
+    fn interpreter_replacement_between_execution_phases_is_refused() {
+        for during_render in [false, true] {
+            let root = root("replacement");
+            let body = if during_render {
+                "if [ \"$1\" = --version ]; then printf '10.07.1\\n'; exit 0; fi\nprintf '#!/bin/sh\\nexit 0\\n' > \"$0\""
+            } else {
+                "printf '#!/bin/sh\\nexit 0\\n' > \"$0\"\nprintf '10.07.1\\n'"
+            };
+            let config = script(&root, body);
+            let reason = render(&config, b"original synthetic input", &root.join("evidence")).unwrap_err();
+            assert!(reason.contains(if during_render { "changed during rendering" } else { "changed after its version probe" }), "{reason}");
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[test]
+    fn nested_runtime_output_counts_toward_budget_and_links_are_refused() {
+        let root = root("files");
+        fs::create_dir_all(root.join("cache/nested")).unwrap();
+        fs::write(root.join("top"), b"a").unwrap();
+        fs::write(root.join("cache/nested/data"), [0u8; 100]).unwrap();
+        assert_eq!(disk_bytes(&root).unwrap(), 101);
+        symlink(root.join("top"), root.join("cache/link")).unwrap();
+        assert!(disk_bytes(&root).unwrap_err().contains("symbolic link"));
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn fifo_executable_identity_is_rejected_without_waiting_for_a_writer() {
+        if std::env::var("VC_TEST_FIFO_CHILD").as_deref() != Ok("1") {
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "independent::isolation_tests::fifo_executable_identity_is_rejected_without_waiting_for_a_writer", "--nocapture"])
+                .env("VC_TEST_FIFO_CHILD", "1")
+                .spawn()
+                .unwrap();
+            let started = Instant::now();
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success());
+                    return;
+                }
+                if started.elapsed() > Duration::from_secs(10) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("FIFO identity check blocked");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        for during_render in [false, true] {
+            let root = root("fifo");
+            let replace = "/bin/rm \"$0\"; /usr/bin/mkfifo \"$0\"";
+            let body = if during_render {
+                format!("if [ \"$1\" = --version ]; then printf '10.07.1\\n'; exit 0; fi\n{replace}")
+            } else {
+                format!("{replace}\nprintf '10.07.1\\n'")
+            };
+            let config = script(&root, &body);
+            assert!(render(&config, b"synthetic input", &root.join("evidence")).unwrap_err().contains("regular file"));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[test]
+    fn temporary_file_cleanup_during_output_scan_is_not_a_resource_failure() {
+        let root = root("cleanup");
+        fs::write(root.join("retained"), b"retained").unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for i in 0..2000 {
+                    let dir = root.join(format!("temp-{}", i % 8));
+                    fs::create_dir(&dir).unwrap();
+                    fs::write(dir.join("data"), [0u8; 64]).unwrap();
+                    fs::remove_dir_all(dir).unwrap();
+                }
+            });
+            for _ in 0..2000 {
+                assert!(disk_bytes(&root).unwrap() >= 8);
+            }
+        });
+        assert_eq!(disk_bytes(&root).unwrap(), 8);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn ambient_gs_options_cannot_change_measurement() {
+        let Ok(binary) = std::env::var("CHECK_GS_BINARY") else { return };
+        if std::env::var("VC_TEST_ISOLATED_RENDERER_CHILD").as_deref() != Ok("1") {
+            // Inject into only the child test process; never mutate this parallel
+            // test runner's process-wide environment.
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "independent::isolation_tests::ambient_gs_options_cannot_change_measurement", "--nocapture"])
+                .env("VC_TEST_ISOLATED_RENDERER_CHILD", "1")
+                .env("GS_OPTIONS", "--version")
+                .env("GS_LIB", "/does-not-exist/runtime-qualification")
+                .env("GS_FONTPATH", "/does-not-exist/runtime-qualification")
+                .spawn()
+                .unwrap();
+            let started = Instant::now();
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success());
+                    break;
+                }
+                if started.elapsed() > Duration::from_secs(30) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("Isolated environment regression timed out");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            return;
+        }
+        let root = root("ambient");
+        let config = Configuration {
+            binary_sha256: interpreter_hash(Path::new(&binary)).unwrap(),
+            binary: binary.into(),
+            version: "10.07.1".into(),
+            dpi: 72,
+            timeout_ms: 10000,
+            max_output_bytes: 16 * 1024 * 1024,
+            qualification_sha256: None,
+        };
+        let bytes = crate::pdf::tests::fixture(true, "Exact#20ink", "/Ink cs 1 scn 10 10 20 20 re f", None);
+        let rendering = render(&config, &bytes, &root.join("evidence")).unwrap();
+        let mut census = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+        crate::ordering::reconcile(&bytes, &mut census);
+        let comparison = crate::raster::compare(&census, &rendering, Some(0.6)).unwrap();
+        assert_eq!(comparison.status, crate::Status::Pass, "{comparison:?}");
+        assert!(!rendering.qualified);
+        fs::remove_dir_all(root).unwrap();
     }
 }

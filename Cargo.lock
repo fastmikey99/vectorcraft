@@ -4584,6 +4584,7 @@ name = "vectorcraft-checks"
 version = "0.12.0"
 dependencies = [
  "image",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
  "sha2",

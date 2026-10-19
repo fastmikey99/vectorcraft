@@ -22,5 +22,8 @@ vectorcraft-effects = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 image = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs", "std"] }
+
 [build-dependencies]
 sha2 = "0.10.9"
