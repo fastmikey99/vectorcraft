@@ -525,6 +525,7 @@ pub fn check(request: &Request, bytes: &[u8]) -> Result<Report, String> {
     }
     crate::ordering::check(request, bytes, &c, &mut report)?;
     crate::specification::check(request, bytes, &mut report)?;
+    crate::features::check(request, &c, &mut report)?;
     crate::observed::check_pdf(request, bytes, &imported.document, &warnings, &c, &mut report)?;
     Ok(report)
 }

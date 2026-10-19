@@ -101,8 +101,13 @@ pub fn compare(census: &Census, render: &Render, tolerance_mm: Option<f64>) -> R
                     return Ok(Comparison { status: Status::Incomplete, uncertainty_mm, planes: vec![], issues });
                 }
                 inks.extend(tones.keys().cloned());
-                let device_cmyk = source.color_space == vectorcraft_pdf::PrintColorSpace::DeviceCmyk;
-                paints.push(Paint { page, boundary, inks: tones, overprint: p.overprint, skip_zero_process: device_cmyk && !p.overprint_zero });
+                paints.push(Paint {
+                    page,
+                    boundary,
+                    inks: tones,
+                    overprint: p.overprint,
+                    skip_zero_process: crate::tone::skip_zero_process(p, source),
+                });
             }
             (a, b) => {
                 if let Err(e) = a {
@@ -184,11 +189,7 @@ pub fn compare(census: &Census, render: &Render, tolerance_mm: Option<f64>) -> R
                     // ISO 32000-1 §8.6.7 and Table 148: OP preserves unspecified
                     // colourants. Only direct DeviceCMYK with OPM 1 preserves zero
                     // components; a zero Separation tint still paints its named ink.
-                    if !paint.overprint {
-                        expected = paint.inks.get(&p.name).copied().unwrap_or(0.0);
-                    } else if let Some(&tone) = paint.inks.get(&p.name)
-                        && !(paint.skip_zero_process && tone == 0.0)
-                    {
+                    if let Some(tone) = crate::tone::overpaint(&paint.inks, &p.name, paint.overprint, paint.skip_zero_process) {
                         expected = tone;
                     }
                 }

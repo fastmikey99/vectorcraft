@@ -2,6 +2,9 @@
 //! Cubic Béziers are enclosed by chord-distance bounds of their control hull. Directed
 //! boundary maxima are bounded using the 1-Lipschitz distance-to-set function. Every contour
 //! participates; no area-based defect suppression, alignment or best-fit registration occurs.
+//! This boundary comparator can resolve finer separation than a Boolean sweep.
+//! A construction must account for its own sweep resolution separately; this
+//! primitive does not certify the topology of any preceding Boolean operation.
 use crate::Status;
 use serde::{Deserialize, Serialize};
 use vectorcraft_geom::{PathData, Point, Rect};
@@ -294,11 +297,18 @@ fn intersects(a: Segment, b: Segment, error: f64) -> bool {
         || [a.distance(b.a), a.distance(b.b), b.distance(a.a), b.distance(a.b)].into_iter().any(|d| d <= error)
 }
 impl Boundary {
+    pub(crate) fn linear_segments(&self) -> impl Iterator<Item = (Point, Point)> + '_ {
+        self.segments.iter().map(|s| (s.a, s.b))
+    }
+    pub(crate) fn linear_error_mm(&self) -> f64 {
+        self.error
+    }
+
     pub fn new(path: &PathData, fill_rule: vectorcraft_geom::FillRule, precision_mm: f64) -> Result<Self, String> {
         let mut precision = precision_mm;
-        for attempt in 0..=8 {
+        for attempt in 0..=12 {
             match Self::at_precision(path, fill_rule, precision) {
-                Err(reason) if reason == UNRESOLVED_CONTACT && attempt < 8 && precision > 1e-9 => precision *= 0.25,
+                Err(reason) if reason == UNRESOLVED_CONTACT && attempt < 12 && precision > 1e-12 => precision *= 0.25,
                 result => return result,
             }
         }
@@ -877,5 +887,64 @@ mod tests {
         };
         assert!(Boundary::new(&many(MAX_SEGMENTS / 4 + 1), vectorcraft_geom::FillRule::NonZero, 0.000001).unwrap_err().contains("segment budget"));
         assert!(Boundary::new(&many(2500), vectorcraft_geom::FillRule::NonZero, 0.000001).unwrap_err().contains("Topology winding budget"));
+    }
+}
+
+#[cfg(test)]
+mod short_edge_regression {
+    use super::*;
+    #[test]
+    fn short_collinear_edges_refine_without_deleting_them_or_accepting_a_touch() {
+        let mut b = vectorcraft_geom::BezPath::new();
+        b.move_to((0.0, 0.0));
+        b.line_to((1.0, 0.0));
+        b.line_to((1.0, 1.0));
+        b.line_to((0.5, 1.0));
+        b.line_to((0.5 - 2.0e-9, 1.0));
+        b.line_to((0.5 - 4.0e-9, 1.0));
+        b.line_to((0.0, 1.0));
+        b.close_path();
+        let p = PathData::from_bezpath(&b);
+        let count = p.anchor_count();
+        let boundary = Boundary::new(&p, vectorcraft_geom::FillRule::NonZero, 0.0001).unwrap();
+        assert_eq!(boundary.components, 1);
+        assert!(boundary.error < 1.0e-9);
+        assert_eq!(boundary.linear_segments().count(), count);
+        b.move_to((0.5, 1.0));
+        b.line_to((0.6, 1.1));
+        b.line_to((0.4, 1.1));
+        b.close_path();
+        assert!(Boundary::new(&PathData::from_bezpath(&b), vectorcraft_geom::FillRule::NonZero, 0.0001).is_err());
+    }
+}
+
+#[cfg(test)]
+mod curved_refinement_regression {
+    use super::*;
+    use vectorcraft_geom::{FillRule, Shape, kurbo::Circle};
+    fn circles(radius: f64, gap: f64) -> (PathData, PathData, PathData) {
+        let a = PathData::from_bezpath(&Circle::new((0.0, 0.0), radius).to_path(0.000001));
+        let b = PathData::from_bezpath(&Circle::new((2.0 * radius + gap, 0.0), radius).to_path(0.000001));
+        let mut combined = a.clone();
+        combined.subpaths.extend(b.subpaths.clone());
+        (a, b, combined)
+    }
+    #[test]
+    fn curved_tangency_refuses_and_resolved_neighbours_survive_boolean() {
+        let (_, _, touch) = circles(1.0, 0.0);
+        assert!(Boundary::new(&touch, FillRule::NonZero, 0.0001).is_err());
+        let (a, b, p) = circles(1.0, 0.00001);
+        assert_eq!(Boundary::new(&p, FillRule::NonZero, 0.0001).unwrap().components, 2);
+        let result =
+            vectorcraft_pathops::try_boolean_for_measurement(&a, FillRule::NonZero, &b, FillRule::NonZero, vectorcraft_pathops::BoolOp::Union)
+                .unwrap();
+        assert_eq!(Boundary::new(&result, FillRule::NonZero, 0.0001).unwrap().components, 2);
+    }
+    #[test]
+    fn refinement_still_refuses_when_curves_exceed_the_segment_budget() {
+        let (_, _, touch) = circles(1000.0, 0.0);
+        assert_eq!(Boundary::at_precision(&touch, FillRule::NonZero, 0.0001).unwrap_err(), UNRESOLVED_CONTACT);
+        let error = Boundary::new(&touch, FillRule::NonZero, 0.0001).unwrap_err();
+        assert!(error.contains("budget"), "{error}");
     }
 }

@@ -53,3 +53,17 @@ pub(crate) fn source_tones(paint: &crate::pdf::PaintedObject, source: &vectorcra
         _ => Err("Original colour space/profile needs a qualified tonal prediction".into()),
     }
 }
+
+/// Result of one opaque paint on one physical ink. None means unchanged.
+/// OPM 1 suppresses zero only for direct DeviceCMYK, never a named tint.
+pub(crate) fn overpaint(tones: &BTreeMap<String, f64>, ink: &str, overprint: bool, skip_zero_process: bool) -> Option<f64> {
+    if !overprint {
+        return Some(tones.get(ink).copied().unwrap_or(0.0));
+    }
+    tones.get(ink).copied().filter(|tone| !(skip_zero_process && *tone == 0.0))
+}
+
+/// OPM zero suppression applies only to original direct DeviceCMYK operands.
+pub(crate) fn skip_zero_process(paint: &crate::pdf::PaintedObject, source: &vectorcraft_pdf::PrintPaintSource) -> bool {
+    source.color_space == vectorcraft_pdf::PrintColorSpace::DeviceCmyk && !paint.overprint_zero
+}

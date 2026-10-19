@@ -657,6 +657,12 @@ pub fn try_boolean(a: &PathData, a_rule: FillRule, b: &PathData, b_rule: FillRul
     Ok(all_contours_to_path(&c, &tidy))
 }
 
+/// Numerical sweep resolution used by measurement Booleans. This is not a
+/// certified topology or Hausdorff enclosure of the resulting arrangement.
+pub fn measurement_boolean_epsilon(a: &PathData, b: &PathData) -> Result<f64, PathOpsError> {
+    eps_for([&fill_bezpath(a), &fill_bezpath(b)])
+}
+
 /// Measurement variant: retain every sweep contour without curve refitting or sliver removal.
 /// Numerical topology resolution is still bounded by `eps_for`; callers must propagate it.
 pub fn try_boolean_for_measurement(a: &PathData, a_rule: FillRule, b: &PathData, b_rule: FillRule, op: BoolOp) -> Result<PathData, PathOpsError> {

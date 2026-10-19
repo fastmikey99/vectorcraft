@@ -5,6 +5,9 @@
 pub mod attribution;
 mod contract;
 mod contribution;
+mod coverage;
+mod feature_offset;
+pub mod features;
 pub mod geometry;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod independent;

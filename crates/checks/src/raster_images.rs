@@ -113,11 +113,7 @@ impl PaintEvent<'_> {
                 if !paint.boundary.contains_bounded(point, vectorcraft_geom::FillRule::NonZero, budget)? {
                     return Ok(Ok(None));
                 }
-                let tone = paint.inks.get(name).copied();
-                if paint.overprint && (tone.is_none() || paint.skip_zero_process && tone == Some(0.0)) {
-                    return Ok(Ok(None));
-                }
-                Ok(Ok(Some((tone.unwrap_or(0.0), 1.0))))
+                Ok(Ok(crate::tone::overpaint(&paint.inks, name, paint.overprint, paint.skip_zero_process).map(|tone| (tone, 1.0))))
             }
         }
     }
@@ -133,7 +129,7 @@ fn vector_paint(paint: &crate::pdf::PaintedObject, census: &crate::pdf::Census) 
         boundary: crate::geometry::Boundary::new(path, vectorcraft_geom::FillRule::NonZero, 0.000001)?,
         inks,
         overprint: paint.overprint,
-        skip_zero_process: source.color_space == vectorcraft_pdf::PrintColorSpace::DeviceCmyk && !paint.overprint_zero,
+        skip_zero_process: crate::tone::skip_zero_process(paint, source),
     })
 }
 fn reconcile_image_clip(
