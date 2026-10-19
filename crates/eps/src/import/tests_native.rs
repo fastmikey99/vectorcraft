@@ -1063,15 +1063,19 @@ fn type_laid_out_again_is_noted_as_type_and_not_as_art_the_layers_dont_describe(
 }
 
 #[test]
-fn art_the_page_doesnt_draw_is_noted_with_its_own_share_and_not_the_types() {
+fn art_the_page_doesnt_draw_makes_it_come_in_as_its_page() {
     // A bar of 0.5 × 80 points that the page doesn't draw, too thin to be refused as an object: 0.4% of
-    // the page, away from the type.
+    // the page, away from the type. Art that draws differently (a colour the layers lose) isn't
+    // tolerated as type laid out again is (MAX_ART_DIFFERENCE): the page is what prints.
     let bar = "0 0 0 1 k\n20 10 m\n20.5 10 L\n20.5 90 L\n20 90 L\nf\n";
     let r = import(&page_in_pieces_and_layers(bar)).unwrap();
-    assert_eq!(names(&r.document), ["Art"], "{:?}", r.warnings);
-    let notes: Vec<&String> = r.warnings.iter().filter(|w| w.contains("differs from the file's own page")).collect();
-    assert_eq!(notes.len(), 1, "{:?}", r.warnings);
-    assert!(notes[0].starts_with("the art on the layers differs from the file's own page in about 0.4% of it (brush strokes"), "{notes:?}");
+    assert_ne!(names(&r.document), ["Art"], "{:?}", r.warnings);
+    assert!(
+        r.warnings.iter().any(|w| w.contains("(the art on them differs from the page's in 0.4% of it)")),
+        "{:?}",
+        r.warnings
+    );
+    assert!(!r.warnings.iter().any(|w| w.contains("differs from the file's own page")), "{:?}", r.warnings);
 }
 
 /// An EPS whose page is its art's box `[x0 y0 x1 y1]` (not its artboard, 0 0 100 100), drawing

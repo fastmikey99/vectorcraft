@@ -967,6 +967,12 @@ fn in_areas(areas: &[Rect], w: usize, h: usize) -> Vec<bool> {
 const MAX_DIFFERENCE: f64 = 0.05;
 /// More than this and the import says so.
 const NOTABLE_DIFFERENCE: f64 = 0.002;
+/// More of the page than this differing away from type, and the layers aren't used. Type laid out
+/// again is tolerated up to [`MAX_DIFFERENCE`]; art drawn differently is not: in a file printed
+/// from, a fill or highlight that changes colour (an appearance the layers' data doesn't
+/// describe) is worse than layers that can't be edited (Supacolour: US-DF373050 opened with its
+/// gold highlights white at 1.3%).
+const MAX_ART_DIFFERENCE: f64 = NOTABLE_DIFFERENCE;
 /// More of the page than this where one draws an object that the other doesn't (see
 /// [`Difference`]), and the layers aren't used: about a centimetre square on a letter page.
 const MAX_SOLID_DIFFERENCE: f64 = 0.001;
@@ -1306,20 +1312,16 @@ fn compare(frame: &Frame<'_>, view: &mut PageView, layered: &Document) -> Result
     if diff.any > MAX_DIFFERENCE || diff.solid > MAX_SOLID_DIFFERENCE {
         return Err(format!("the art on them differs from the page's in {:.1}% of it", diff.any * 100.0));
     }
+    if diff.art > MAX_ART_DIFFERENCE {
+        return Err(format!("the art on them differs from the page's in {:.1}% of it", diff.art * 100.0));
+    }
     if diff.any <= NOTABLE_DIFFERENCE {
         return Ok(None);
     }
-    Ok(Some(if diff.art > NOTABLE_DIFFERENCE {
-        format!(
-            "the art on the layers differs from the file's own page in about {:.1}% of it (brush strokes, live effects and the like that the layers' data doesn't describe)",
-            diff.art * 100.0
-        )
-    } else {
-        format!(
-            "the type on the layers differs from the file's own page in about {:.1}% of it (type laid out again from the file's text, or drawn in another font)",
-            (diff.any - diff.art) * 100.0
-        )
-    }))
+    Ok(Some(format!(
+        "the type on the layers differs from the file's own page in about {:.1}% of it (type laid out again from the file's text, or drawn in another font)",
+        (diff.any - diff.art) * 100.0
+    )))
 }
 
 /// The EPS `visible` (read as its page) read through its editing copy instead (its private data, or
