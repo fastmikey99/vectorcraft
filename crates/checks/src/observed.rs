@@ -1004,7 +1004,19 @@ mod tests {
             "no-vector" => "",
             _ => "/OC /L BDC /GS gs /Ink cs 1 scn 10 10 50 50 re f EMC",
         };
-        let stream = if mode == "after" { format!("{vector} {image}") } else { format!("{image} {vector}") };
+        let stream = match mode {
+            "after" => format!("{vector} {image}"),
+            "balanced-form-owned" => format!(
+                "{image} /OC /W BDC /Fm Do EMC /OC /L BDC /KO gs /Ink cs 0 scn 10 10 50 50 re f EMC /OC /W BDC /Fm Do EMC /OC /L BDC /Fa Do /Fa Do EMC"
+            ),
+            "used-source-duplicate" => format!("{image} /OC /W BDC q 10 0 0 10 30 30 cm /Im Do Q EMC {vector}"),
+            "used-technical-duplicate" => format!("{image} {vector} /OC /W BDC /GS gs /Ink cs 1 scn 70 70 5 5 re f EMC"),
+            "form-owned-duplicate" => format!("{image} /OC /W BDC /Fm Do EMC {vector} /OC /W BDC /Fm Do EMC"),
+            "empty-scope-duplicate" => format!("/OC /W BDC EMC {image} {vector}"),
+            "clipped-duplicate" => format!("{image} {vector} /OC /W BDC q 0 0 1 1 re W n /GS gs /Ink cs 1 scn 70 70 5 5 re f Q EMC"),
+            "zero-tint-duplicate" => format!("{image} {vector} /OC /W BDC /GS gs /Ink cs 0 scn 10 10 50 50 re f EMC"),
+            _ => format!("{image} {vector}"),
+        };
         let extras = match mode {
             "group" => "/Group << /S /Transparency /CS /DeviceCMYK >>",
             _ => "",
@@ -1016,12 +1028,25 @@ mod tests {
         };
         let space = if mode == "technical-image" { "[/Separation /Exact#20ink /DeviceCMYK 5 0 R]" } else { "/DeviceGray" };
         let layer = if mode == "duplicate" { "Layer" } else { "Source" };
+        let unused_layer = match mode {
+            "unused-source-duplicate" | "used-source-duplicate" => "Source",
+            "unused-technical-duplicate"
+            | "used-technical-duplicate"
+            | "form-owned-duplicate"
+            | "empty-scope-duplicate"
+            | "clipped-duplicate"
+            | "zero-tint-duplicate"
+            | "two-page-duplicate" => "Layer",
+            "synthetic-name" => "Layer 3",
+            "balanced-form-owned" => "Second",
+            _ => "Unrouted",
+        };
         let alpha = if mode == "alpha-zero" { "00>" } else { "FF>" };
         crate::pdf::tests::objects_pdf(&[
-            "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [6 0 R 9 0 R 11 0 R] /D << /ON [6 0 R 9 0 R 11 0 R] >> >> >>".into(),
-            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [11 0 R 6 0 R 9 0 R] /D << /ON [11 0 R 6 0 R 9 0 R] >> >> >>".into(),
+            if mode == "two-page-duplicate" { "<< /Type /Pages /Kids [3 0 R 13 0 R] /Count 2 >>" } else { "<< /Type /Pages /Kids [3 0 R] /Count 1 >>" }.into(),
             format!(
-                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] {extras} /Resources << /Properties << /L 6 0 R /S 9 0 R /W 11 0 R >> /XObject << /Im 8 0 R >> /ColorSpace << /Ink [/Separation /Exact#20ink /DeviceCMYK 5 0 R] >> /ExtGState << /GS 7 0 R >> >> /Contents 4 0 R >>"
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] {extras} /Resources << /Properties << /L 6 0 R /S 9 0 R /W 11 0 R >> /XObject << /Im 8 0 R /Fm 12 0 R /Fa 15 0 R >> /ColorSpace << /Ink [/Separation /Exact#20ink /DeviceCMYK 5 0 R] >> /ExtGState << /GS 7 0 R /KO 16 0 R >> >> /Contents 4 0 R >>"
             ),
             format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
             "<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 1 0 0] /N 1 >>".into(),
@@ -1030,11 +1055,25 @@ mod tests {
             format!(
                 "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace {space} {image_extras} /Filter /ASCIIHexDecode /Length 3 >>\nstream\n80>\nendstream"
             ),
-            format!("<< /Type /OCG /Name ({layer}) >>"),
+            if mode == "synthetic-name" { "<< /Type /OCG >>".into() } else { format!("<< /Type /OCG /Name ({layer}) >>") },
             format!(
                 "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /ASCIIHexDecode /Length 3 >>\nstream\n{alpha}\nendstream"
             ),
-            "<< /Type /OCG /Name (Unrouted) >>".into(),
+            format!("<< /Type /OCG /Name ({unused_layer}) >>"),
+            {
+                let content = if mode == "balanced-form-owned" { "/GS gs /Ink cs 1 scn 10 10 50 50 re f" } else { "/GS gs /Ink cs 0 scn 10 10 50 50 re f" };
+                format!("<< /Type /XObject /Subtype /Form /BBox [0 0 100 100] /OC 6 0 R /Length {} >>\nstream\n{content}\nendstream", content.len())
+            },
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /Properties << /W 11 0 R >> /ColorSpace << /Ink [/Separation /Exact#20ink /DeviceCMYK 5 0 R] >> /ExtGState << /GS 7 0 R >> >> /Contents 14 0 R >>".into(),
+            {
+                let content = "/OC /W BDC /GS gs /Ink cs 1 scn 10 10 50 50 re f EMC";
+                format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len())
+            },
+            {
+                let content = "/KO gs /Ink cs 0 scn 10 10 50 50 re f";
+                format!("<< /Type /XObject /Subtype /Form /BBox [0 0 100 100] /OC 11 0 R /Length {} >>\nstream\n{content}\nendstream", content.len())
+            },
+            "<< /Type /ExtGState /op false /OP false /OPM 0 >>".into(),
         ])
     }
     fn prelude_request(bytes: &[u8]) -> Request {
@@ -1048,6 +1087,9 @@ mod tests {
         link.name_mode = "source".into();
         link.separation_name = None;
         link.pdf_layer = "Source".into();
+        if vectorcraft_pdf::print_order(bytes).unwrap().issues.iter().any(|s| s.contains("Synthesized PDF layer names")) {
+            link.pdf_layer = "Layer 3".into();
+        }
         link.destination = "Indigo".into();
         link.layer_order = 0;
         r.recipe.file_links[0].layer_order = 1;
@@ -1059,6 +1101,26 @@ mod tests {
         f["verification"]["contributions"]["image-output"] = json!({"emptiness":"required"});
         for garment in ["dark", "light"] {
             f["verification"]["plates"].as_array_mut().unwrap().push(json!({"key":format!("{garment}-image"),"garment":garment,"name":null,"name_mode":"composite","destination":"Indigo","required":false,"links":["image-output"],"evidence":"synthetic specification"}));
+        }
+        if vectorcraft_pdf::print_order(bytes).unwrap().layers.iter().any(|n| n == "Second") {
+            let mut rule = r.recipe.rules[0].clone();
+            let old_rule = rule.rule_key.clone();
+            rule.rule_key = "second".into();
+            r.recipe.rules.push(rule);
+            let mut link = r.recipe.file_links[0].clone();
+            let old_link = link.key.clone();
+            link.key = "second".into();
+            link.source_rule = "second".into();
+            link.pdf_layer = "Second".into();
+            r.recipe.file_links.push(link);
+            f["treatments"]["second"] = f["treatments"][&old_rule].clone();
+            f["outputs"]["second"] = f["outputs"][&old_link].clone();
+            f["verification"]["contributions"]["second"] = f["verification"]["contributions"][&old_link].clone();
+            for plate in f["verification"]["plates"].as_array_mut().unwrap() {
+                if plate["links"].as_array().unwrap().contains(&json!(old_link)) {
+                    plate["links"].as_array_mut().unwrap().push(json!("second"));
+                }
+            }
         }
         r.identity.recipe_sha256 = crate::digest(&r.recipe).unwrap();
         assert!(crate::contract::issues(&r.recipe).is_empty(), "{:?}", crate::contract::issues(&r.recipe));
@@ -1105,11 +1167,29 @@ mod tests {
     }
     #[test]
     fn image_prelude_refuses_later_images_unknown_context_and_technical_ink() {
-        for mode in ["after", "group", "interpolate", "technical-image", "duplicate"] {
+        for mode in [
+            "after",
+            "group",
+            "interpolate",
+            "technical-image",
+            "duplicate",
+            "used-source-duplicate",
+            "used-technical-duplicate",
+            "clipped-duplicate",
+            "zero-tint-duplicate",
+            "two-page-duplicate",
+            "synthetic-name",
+        ] {
             let bytes = prelude_pdf(mode);
             let r = prelude_request(&bytes);
             let out = crate::pdf::check(&r, &bytes).unwrap();
             assert!(out.findings.iter().filter(|f| f.obligation.key.starts_with("observed/")).all(|f| f.status == Status::Incomplete), "{mode}");
+            if mode.contains("duplicate") {
+                assert!(finding(&out, "observed/routing").reason.contains("Multiple painted layer identities"), "{mode}");
+            }
+            if mode == "synthetic-name" {
+                assert!(vectorcraft_pdf::print_order(&bytes).unwrap().issues.iter().any(|s| s.contains("Synthesized PDF layer names")));
+            }
         }
         let bytes = prelude_pdf("plain");
         let mut r = prelude_request(&bytes);
@@ -1146,6 +1226,45 @@ mod tests {
         changed.recipe.file_links.push(changed.recipe.file_links[1].clone());
         assert!(crate::observed_images::Prelude::new(&changed, &bytes, &imported.document, &imported.warnings, &general).is_err());
     }
+    #[test]
+    fn unused_duplicate_declarations_do_not_obscure_unique_painted_identities() {
+        for mode in ["unused-source-duplicate", "unused-technical-duplicate", "empty-scope-duplicate"] {
+            let bytes = prelude_pdf(mode);
+            let out = crate::pdf::check(&prelude_request(&bytes), &bytes).unwrap();
+            assert_eq!(finding(&out, "observed/plate/dark-output/presence").status, Status::Pass, "{mode}");
+            assert_eq!(finding(&out, "observed/file/output/paint").status, Status::Pass, "{mode}");
+            assert_eq!(finding(&out, "observed/file/image-output/paint").status, Status::Incomplete);
+            assert_eq!(finding(&out, "global/integrity").status, Status::Incomplete);
+            assert_eq!(finding(&out, "observed/routing").observed["image_prelude"]["unused_duplicate_layer_declarations"], json!(1));
+            assert!(
+                finding(&out, "global/integrity").observed["raw_paint_audit"]["issues_sample"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|s| s.as_str().is_some_and(|s| s.contains("Duplicate PDF layer")))
+            );
+        }
+    }
+    #[test]
+    fn form_owned_oc_cannot_merge_divergent_native_layer_attribution() {
+        let bytes = prelude_pdf("form-owned-duplicate");
+        let out = crate::pdf::check(&prelude_request(&bytes), &bytes).unwrap();
+        assert!(
+            out.findings.iter().filter(|f| f.obligation.key.starts_with("observed/")).all(|f| f.status == Status::Incomplete),
+            "{:?}",
+            finding(&out, "observed/plate/dark-output/presence")
+        );
+        assert!(finding(&out, "observed/routing").reason.contains("Multiple native painted layer identities"));
+    }
+    #[test]
+    fn balanced_form_oc_counts_cannot_certify_reordered_plate_presence() {
+        let bytes = prelude_pdf("balanced-form-owned");
+        let raw = vectorcraft_pdf::print_order(&bytes).unwrap();
+        assert_eq!(raw.layers.iter().collect::<BTreeSet<_>>().len(), raw.layers.len());
+        assert!(raw.issues.iter().any(|s| s.contains("Form-owned optional content")));
+        let out = crate::pdf::check(&prelude_request(&bytes), &bytes).unwrap();
+        assert!(out.findings.iter().filter(|f| f.obligation.key.starts_with("observed/")).all(|f| f.status == Status::Incomplete));
+    }
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn image_prelude_exported_cases_have_independent_expected_statuses() {
@@ -1166,12 +1285,38 @@ mod tests {
             "interpolate",
             "technical-image",
             "duplicate",
+            "unused-source-duplicate",
+            "unused-technical-duplicate",
+            "used-source-duplicate",
+            "used-technical-duplicate",
+            "form-owned-duplicate",
+            "empty-scope-duplicate",
+            "clipped-duplicate",
+            "zero-tint-duplicate",
+            "two-page-duplicate",
+            "synthetic-name",
+            "balanced-form-owned",
         ] {
             let bytes = prelude_pdf(mode);
             let r = prelude_request(&bytes);
             let out = crate::pdf::check(&r, &bytes).unwrap();
             let mut expected = serde_json::Map::new();
-            let refused = ["after", "group", "interpolate", "technical-image", "duplicate"].contains(&mode);
+            let refused = [
+                "after",
+                "group",
+                "interpolate",
+                "technical-image",
+                "duplicate",
+                "used-source-duplicate",
+                "used-technical-duplicate",
+                "form-owned-duplicate",
+                "clipped-duplicate",
+                "zero-tint-duplicate",
+                "two-page-duplicate",
+                "synthetic-name",
+                "balanced-form-owned",
+            ]
+            .contains(&mode);
             expected.insert("observed/file/image-output/paint".into(), json!("incomplete"));
             expected.insert("observed/file/output/order".into(), json!("incomplete"));
             expected.insert("observed/plate/dark-image/presence".into(), json!("incomplete"));
@@ -1194,7 +1339,7 @@ mod tests {
             }
             std::fs::write(dir.join(format!("{mode}.pdf")), bytes).unwrap();
             std::fs::write(dir.join(format!("{mode}.json")), serde_json::to_vec(&r).unwrap()).unwrap();
-            cases.push(json!({"name":mode,"args":[format!("/case/{mode}.json"),format!("/case/{mode}.pdf")],"expected":expected,"expected_image_audit_count":1}));
+            cases.push(json!({"name":mode,"args":[format!("/case/{mode}.json"),format!("/case/{mode}.pdf")],"expected":expected,"expected_image_audit_count":if mode=="used-source-duplicate" {2} else {1}}));
         }
         std::fs::write(dir.join("parity-cases.json"), serde_json::to_vec_pretty(&cases).unwrap()).unwrap();
     }

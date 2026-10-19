@@ -95,6 +95,9 @@ fn print_order_with_cost(bytes: &[u8], initial_sample_cost: usize) -> Result<Pri
     if ocgs.list.iter().any(|g| !g.on || !g.print) {
         report.issues.insert("Optional-content view/print states require independent reconciliation".into());
     }
+    if ocgs.list.iter().any(|g| g.synthetic_name) {
+        report.issues.insert("Synthesized PDF layer names cannot establish exact routing".into());
+    }
     report.layers = ocgs.list.into_iter().map(|g| g.name).collect();
     if report.layers.iter().collect::<BTreeSet<_>>().len() != report.layers.len() {
         report.issues.insert("Duplicate PDF layer names cannot establish unique routing".into());

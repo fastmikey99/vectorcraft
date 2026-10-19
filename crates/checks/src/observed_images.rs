@@ -7,6 +7,7 @@ use vectorcraft_geom::Affine;
 pub(crate) struct Prelude {
     census: Census,
     links: BTreeSet<String>,
+    unused_duplicate_layers: usize,
 }
 impl Prelude {
     pub(crate) fn census(&self) -> &Census {
@@ -16,10 +17,14 @@ impl Prelude {
         self.links.contains(key)
     }
     pub(crate) fn summary(&self) -> serde_json::Value {
-        serde_json::json!({"proof":"process-only images before all vectors; technical ink isolation only", "image_count":self.census.image_objects,"affected_source_links":self.links,"unresolved":"image coverage, routing, flags, mixed order and source fidelity remain unresolved"})
+        serde_json::json!({"proof":"process-only images before all vectors; technical ink isolation only", "image_count":self.census.image_objects,"affected_source_links":self.links,"unused_duplicate_layer_declarations":self.unused_duplicate_layers,"unresolved":"image coverage, routing, flags, mixed order and source fidelity remain unresolved"})
     }
     pub(crate) fn new(r: &Request, bytes: &[u8], doc: &vectorcraft_doc::Document, warnings: &[String], general: &Census) -> Result<Self, String> {
-        let order = vectorcraft_pdf::print_order(bytes).map_err(|e| e.to_string())?;
+        let mut order = vectorcraft_pdf::print_order(bytes).map_err(|e| e.to_string())?;
+        let unused_duplicate_layers = reconcile_unused_layers(&mut order)?;
+        if unused_duplicate_layers > 0 {
+            reconcile_native_layers(doc)?;
+        }
         let count = order.images.iter().map(Vec::len).sum::<usize>();
         if count == 0 || count > 4096 || general.raw_audit_error.is_some() || general.raw_audit.as_ref().is_none_or(|a| a.image_use_count != count) {
             return Err("Raw image inventory is missing or inconsistent".into());
@@ -125,8 +130,77 @@ impl Prelude {
         // Retain the real diagnostic, including its images and unresolved issue.
         // Only this typed proof can select the narrower observed-vector path.
         census.raw_audit = general.raw_audit.clone();
-        Ok(Self { census, links })
+        Ok(Self { census, links, unused_duplicate_layers })
     }
+}
+
+// Form-owned /OC can disagree with the native interpreter's enclosing marked
+// scope. Do not let equal names hide two populated native layer identities and
+// thereby reorder their paints when the native per-layer queues are joined.
+fn reconcile_native_layers(doc: &vectorcraft_doc::Document) -> Result<(), String> {
+    use vectorcraft_doc::NodeKind;
+    let mut stack: Vec<_> = doc.layers.iter().map(|n| (n.as_ref(), None, 0usize)).collect();
+    let mut used = BTreeMap::new();
+    let mut count = 0usize;
+    while let Some((node, mut layer, depth)) = stack.pop() {
+        count += 1;
+        if count > 50_000 || depth > 256 {
+            return Err("Native layer identity census exceeds resource budget".into());
+        }
+        if matches!(node.kind, NodeKind::Layer { .. }) {
+            layer = Some((node.name.as_deref().unwrap_or(""), node.id));
+        }
+        if (matches!(node.kind, NodeKind::Path { .. } | NodeKind::Image(_) | NodeKind::Compound { .. })
+            || node.appearance.items.iter().any(|i| !i.paint().is_none()))
+            && let Some((name, id)) = layer
+            && used.insert(name, id).is_some_and(|previous| previous != id)
+        {
+            return Err("Multiple native painted layer identities share the same name".into());
+        }
+        if let Some(children) = node.children() {
+            if count.saturating_add(stack.len()).saturating_add(children.len()) > 50_000 {
+                return Err("Native layer identity census exceeds resource budget".into());
+            }
+            stack.extend(children.iter().map(|n| (n.as_ref(), layer, depth + 1)));
+        }
+    }
+    Ok(())
+}
+
+// A declared name need not identify a unique OCG when all but one of its
+// identities have no raw paint events. Canonicalize only this private proof's
+// lookup dictionary; preserve the original general audit and its diagnostic.
+// Both paths and images count as use, including clipped and zero-tint paint.
+fn reconcile_unused_layers(order: &mut vectorcraft_pdf::PrintOrder) -> Result<usize, String> {
+    const ISSUE: &str = "Duplicate PDF layer names cannot establish unique routing";
+    if !order.issues.contains(ISSUE) {
+        return Ok(0);
+    }
+    let mut used: BTreeMap<&str, usize> = BTreeMap::new();
+    for index in order.pages.iter().flatten().copied().chain(order.images.iter().flatten().map(|i| i.layer)).flatten() {
+        let name = order.layers.get(index).ok_or("Raw paint layer index is unresolved")?;
+        if used.insert(name.as_str(), index).is_some_and(|previous| previous != index) {
+            return Err("Multiple painted layer identities share the same name".into());
+        }
+    }
+    let mut names = BTreeMap::new();
+    let mut layers = Vec::new();
+    let mut mapping = Vec::new();
+    for name in &order.layers {
+        let index = *names.entry(name.clone()).or_insert_with(|| {
+            let index = layers.len();
+            layers.push(name.clone());
+            index
+        });
+        mapping.push(index);
+    }
+    for index in order.pages.iter_mut().flatten().chain(order.images.iter_mut().flatten().map(|i| &mut i.layer)).flatten() {
+        *index = *mapping.get(*index).ok_or("Raw layer identity cannot be reconciled")?;
+    }
+    let removed = order.layers.len() - layers.len();
+    order.layers = layers;
+    order.issues.remove(ISSUE);
+    Ok(removed)
 }
 fn page_transform(page: &vectorcraft_pdf::ProductionPage) -> Result<Affine, String> {
     let [mx0, my0, mx1, my1] = page.media_mm;

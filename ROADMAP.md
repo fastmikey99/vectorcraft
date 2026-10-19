@@ -292,3 +292,6 @@ Verification callers retain explicit enclosing/page-wide clips and Form BBoxes t
 
 
 2026-10-19 — HC21: bounded technical-vector observations after a validated process-only image prelude. Real image counts and general diagnostics remain; source-image coverage, mixed order and broader PDF semantics stay unresolved. All nine CI gates, 136 checker tests and 403 exact-and-expected native/WASI comparisons pass; two Fable reviews closed with no remaining blocker; no parity score or production-readiness claim.
+
+
+2026-10-19 — HC22: unused duplicate layer declarations can be canonicalized only inside the scoped process-image-prelude proof after exact raw identity use accounting. Multiple painted identities sharing a name still refuse the proof; the general duplicate diagnostic remains. Native painted identities independently reconcile; generated names and Form-owned optional content remain unresolved. All nine CI gates, 139 checker tests, 417 exact-and-expected native/WASI cases, two 122-case independent raster runs, worker/package/browser verification and ten performance budgets pass. Three Fable reviews closed the demonstrated attribution false passes. No production-readiness or parity-score claim.

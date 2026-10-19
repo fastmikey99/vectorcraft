@@ -55,6 +55,8 @@ pub(crate) const MAX_NESTING: usize = 32;
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Ocg {
     pub name: String,
+    /// A missing/empty name received an editor label, not an exact PDF identity.
+    pub synthetic_name: bool,
     /// On in the file's default configuration (shown by viewers).
     pub on: bool,
     /// Printed (its print usage isn't off).
@@ -172,8 +174,9 @@ impl Ocgs {
             Some(false) => false,
             _ => !self.off.contains(&id),
         };
-        let name = if name.is_empty() { format!("Layer {}", self.list.len() + 1) } else { name };
-        self.list.push(Ocg { name, on, print, locked, parent: None });
+        let synthetic_name = name.is_empty();
+        let name = if synthetic_name { format!("Layer {}", self.list.len() + 1) } else { name };
+        self.list.push(Ocg { name, synthetic_name, on, print, locked, parent: None });
         self.index.insert(id, self.list.len() - 1);
         self.list.len() - 1
     }
@@ -1020,6 +1023,12 @@ impl Walker<'_, '_> {
                     if !s.filters().is_empty() && data.len() >= self.max_form_bytes {
                         self.out.cut = true;
                         return;
+                    }
+                    if d.contains_key(b"OC") {
+                        // Native attribution currently follows marked content;
+                        // matching per-name counts cannot prove form-owned OC
+                        // agrees, even when all OCG names are distinct.
+                        self.order_issue("Form-owned optional content requires native attribution reconciliation");
                     }
                     let oc = d.get::<Dict<'_>>(b"OC");
                     if let Some(oc) = &oc {
