@@ -297,6 +297,42 @@ mod tests {
         assert!(indices(&order, &census).unwrap_err().contains("overprint/OPM"));
     }
     #[test]
+    fn strokes_reconcile_fill_stroke_and_overprint_modes_independently() {
+        for (stream, expected) in [
+            ("1 0 0 0 K 4 w /OP1 gs 10 10 20 20 re S", vec![(true, true, 1)]),
+            ("1 0 0 0 K 4 w /OP0 gs 10 10 20 20 re S", vec![(true, true, 0)]),
+            ("1 0 0 0 k 0 1 0 0 K 4 w /StrokeOnly gs 10 10 20 20 re B", vec![(false, false, 1), (true, true, 1)]),
+            ("1 0 0 0 k 0 1 0 0 K 4 w /StrokeDefault gs 10 10 20 20 re B", vec![(false, true, 1), (true, true, 1)]),
+            (".5 G 4 w /StrokeOnly gs 10 10 20 20 re S", vec![(true, true, 1)]),
+            ("1 0 0 RG 4 w /StrokeOnly gs 10 10 20 20 re S", vec![(true, true, 1)]),
+        ] {
+            let bytes = crate::pdf::tests::composite_fixture(stream);
+            let order = vectorcraft_pdf::print_order(&bytes).unwrap();
+            let mut census = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+            assert_eq!(census.paints.iter().map(|p| (p.stroke, p.overprint, u8::from(!p.overprint_zero))).collect::<Vec<_>>(), expected, "{stream}");
+            assert!(try_reconcile(&bytes, &mut census).is_ok(), "{stream}: {:?}", census.raw_audit);
+            assert!(census.paint_order_verified);
+            census.paints.last_mut().unwrap().stroke = false;
+            assert!(indices(&order, &census).unwrap_err().contains("fill/stroke"));
+        }
+    }
+    #[test]
+    fn gray_endpoint_audit_covers_current_space_fill_and_stroke_operators() {
+        for stream in [
+            "0.00000001 g 10 10 20 20 re f",
+            "0.00000001 G 4 w 10 10 20 20 re S",
+            "/DeviceGray cs 0.00000001 sc 10 10 20 20 re f",
+            "/DeviceGray CS 0.00000001 SCN 4 w 10 10 20 20 re S",
+        ] {
+            let bytes = crate::pdf::tests::composite_fixture(stream);
+            let order = vectorcraft_pdf::print_order(&bytes).unwrap();
+            assert!(order.issues.iter().any(|s| s.contains("rounding")), "{stream}");
+            let mut census = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+            assert!(try_reconcile(&bytes, &mut census).is_err());
+            assert!(!census.paint_order_verified);
+        }
+    }
+    #[test]
     fn image_audit_survives_unresolved_reconciliation_and_exposes_omissions() {
         let bytes = pdf(false, "BI /W 1 /H 1 /BPC 8 /CS /G ID x EI");
         let mut census = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());

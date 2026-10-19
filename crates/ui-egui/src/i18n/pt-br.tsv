@@ -4948,3 +4948,4 @@ mark-style	Japanese	Japonesas
 @msg	Internal checker failure: {e}	Falha interna da verificação: {e}
 	Receive Separation Check Results	Receber resultados da verificação de separações
 @msg	Service check export exceeds the 64 MiB upload budget	A exportação para verificação excede o limite de envio de 64 MiB
+@msg	Colour operand count exceeds precision reconciliation budget	O número de operandos de cor excede o limite de verificação de precisão

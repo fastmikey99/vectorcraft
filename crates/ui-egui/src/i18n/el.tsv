@@ -4983,3 +4983,4 @@ effect	Points	Σημεία
 @msg	Internal checker failure: {e}	Εσωτερικό σφάλμα ελέγχου: {e}
 	Receive Separation Check Results	Λήψη αποτελεσμάτων ελέγχου διαχωρισμών
 @msg	Service check export exceeds the 64 MiB upload budget	Η εξαγωγή για έλεγχο υπερβαίνει το όριο μεταφόρτωσης των 64 MiB
+@msg	Colour operand count exceeds precision reconciliation budget	Το πλήθος των τελεστέων χρώματος υπερβαίνει το όριο ελέγχου ακρίβειας

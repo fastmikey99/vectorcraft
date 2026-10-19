@@ -4568,3 +4568,4 @@ theme	Appearance	Erscheinungsbild
 @msg	Internal checker failure: {e}	Interner Prüfungsfehler: {e}
 	Receive Separation Check Results	Ergebnisse der Farbauszugsprüfung empfangen
 @msg	Service check export exceeds the 64 MiB upload budget	Der Export zur Prüfung überschreitet das Upload-Limit von 64 MiB
+@msg	Colour operand count exceeds precision reconciliation budget	Die Anzahl der Farboperanden überschreitet das Limit für den Genauigkeitsabgleich

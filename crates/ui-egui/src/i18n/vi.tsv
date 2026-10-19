@@ -4588,3 +4588,4 @@ theme	Appearance	Giao diện
 @msg	Internal checker failure: {e}	Lỗi nội bộ của bộ kiểm tra: {e}
 	Receive Separation Check Results	Nhận kết quả kiểm tra tách màu
 @msg	Service check export exceeds the 64 MiB upload budget	Tệp xuất để kiểm tra vượt quá giới hạn tải lên 64 MiB
+@msg	Colour operand count exceeds precision reconciliation budget	Số toán hạng màu vượt quá giới hạn kiểm tra độ chính xác

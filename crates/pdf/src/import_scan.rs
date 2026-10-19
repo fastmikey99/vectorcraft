@@ -846,19 +846,7 @@ impl Walker<'_, '_> {
             let Some(op) = iter.next() else {
                 break;
             };
-            let colour = matches!(
-                &op,
-                TypedInstruction::NonStrokeColor(_)
-                    | TypedInstruction::StrokeColor(_)
-                    | TypedInstruction::NonStrokeColorNamed(_)
-                    | TypedInstruction::StrokeColorNamed(_)
-                    | TypedInstruction::NonStrokeColorDeviceGray(_)
-                    | TypedInstruction::StrokeColorDeviceGray(_)
-                    | TypedInstruction::NonStrokeColorDeviceRgb(_)
-                    | TypedInstruction::StrokeColorDeviceRgb(_)
-                    | TypedInstruction::NonStrokeColorCmyk(_)
-                    | TypedInstruction::StrokeColorCmyk(_)
-            );
+            let colour = self.out.print_order.as_ref().and_then(|_| colour_operands(&op));
             if self.out.cut {
                 return;
             }
@@ -1089,47 +1077,117 @@ impl Walker<'_, '_> {
                 }
                 _ => {}
             }
-            if colour && self.out.print_order.is_some() && data.get(start..iter.committed()).is_none_or(|raw| !colour_endpoints_preserved(raw)) {
-                self.order_issue("Colour component rounding changes zero/full-tone support; raw precision reconciliation required");
+            if let Some((operands, stroke)) = colour {
+                let gray = self.state().spaces[usize::from(stroke)] == PrintColorSpace::DeviceGray;
+                if let Err(reason) = colour_endpoints_preserved(data.get(start..iter.committed()).unwrap_or_default(), &operands, gray) {
+                    self.order_issue(reason);
+                }
             }
         }
     }
 }
 
-/// Preserve literal zero/one classification before the editable f32 colour
-/// decode. A numerical refusal is not a manufacturing tint threshold. Read raw
-/// decimals so even values that underflow f64 or round to one cannot look exact.
-fn colour_endpoints_preserved(raw: &[u8]) -> bool {
-    for line in raw.split(|b| matches!(b, b'\r' | b'\n')) {
-        let line = line.split(|b| *b == b'%').next().unwrap_or_default();
-        for token in line.split(|b| *b == 0 || b.is_ascii_whitespace()).filter(|t| !t.is_empty()) {
-            if !token.first().is_some_and(|b| b.is_ascii_digit() || matches!(b, b'+' | b'-' | b'.')) {
-                continue;
-            }
-            let Ok(text) = std::str::from_utf8(token) else {
-                return false;
-            };
-            let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
-            if !unsigned.bytes().all(|b| b.is_ascii_digit() || b == b'.') || !unsigned.bytes().any(|b| b.is_ascii_digit()) {
-                return false;
-            }
-            let zero = unsigned.bytes().all(|b| b == b'0' || b == b'.');
-            let (integer, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
-            let one = !text.starts_with('-') && integer.trim_start_matches('0') == "1" && fraction.bytes().all(|b| b == b'0');
-            let Ok(number) = text.parse::<f64>() else {
-                return false;
-            };
-            if !number.is_finite() || !(0.0..=1.0).contains(&number) {
-                return false;
-            }
-            let decoded = number as f32;
-            if (decoded == 0.0) != zero || (decoded == 1.0) != one {
-                return false;
-            }
+fn colour_operands(op: &TypedInstruction<'_, '_>) -> Option<(Vec<f64>, bool)> {
+    let values = match op {
+        TypedInstruction::NonStrokeColor(c) => c.0.iter().take(33).map(|n| n.as_f64()).collect(),
+        TypedInstruction::StrokeColor(c) => c.0.iter().take(33).map(|n| n.as_f64()).collect(),
+        TypedInstruction::NonStrokeColorNamed(c) => c.0.iter().take(33).map(|n| n.as_f64()).collect(),
+        TypedInstruction::StrokeColorNamed(c) => c.0.iter().take(33).map(|n| n.as_f64()).collect(),
+        TypedInstruction::NonStrokeColorDeviceGray(c) => vec![c.0.as_f64()],
+        TypedInstruction::StrokeColorDeviceGray(c) => vec![c.0.as_f64()],
+        TypedInstruction::NonStrokeColorDeviceRgb(c) => vec![c.0.as_f64(), c.1.as_f64(), c.2.as_f64()],
+        TypedInstruction::StrokeColorDeviceRgb(c) => vec![c.0.as_f64(), c.1.as_f64(), c.2.as_f64()],
+        TypedInstruction::NonStrokeColorCmyk(c) => vec![c.0.as_f64(), c.1.as_f64(), c.2.as_f64(), c.3.as_f64()],
+        TypedInstruction::StrokeColorCmyk(c) => vec![c.0.as_f64(), c.1.as_f64(), c.2.as_f64(), c.3.as_f64()],
+        _ => return None,
+    };
+    let stroke = matches!(
+        op,
+        TypedInstruction::StrokeColor(_)
+            | TypedInstruction::StrokeColorNamed(_)
+            | TypedInstruction::StrokeColorDeviceGray(_)
+            | TypedInstruction::StrokeColorDeviceRgb(_)
+            | TypedInstruction::StrokeColorCmyk(_)
+    );
+    Some((values, stroke))
+}
+
+/// Raw decimal endpoint classification is compared with the actual typed
+/// operands consumed by the interpreter, rather than another numeric parser.
+fn colour_endpoints_preserved(raw: &[u8], operands: &[f64], gray: bool) -> Result<(), &'static str> {
+    const SYNTAX: &str = "Colour operands require raw/decoded syntax reconciliation";
+    const DOMAIN: &str = "Colour operand domain is unsupported by unit-interval precision reconciliation";
+    const PRECISION: &str = "Colour component rounding changes zero/full-tone support; raw precision reconciliation required";
+    if operands.len() > 32 {
+        return Err("Colour operand count exceeds precision reconciliation budget");
+    }
+    let whitespace = |b: u8| matches!(b, 0 | 9 | 10 | 12 | 13 | 32);
+    let delimiter = |b: u8| whitespace(b) || matches!(b, b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%');
+    let mut input = raw;
+    let mut index = 0;
+    let mut issue = None;
+    while let Some(&first) = input.first() {
+        if whitespace(first) {
+            input = input.get(1..).ok_or(SYNTAX)?;
+            continue;
+        }
+        if first == b'%' {
+            let end = input.iter().position(|b| matches!(b, b'\r' | b'\n')).unwrap_or(input.len());
+            input = input.get(end..).ok_or(SYNTAX)?;
+            continue;
+        }
+        if first == b'/' {
+            input = input.get(1..).ok_or(SYNTAX)?;
+            let end = input.iter().position(|b| delimiter(*b)).unwrap_or(input.len());
+            input = input.get(end..).ok_or(SYNTAX)?;
+            continue;
+        }
+        if delimiter(first) {
+            return Err(SYNTAX);
+        }
+        let end = input.iter().position(|b| delimiter(*b)).unwrap_or(input.len());
+        let token = input.get(..end).ok_or(SYNTAX)?;
+        input = input.get(end..).ok_or(SYNTAX)?;
+        if !first.is_ascii_digit() && !matches!(first, b'+' | b'-' | b'.') {
+            continue;
+        }
+        let text = std::str::from_utf8(token).map_err(|_| SYNTAX)?;
+        let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
+        if !unsigned.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+            || !unsigned.bytes().any(|b| b.is_ascii_digit())
+            || unsigned.bytes().filter(|b| *b == b'.').count() > 1
+        {
+            return Err(SYNTAX);
+        }
+        let zero = unsigned.bytes().all(|b| b == b'0' || b == b'.');
+        let (integer, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+        let integer = integer.trim_start_matches('0');
+        let fractional_zero = fraction.bytes().all(|b| b == b'0');
+        let one = !text.starts_with('-') && integer == "1" && fractional_zero;
+        let decoded = *operands.get(index).ok_or(SYNTAX)?;
+        index += 1;
+        if (text.starts_with('-') && !zero)
+            || (!integer.is_empty() && (integer != "1" || !fractional_zero))
+            || !decoded.is_finite()
+            || !(0.0..=1.0).contains(&decoded)
+        {
+            issue.get_or_insert(DOMAIN);
+            continue;
+        }
+        let stored = decoded as f32;
+        // DeviceGray is retained as black tone: the importer performs this
+        // inversion in f32. Its endpoint loss matters as much as operand loss.
+        let inverted = 1.0_f32 - stored;
+        if (stored == 0.0) != zero || (stored == 1.0) != one || (gray && ((inverted == 0.0) != one || (inverted == 1.0) != zero)) {
+            issue.get_or_insert(PRECISION);
         }
     }
-    true
+    if index != operands.len() {
+        return Err(SYNTAX);
+    }
+    issue.map_or(Ok(()), Err)
 }
+
 /// The fonts of a document by cache key: base font name, and whether the file carries the glyphs
 /// ([`embeds_glyphs`]).
 pub(crate) type FontNames = HashMap<u128, (String, bool)>;
@@ -1268,13 +1326,25 @@ pub(crate) fn scan_print_order(
 
 #[cfg(test)]
 mod colour_precision_tests {
-    use super::colour_endpoints_preserved;
+    use super::{TypedIter, colour_endpoints_preserved, colour_operands};
+    fn check(raw: &str, gray: bool) -> Result<(), &'static str> {
+        let mut iter = TypedIter::new(raw.as_bytes());
+        let op = iter.next().ok_or("Colour operands require raw/decoded syntax reconciliation")?;
+        let (operands, _) = colour_operands(&op).ok_or("Colour operands require raw/decoded syntax reconciliation")?;
+        colour_endpoints_preserved(raw.as_bytes(), &operands, gray)
+    }
     #[test]
-    fn literal_colour_endpoints_survive_comments_and_float_limits() {
-        for raw in
-            ["0 .5 1 .25 +1.0 -0 k", "1% ignored 0.999999999\n 0 0 0 k", "0.000000000000000000000000000001 0 0 0 k", "0\0.5 1 rg", "0.0000 01.000 k"]
-        {
-            assert!(colour_endpoints_preserved(raw.as_bytes()), "{raw}");
+    fn literal_colour_endpoints_use_the_actual_typed_operands() {
+        for raw in [
+            "0 .5 1 .25 k",
+            "+1 -0 0 0 k",
+            "1% ignored 0.999999999\r\n 0 0 0 k",
+            "0.000000000000000000000000000001 0 0 0 k",
+            "0\0.5 1 rg",
+            "0.0000 01.000 0 0 k",
+            ".5/123 scn",
+        ] {
+            assert!(check(raw, false).is_ok(), "{raw}");
         }
         for raw in [
             "0.999999999 g".to_string(),
@@ -1282,10 +1352,30 @@ mod colour_precision_tests {
             format!("0.{}1 scn", "0".repeat(400)),
             "0.999999999999999999999999999999 scn".into(),
             ". g".into(),
-            "-0.5 g".into(),
-            "1.1 g".into(),
+            "1-5 g".into(),
+            "0.5 1 0 0 0 k".into(),
         ] {
-            assert!(!colour_endpoints_preserved(raw.as_bytes()), "{raw}");
+            assert!(check(&raw, false).is_err(), "{raw}");
         }
+        // The raw midpoint literal is interior; use both actual possible typed
+        // f64 neighbours to prove that classification follows the decoder value.
+        let midpoint = 1.0_f64 - 2.0_f64.powi(-25);
+        let below = f64::from_bits(midpoint.to_bits() - 1);
+        let raw = b"0.9999999701976776123046875 g";
+        assert!(colour_endpoints_preserved(raw, &[midpoint], false).is_err());
+        assert!(colour_endpoints_preserved(raw, &[below], false).is_ok());
+    }
+    #[test]
+    fn gray_inversion_and_unsupported_domains_have_explicit_refusals() {
+        for raw in ["0.00000001 g", "0.00000001 G", "0.00000001 sc", "0.00000001 SCN", "0.999999999 g"] {
+            assert!(check(raw, true).unwrap_err().contains("rounding"), "{raw}");
+        }
+        for raw in ["1. g", "+1 g", "-0 g", ".5 g", "0 G"] {
+            assert!(check(raw, true).is_ok(), "{raw}");
+        }
+        for raw in ["1.5 0 0 0 k", "-0.5 g", "1.000000000000000000000000000001 g"] {
+            assert!(check(raw, false).unwrap_err().contains("domain"), "{raw}");
+        }
+        assert!(check("0.5 1 0 0 0 k", false).unwrap_err().contains("syntax"));
     }
 }

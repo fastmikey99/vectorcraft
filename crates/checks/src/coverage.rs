@@ -246,6 +246,17 @@ mod independent_tests {
                 cases.push((name, bytes.clone(), ink));
             }
         }
+        for (name, stream, inks) in [
+            ("positive-cyan-stroke", "1 0 0 0 K 4 w /OP1 gs 10 10 20 20 re S", vec!["Cyan"]),
+            ("positive-fill-stroke-opm1", "1 0 0 0 k 0 1 0 0 K 4 w /StrokeOnly gs 10 10 20 20 re B", vec!["Cyan", "Magenta"]),
+            ("positive-fill-stroke-opm0", "1 0 0 0 k 0 1 0 0 K 4 w /OP0 gs 10 10 20 20 re B", vec!["Cyan", "Magenta"]),
+            ("positive-gray-stroke", ".5 G 4 w /OP1 gs 10 10 20 20 re S", vec!["Black"]),
+        ] {
+            let bytes = crate::pdf::tests::composite_fixture(stream);
+            for ink in inks {
+                cases.push((name, bytes.clone(), ink));
+            }
+        }
         for (name, bytes, ink) in cases {
             let mut census = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
             crate::ordering::try_reconcile(&bytes, &mut census).unwrap();

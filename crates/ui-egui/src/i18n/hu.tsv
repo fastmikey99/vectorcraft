@@ -4998,3 +4998,4 @@ imageTrace	Outline	Körvonal
 @msg	Internal checker failure: {e}	Belső ellenőrzési hiba: {e}
 	Receive Separation Check Results	Színkivonat-ellenőrzési eredmények fogadása
 @msg	Service check export exceeds the 64 MiB upload budget	Az ellenőrzéshez exportált fájl meghaladja a 64 MiB-os feltöltési korlátot
+@msg	Colour operand count exceeds precision reconciliation budget	A színoperandusok száma meghaladja a pontosság-ellenőrzés korlátját

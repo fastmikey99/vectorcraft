@@ -13,6 +13,12 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use vectorcraft_geom::Shape;
 
+/// A solid Paint is retained source paint; treatment paint uses mode instead.
+/// Derived technical plates can legitimately use a destination unlike the
+/// source region's route, so destination equality applies only to this case.
+fn preserves_source_paint(piece: &Piece) -> bool {
+    piece.paint.get("type").and_then(Value::as_str) == Some("solid")
+}
 fn tones(piece: &Piece) -> Result<BTreeMap<String, f64>, String> {
     let result = match piece.paint.get("mode").and_then(Value::as_str) {
         Some("cmyk") => {
@@ -29,7 +35,7 @@ fn tones(piece: &Piece) -> Result<BTreeMap<String, f64>, String> {
                 .collect::<Result<_, _>>()?
         }
         Some("output_ink") if piece.ink.is_some() => crate::tone::tones(&piece.paint, piece.ink.as_deref())?,
-        _ if piece.paint.get("type").and_then(Value::as_str) == Some("solid") => crate::tone::tones(&piece.paint, piece.ink.as_deref())?,
+        _ if preserves_source_paint(piece) => crate::tone::tones(&piece.paint, piece.ink.as_deref())?,
         _ => return Err("Composite positive-support requires resolved solid expected paint".into()),
     };
     crate::tone::positive_supported(&result)?;
@@ -75,7 +81,7 @@ fn claims(request: &Request, program: &Program, budget: &mut WorkBudget) -> Resu
     Ok(claims)
 }
 /// A known shared channel must not receive an exact-plate Pass either. Unknown
-/// foreign paints do not weaken the existing exact-channel reconstruction gate.
+/// foreign paints and unresolved outputs leave ownership explicitly unresolved.
 pub(crate) fn exact_collision(request: &Request, program: &Program, key: &str, ink: &str, budget: &mut WorkBudget) -> Result<bool, String> {
     for plate in active_plates(request)? {
         if plate.get("key").and_then(Value::as_str) == Some(key) {
@@ -85,9 +91,13 @@ pub(crate) fn exact_collision(request: &Request, program: &Program, key: &str, i
             return Ok(true);
         }
         for link in link_keys(plate)? {
-            for piece in program.outputs.get(link).into_iter().flatten() {
+            for piece in program
+                .outputs
+                .get(link)
+                .ok_or_else(|| format!("Plate {key}, foreign link {link}: complete expected output required for channel ownership"))?
+            {
                 budget.charge(piece.regions.len().saturating_add(1))?;
-                if tones(piece).is_ok_and(|tones| tones.contains_key(ink)) {
+                if tones(piece).map_err(|e| format!("{link}: {e}"))?.contains_key(ink) {
                     return Ok(true);
                 }
             }
@@ -132,7 +142,7 @@ pub(crate) fn reconstruct(
         if !tones(piece)?.iter().any(|(ink, tone)| owned.contains(ink) && *tone > 0.0) {
             return Err(format!("Composite piece {:?} has no positive owned ink; expected zero/white paint order is unresolved", piece.regions));
         }
-        if piece.paint.get("type").and_then(Value::as_str) == Some("solid") {
+        if preserves_source_paint(piece) {
             for region in &piece.regions {
                 let facts = plan.facts.get(region).ok_or("Composite source facts missing")?;
                 let mut matching = vec![];

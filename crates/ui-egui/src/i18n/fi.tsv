@@ -4995,3 +4995,4 @@ mark-style	Japanese	Japanilainen
 @msg	Internal checker failure: {e}	Tarkistuksen sisäinen virhe: {e}
 	Receive Separation Check Results	Vastaanota värierottelun tarkistustulokset
 @msg	Service check export exceeds the 64 MiB upload budget	Tarkistukseen vietävä tiedosto ylittää 64 MiB:n lähetysrajan
+@msg	Colour operand count exceeds precision reconciliation budget	Värioperandien määrä ylittää tarkkuuden tarkistuksen rajan

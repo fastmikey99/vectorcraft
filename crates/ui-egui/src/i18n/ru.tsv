@@ -4604,3 +4604,4 @@ lighting	Light	Свет
 @msg	Internal checker failure: {e}	Внутренняя ошибка проверки: {e}
 	Receive Separation Check Results	Получить результаты проверки цветоделения
 @msg	Service check export exceeds the 64 MiB upload budget	Экспорт для проверки превышает ограничение загрузки в 64 MiB
+@msg	Colour operand count exceeds precision reconciliation budget	Число цветовых операндов превышает лимит проверки точности

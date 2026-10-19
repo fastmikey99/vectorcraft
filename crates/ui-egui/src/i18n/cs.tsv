@@ -5031,3 +5031,4 @@ mark-style	Japanese	Japonské
 @msg	Internal checker failure: {e}	Interní chyba kontroly: {e}
 	Receive Separation Check Results	Přijmout výsledky kontroly separací
 @msg	Service check export exceeds the 64 MiB upload budget	Export pro kontrolu překračuje limit nahrávání 64 MiB
+@msg	Colour operand count exceeds precision reconciliation budget	Počet barevných operandů překračuje limit pro kontrolu přesnosti

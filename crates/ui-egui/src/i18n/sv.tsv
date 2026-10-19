@@ -4987,3 +4987,4 @@ theme	Appearance	Utseende
 @msg	Internal checker failure: {e}	Internt kontrollfel: {e}
 	Receive Separation Check Results	Ta emot resultat från separationskontrollen
 @msg	Service check export exceeds the 64 MiB upload budget	Exporten för kontroll överskrider uppladdningsgränsen på 64 MiB
+@msg	Colour operand count exceeds precision reconciliation budget	Antalet färgoperander överskrider gränsen för precisionskontroll

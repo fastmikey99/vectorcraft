@@ -4608,3 +4608,4 @@ lighting	Light	Luce
 @msg	Internal checker failure: {e}	Errore interno del controllo: {e}
 	Receive Separation Check Results	Ricevi i risultati del controllo delle separazioni
 @msg	Service check export exceeds the 64 MiB upload budget	L’esportazione per il controllo supera il limite di caricamento di 64 MiB
+@msg	Colour operand count exceeds precision reconciliation budget	Il numero di operandi di colore supera il limite di verifica della precisione

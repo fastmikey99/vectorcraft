@@ -5030,3 +5030,4 @@ theme	Appearance	Apparence
 @msg	Internal checker failure: {e}	Erreur interne de vérification : {e}
 	Receive Separation Check Results	Recevoir les résultats de vérification des séparations
 @msg	Service check export exceeds the 64 MiB upload budget	L’export pour vérification dépasse la limite de téléversement de 64 MiB
+@msg	Colour operand count exceeds precision reconciliation budget	Le nombre d’opérandes de couleur dépasse la limite de vérification de précision

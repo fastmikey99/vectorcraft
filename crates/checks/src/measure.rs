@@ -164,7 +164,7 @@ pub fn check(request: &Request, plan: &Plan, census: &Census, report: &mut Repor
             report.record(
                 &format!("plate/{key}"),
                 Status::NotApplicable,
-                "All contributions proven empty and complete physical census contains no owned-channel paint",
+                "All contributions proven empty and complete physical census establishes no positive owned-channel coverage",
                 reconstruction,
                 evidence(request),
             )?;
@@ -423,6 +423,7 @@ mod tests {
         let bytes = crate::pdf::tests::composite_fixture("1 0 0 0 k 10 10 20 20 re f /OP1 gs /Ink cs 1 scn 15 15 5 5 re f");
         let mut r = foreign_request(&bytes, &bytes, true, false);
         r.recipe.file_links[1].destination = "Indigo".into();
+        r.recipe.foundation.as_mut().unwrap()["input_routes"][1]["destination"] = json!("Indigo");
         let plates = r.recipe.foundation.as_mut().unwrap()["verification"]["plates"].as_array_mut().unwrap();
         plates.retain(|p| p["destination"] == "Indigo");
         for p in plates {
@@ -430,6 +431,49 @@ mod tests {
         }
         refresh_composite(&mut r);
         composite_status(&r, &bytes, Status::Pass);
+    }
+    #[test]
+    fn composite_stroked_source_keeps_its_physical_support() {
+        let bytes = crate::pdf::tests::composite_fixture("1 0 0 0 K 4 w /OP1 gs 10 10 20 20 re S");
+        composite_status(&composite_request(&bytes, &bytes), &bytes, Status::Pass);
+    }
+    #[test]
+    fn foreign_ownership_errors_remain_explicit_and_do_not_become_collisions() {
+        let bytes = crate::pdf::tests::composite_fixture("1 0 0 rg 10 10 20 20 re f /OP1 gs /Ink cs 1 scn 15 15 5 5 re f");
+        let r = foreign_request(&bytes, &bytes, true, false);
+        let report = crate::pdf::check(&r, &bytes).unwrap();
+        let f = report.findings.iter().find(|f| f.obligation.key == "plate/dark-foreign").unwrap();
+        assert_eq!(f.status, Status::Incomplete);
+        assert!(f.reason.contains("qualified prediction"), "{}", f.reason);
+        assert!(!f.reason.contains("ambiguous"));
+        let plan = crate::attribution::resolve(&r).unwrap();
+        let mut program = program::execute(&r, &plan).unwrap();
+        program.outputs.remove("output");
+        let mut budget = crate::feature_offset::WorkBudget::new();
+        let reason = crate::composite::exact_collision(&r, &program, "dark-foreign", "Exact ink", &mut budget).unwrap_err();
+        assert!(reason.contains("complete expected output"));
+    }
+    #[test]
+    fn derived_screen_paint_keeps_its_destination_while_retained_source_paint_obeys_its_route() {
+        let bytes = crate::pdf::tests::composite_fixture("1 0 0 0 k 10 10 20 20 re f /OP1 gs /Ink cs 1 scn 15 15 5 5 re f");
+        let mut r = foreign_request(&bytes, &bytes, true, false);
+        r.recipe.foundation.as_mut().unwrap()["input_routes"][1]["destination"] = json!("Indigo");
+        refresh_composite(&mut r);
+        let report = crate::pdf::check(&r, &bytes).unwrap();
+        assert_eq!(report.findings.iter().find(|f| f.obligation.key == "plate/dark-foreign").unwrap().status, Status::Pass);
+        // A retained source colour inside Indigo must instead agree with its route.
+        r.recipe.file_links[1].destination = "Indigo".into();
+        let foundation = r.recipe.foundation.as_mut().unwrap();
+        foundation["treatments"]["foreign"]["paint"] = json!({"mode":"source"});
+        foundation["input_routes"][1]["destination"] = json!("Screen");
+        let plates = foundation["verification"]["plates"].as_array_mut().unwrap();
+        plates.retain(|p| p["destination"] == "Indigo");
+        for p in plates {
+            p["links"].as_array_mut().unwrap().push(json!("foreign"));
+        }
+        refresh_composite(&mut r);
+        let report = composite_status(&r, &bytes, Status::Incomplete);
+        assert!(report.findings.iter().find(|f| f.obligation.key == "plate/dark-output").unwrap().reason.contains("route disagrees"));
     }
     #[test]
     fn composite_dense_allowance_and_exhausted_ownership_budget_refuse() {

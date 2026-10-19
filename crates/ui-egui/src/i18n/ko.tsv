@@ -4572,3 +4572,4 @@ lighting	Light	광원
 @msg	Internal checker failure: {e}	검사 내부 오류: {e}
 	Receive Separation Check Results	색 분판 검사 결과 받기
 @msg	Service check export exceeds the 64 MiB upload budget	검사용 내보내기가 64 MiB 업로드 한도를 초과합니다
+@msg	Colour operand count exceeds precision reconciliation budget	색상 피연산자 수가 정밀도 검증 한도를 초과합니다
