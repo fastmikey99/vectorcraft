@@ -528,6 +528,7 @@ impl eframe::App for WebShell {
             if let Some(bridge) = &self.host.bridge {
                 bridge.run_exports(app);
                 bridge.report_dirty(app);
+                bridge.report_selection(app);
             }
         }
         self.save_prefs();

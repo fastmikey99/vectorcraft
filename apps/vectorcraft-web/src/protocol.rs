@@ -78,6 +78,18 @@ pub struct Place {
     pub bytes: Vec<u8>,
     /// `[x, y, width, height]` in document points (as `bounds` in a `vectorcraft:save` gives them).
     pub at: Option<[f64; 4]>,
+    /// Also every other copy of the selected image: the same pixels at the same printed size, each
+    /// onto its own frame, all in the same undo step.
+    pub copies: bool,
+}
+
+/// What the parent is told is selected (`vectorcraft:selection`): whether it is exactly one image and,
+/// if so, how many other copies of it the document holds at the same size and at other sizes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Selection {
+    pub image: bool,
+    pub copies: usize,
+    pub other_sizes: usize,
 }
 
 /// Whether the bridge reads a message at all: a `vectorcraft:open` or `vectorcraft:export` from the
@@ -169,6 +181,11 @@ pub fn prefs(text: Option<String>) -> Result<String, String> {
 /// four finite numbers with a positive width and height. The error is the text of the
 /// `vectorcraft:failed` reply.
 pub fn place(name: Option<String>, bytes: Option<Vec<u8>>, at: Option<Vec<f64>>) -> Result<Place, String> {
+    place_copies(name, bytes, at, None)
+}
+
+/// [`place`], and `copies` (a boolean; with it, no `at`: copies replace images where they are).
+pub fn place_copies(name: Option<String>, bytes: Option<Vec<u8>>, at: Option<Vec<f64>>, copies: Option<bool>) -> Result<Place, String> {
     let Some(name) = name.filter(|n| !n.trim().is_empty()) else {
         return Err("vectorcraft:place needs the file's name (`name`, a non-empty string)".to_string());
     };
@@ -180,7 +197,11 @@ pub fn place(name: Option<String>, bytes: Option<Vec<u8>>, at: Option<Vec<f64>>)
         Some(&[x, y, w, h]) if [x, y, w, h].iter().all(|v| v.is_finite()) && w > 0.0 && h > 0.0 => Some([x, y, w, h]),
         Some(_) => return Err("vectorcraft:place: `at` must be {x, y, width, height} with a positive width and height".to_string()),
     };
-    Ok(Place { name, bytes, at })
+    let copies = copies.unwrap_or(false);
+    if copies && at.is_some() {
+        return Err("vectorcraft:place: `copies` replaces the selected image's copies where they are: no `at`".to_string());
+    }
+    Ok(Place { name, bytes, at, copies })
 }
 
 #[cfg(test)]

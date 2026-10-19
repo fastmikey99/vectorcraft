@@ -94,7 +94,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Rasterize…",
             ["Object"],
             None,
-            "{ppi?, background?: transparent|white|black|\"#rrggbb\", antiAlias?: none|art|type (text snapped to pixels)|bool, padding?|addAround?: pt (0–1000), colorModel?: \"rgb\"|\"cmyk\"|\"grayscale\"|\"bitmap\", clippingMask?: bool (a clip group with the art's outline)} replace the selection with an embedded PNG image; each defaults to document.rasterEffectsSettings → {id (the image, or its clip group), width, height, warning?: \"an image couldn't be decoded and is missing from the picture\" (as raster exports say)}",
+            "{ppi?, background?: transparent|white|black|\"#rrggbb\", antiAlias?: none|art|type (text snapped to pixels)|bool, padding?|addAround?: pt (0–1000), colorModel?: \"rgb\"|\"cmyk\"|\"grayscale\"|\"bitmap\", clippingMask?: bool (a clip group with the art's outline)} replace the selection with an embedded PNG image (at most 100 megapixels: past that, at the highest ppi that fits); each defaults to document.rasterEffectsSettings → {id (the image, or its clip group), width, height, ppi (as made), note?: said when the ppi was lowered to fit, warning?: \"an image couldn't be decoded and is missing from the picture\" (as raster exports say)}",
             has_selection,
             rasterize
         ),
@@ -405,6 +405,38 @@ fn transform_each_as(s: &mut Session, p: &Value, label: &str) -> Result<Value> {
 
 pub(crate) const MAX_PIXELS: f64 = 64.0e6;
 
+/// The most pixels Rasterize and Crop Image make (100 MP, 400 MB of RGBA): a 550 × 1000 mm gang
+/// sheet at 300 ppi (about 77 MP) fits, with room for a larger sheet; the web build's decode
+/// allowance (`MAX_RASTER_ALLOC`, 512 MB) still holds the image when it is drawn.
+pub(crate) const RASTER_MAX_PIXELS: f64 = 100.0e6;
+
+/// Whether `region` at `scale` (px/pt) is within [`RASTER_MAX_PIXELS`] and 65,535 pixels a side.
+fn raster_fits(region: Rect, scale: f64) -> bool {
+    let (w, h) = (region.width() * scale, region.height() * scale);
+    w * h <= RASTER_MAX_PIXELS && w <= 65535.0 && h <= 65535.0
+}
+
+/// `b` snapped out to whole pixels at `scale`.
+fn snap_region(b: Rect, scale: f64) -> Rect {
+    Rect::new(b.x0, b.y0, b.x0 + (b.width() * scale).ceil().max(1.0) / scale, b.y0 + (b.height() * scale).ceil().max(1.0) / scale)
+}
+
+/// The highest whole ppi, at most `ppi`, at which `b` rasterizes within the limits; `None` when not
+/// even 1 ppi fits.
+fn fitting_ppi(b: Rect, ppi: f64) -> Option<f64> {
+    if raster_fits(snap_region(b, ppi / 72.0), ppi / 72.0) {
+        return Some(ppi);
+    }
+    // The area bound, then down a pixel's worth for the snapping to whole pixels.
+    let (w, h) = (b.width().max(1e-9), b.height().max(1e-9));
+    let top = (RASTER_MAX_PIXELS / (w * h)).sqrt().min(65535.0 / w.max(h)) * 72.0;
+    let mut fit = top.min(ppi).floor();
+    while fit >= 1.0 && !raster_fits(snap_region(b, fit / 72.0), fit / 72.0) {
+        fit -= 1.0;
+    }
+    (fit >= 1.0).then_some(fit)
+}
+
 /// A copy of `doc` whose only content is `nodes` (paint order), for offscreen rendering.
 pub(crate) fn isolated_doc(doc: &vectorcraft_doc::Document, nodes: Vec<Node>) -> vectorcraft_doc::Document {
     let mut tmp = doc.clone();
@@ -436,7 +468,7 @@ fn render_png(
     opts: &vectorcraft_render::RenderOptions,
     color: RasterColorModel,
 ) -> Result<(Vec<u8>, u32, u32, Option<&'static str>)> {
-    if region.width() * region.height() * scale * scale > MAX_PIXELS || region.width() * scale > 65535.0 || region.height() * scale > 65535.0 {
+    if !raster_fits(region, scale) {
         return Err(EngineError::Other("image would be too large; lower the resolution".into()));
     }
     let mut r = vectorcraft_render::Renderer::new();
@@ -459,6 +491,10 @@ pub(crate) struct Rasterized {
     clip: Option<(PathData, vectorcraft_geom::FillRule)>,
     /// The note that an image in the art couldn't be decoded ([`render_png`]).
     warning: Option<&'static str>,
+    /// The resolution drawn at, and the one asked for: lower when the art is too large for that
+    /// ([`fitting_ppi`]).
+    ppi: f64,
+    asked: f64,
 }
 
 impl Rasterized {
@@ -523,9 +559,14 @@ pub(crate) fn rasterize_art(doc: &vectorcraft_doc::Document, nodes: Vec<Node>, p
     // What the art draws, its geometry effects applied.
     let b = nodes.iter().fold(None, |acc, n| vectorcraft_geom::union_opt(acc, vectorcraft_render::drawn_bounds(doc, n)));
     let b = b.ok_or_else(|| bad(cmd, "selection has no bounds"))?.inflate(pad, pad);
+    // Too large at the ppi asked for (a whole gang sheet at 300 ppi): the highest ppi that fits,
+    // said in the result's `note`, rather than no image at all.
+    let asked = ppi;
+    let ppi = fitting_ppi(b, ppi).ok_or_else(|| EngineError::Other("image would be too large; lower the resolution".into()))?;
+    let raster = RasterExportOptions { ppi, ..raster };
     let scale = ppi / 72.0;
     // Snap to whole pixels.
-    let region = Rect::new(b.x0, b.y0, b.x0 + (b.width() * scale).ceil().max(1.0) / scale, b.y0 + (b.height() * scale).ceil().max(1.0) / scale);
+    let region = snap_region(b, scale);
     // Create Clipping Mask: the image is clipped to the art's outline with its geometry effects
     // applied, as on the canvas.
     let clip = look
@@ -546,7 +587,7 @@ pub(crate) fn rasterize_art(doc: &vectorcraft_doc::Document, nodes: Vec<Node>, p
     let tmp = isolated_doc(doc, nodes);
     let (png, width, height, warning) = render_png(&tmp, region, scale, &raster.render_options(RasterFormat::Png), look.color_model)?;
     let xf = Affine::translate(region.origin().to_vec2()) * Affine::scale(1.0 / scale);
-    Ok(Rasterized { png, width, height, xf, clip, warning })
+    Ok(Rasterized { png, width, height, xf, clip, warning, ppi, asked })
 }
 
 fn rasterize(s: &mut Session, p: &Value) -> Result<Value> {
@@ -555,7 +596,7 @@ fn rasterize(s: &mut Session, p: &Value) -> Result<Value> {
     let st = s.doc()?;
     let nodes: Vec<Node> = roots.iter().filter_map(|id| st.doc.node(*id).cloned()).collect();
     let image = rasterize_art(&st.doc, nodes, p, C)?;
-    let (w, h, warning) = (image.width, image.height, image.warning);
+    let (w, h, warning, ppi, asked) = (image.width, image.height, image.warning, image.ppi, image.asked);
     if roots.is_empty() {
         return Err(bad(C, "nothing selected"));
     }
@@ -565,7 +606,10 @@ fn rasterize(s: &mut Session, p: &Value) -> Result<Value> {
         sel.set([id]);
         Ok(id)
     })?;
-    let mut out = json!({ "id": id.0, "width": w, "height": h });
+    let mut out = json!({ "id": id.0, "width": w, "height": h, "ppi": ppi });
+    if ppi < asked {
+        out["note"] = json!(format!("Rasterized at {ppi} ppi, the most this size allows (asked for {asked} ppi)"));
+    }
     if let Some(w) = warning {
         out["warning"] = json!(w);
     }

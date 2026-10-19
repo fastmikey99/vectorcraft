@@ -15,7 +15,14 @@
 //!   `vectorcraft:failed` carrying it when nothing is open or the format can't be written.
 //!   With `selectedOnly`, only the selection: one selected image in a raster format comes as its
 //!   own pixels as embedded, and the `save` carries the selection's `bounds` in document points.
-//! - `vectorcraft:place` (from the parent): `{ id?, name, bytes, at? }`, the file placed in place of
+//! - `vectorcraft:open` may carry `rasterEffectsResolution` (ppi): the opened document's
+//!   raster-effects resolution is raised to at least that, without marking it changed (a file read
+//!   from a PDF starts at 72 ppi; shadows and glows are written at it). `ready` says
+//!   `rasterEffectsResolution: true`.
+//! - `vectorcraft:selection` (to the parent): `{ image, copies, otherSizes }` whenever it changes:
+//!   whether exactly one image is selected, and how many other copies of it (same pixels) the
+//!   document holds at the same printed size and at other sizes. `ready` says `selection: true`.
+//! - `vectorcraft:place` (from the parent): `{ id?, name, bytes, at?, copies? }`, the file placed in place of
 //!   the one selected object (with nothing selected, at `at`): fitted inside `at` when given, else
 //!   onto that object's own frame through its transform (an image's pixels, rotated or mirrored as
 //!   they are), one undo step, selected. Answered with `vectorcraft:placed { id, ids }` or
@@ -56,6 +63,8 @@ pub struct Bridge {
     origin: String,
     /// The unsaved-changes state last reported to the parent.
     reported: Rc<Cell<Option<bool>>>,
+    /// The selection last reported to the parent, and the document revision it was read at.
+    selection: Rc<Cell<Option<(u64, usize, protocol::Selection)>>>,
     /// Exports the parent asked for, run on the next frame (they need the app).
     exports: Rc<RefCell<Vec<(JsValue, protocol::Export)>>>,
     /// Files the parent asked to place, run on the next frame.
@@ -81,6 +90,7 @@ impl Bridge {
             parent,
             origin,
             reported: Rc::default(),
+            selection: Rc::default(),
             exports: Rc::default(),
             places: Rc::default(),
             prefs: Rc::default(),
@@ -116,6 +126,8 @@ impl Bridge {
             ("openAcknowledgement", true.into()),
             ("printProduction", true.into()),
             ("productionSeparations", true.into()),
+            ("selection", true.into()),
+            ("rasterEffectsResolution", true.into()),
         ]);
     }
 
@@ -167,6 +179,28 @@ impl Bridge {
     /// Hand the parent the preferences and workspace (they changed); false if it couldn't be sent.
     pub fn post_prefs(&self, text: &str) -> bool {
         self.send(&[("type", "vectorcraft:prefs".into()), ("prefs", text.into())])
+    }
+
+    /// After each frame: tell the parent what is selected when it changes (`vectorcraft:selection`:
+    /// `{ image, copies, otherSizes }`). Read again only when the document's revision moves.
+    pub fn report_selection(&self, app: &VectorcraftApp) {
+        let key = app.session.active().map_or((0, 0), |st| (st.revision, std::ptr::from_ref(st) as usize));
+        let last = self.selection.get();
+        if last.is_some_and(|(r, d, _)| (r, d) == key) {
+            return;
+        }
+        let now = crate::operations::selection(app);
+        if last.is_none_or(|(_, _, s)| s != now)
+            && !self.send(&[
+                ("type", "vectorcraft:selection".into()),
+                ("image", now.image.into()),
+                ("copies", (now.copies as f64).into()),
+                ("otherSizes", (now.other_sizes as f64).into()),
+            ])
+        {
+            return;
+        }
+        self.selection.set(Some((key.0, key.1, now)));
     }
 
     /// After each frame: tell the parent when unsaved changes appear or go away.
@@ -264,7 +298,12 @@ impl Bridge {
             }
             if string(&data, "type").as_deref() == Some("vectorcraft:place") {
                 let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
-                match protocol::place(string(&data, "name"), bytes(&data), rect(&data, "at")) {
+                let copies = js_sys::Reflect::get(&data, &JsValue::from_str("copies")).ok().filter(|v| !v.is_undefined());
+                if copies.as_ref().is_some_and(|v| v.as_bool().is_none()) {
+                    bridge.post_export_failed(&id, "vectorcraft:place: copies must be a boolean");
+                    return;
+                }
+                match protocol::place_copies(string(&data, "name"), bytes(&data), rect(&data, "at"), copies.and_then(|v| v.as_bool())) {
                     Ok(place) => {
                         bridge.places.borrow_mut().push((id, place));
                         wake();
@@ -280,6 +319,18 @@ impl Bridge {
                         bridge.post_failed("vectorcraft:open: printProduction must be a boolean");
                         return;
                     }
+                    let ppi = js_sys::Reflect::get(&data, &JsValue::from_str("rasterEffectsResolution")).unwrap_or(JsValue::UNDEFINED);
+                    let raster_effects_ppi = if ppi.is_undefined() {
+                        None
+                    } else {
+                        match ppi.as_f64().filter(|p| p.is_finite() && (1.0..=2400.0).contains(p)) {
+                            Some(p) => Some(p.round() as u32),
+                            None => {
+                                bridge.post_failed("vectorcraft:open: rasterEffectsResolution must be a ppi from 1 to 2400");
+                                return;
+                            }
+                        }
+                    };
                     let value = js_sys::Reflect::get(&data, &JsValue::from_str("separations")).unwrap_or(JsValue::UNDEFINED);
                     let separations = if value.is_undefined() {
                         None
@@ -306,6 +357,7 @@ impl Bridge {
                         bytes: open.bytes,
                         print_production: flag.as_bool().unwrap_or(false),
                         separations,
+                        raster_effects_ppi,
                     });
                     wake();
                 }

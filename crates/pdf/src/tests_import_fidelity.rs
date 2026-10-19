@@ -431,6 +431,70 @@ fn a_gradient_mesh_group_is_one_shading_and_opacity_is_a_soft_mask() {
 }
 
 #[test]
+fn a_folded_mesh_patch_is_not_clipped_and_translucent_or_mixed_meshes_stay_apart() {
+    // A patch whose right edge's handles bulge out to x = 100: the surface reaches past them
+    // (x ≈ 125 at the middle), so the fill must too (review: bounds clipped folded patches).
+    let mut d = Document::new(200.0, 100.0);
+    let mut m = vectorcraft_doc::live::GradientMesh::from_surface(1, 1, &|u, v| kurbo::Point::new(20.0 + 60.0 * u, 20.0 + 60.0 * v), &|_, _| {
+        Color::rgb(1.0, 0.0, 0.0)
+    });
+    for i in [m.idx(0, 1), m.idx(1, 1)] {
+        let p = m.points[i].p;
+        m.points[i].handles[vectorcraft_doc::live::H_DOWN] = kurbo::Vec2::new(100.0 - p.x, 0.0);
+        m.points[i].handles[vectorcraft_doc::live::H_UP] = kurbo::Vec2::new(100.0 - p.x, 0.0);
+    }
+    for i in [m.idx(0, 0), m.idx(1, 0)] {
+        let p = m.points[i].p;
+        m.points[i].handles[vectorcraft_doc::live::H_RIGHT] = kurbo::Vec2::new(100.0 - p.x, 0.0);
+        m.points[i].handles[vectorcraft_doc::live::H_LEFT] = kurbo::Vec2::new(100.0 - p.x, 0.0);
+    }
+    for i in [m.idx(0, 1), m.idx(1, 1)] {
+        m.points[i].handles[vectorcraft_doc::live::H_LEFT] = kurbo::Vec2::new(100.0 - m.points[i].p.x, 0.0);
+    }
+    // The boundary points alone stop at x = 100; the surface goes past them.
+    let cp = {
+        use vectorcraft_doc::live::{H_DOWN, H_LEFT, H_RIGHT, H_UP};
+        let (p00, p01, p10, p11) = (&m.points[m.idx(0, 0)], &m.points[m.idx(0, 1)], &m.points[m.idx(1, 0)], &m.points[m.idx(1, 1)]);
+        [
+            p00.p,
+            p00.p + p00.handles[H_DOWN],
+            p10.p + p10.handles[H_UP],
+            p10.p,
+            p10.p + p10.handles[H_RIGHT],
+            p11.p + p11.handles[H_LEFT],
+            p11.p,
+            p11.p + p11.handles[H_UP],
+            p01.p + p01.handles[H_DOWN],
+            p01.p,
+            p01.p + p01.handles[H_LEFT],
+            p00.p + p00.handles[H_RIGHT],
+        ]
+    };
+    let reach =
+        (0..=20).flat_map(|i| (0..=20).map(move |j| (i, j))).map(|(i, j)| m.eval(0, 0, i as f64 / 20.0, j as f64 / 20.0).x).fold(f64::MIN, f64::max);
+    let net = crate::export::coons_net(&cp).iter().map(|p| p.x).fold(f64::MIN, f64::max);
+    assert!(reach > 100.5 && net >= reach, "surface reaches {reach}; the net bounds it at {net}");
+    add(&mut d, Node::new(NodeId(0), NodeKind::Mesh(m)));
+    assert_eq!(String::from_utf8_lossy(&export(&d, &PdfOptions::default()).unwrap()).matches("/ShadingType 6").count(), 1);
+    // Two translucent meshes, or meshes in different colour models, are not one shading.
+    let two = |a: Color, b: Color, opacity: f32| {
+        let mesh = |x: f64, c: Color| {
+            let mut m = vectorcraft_doc::live::GradientMesh::from_surface(1, 1, &|u, v| kurbo::Point::new(x + 40.0 * u, 10.0 + 40.0 * v), &|_, _| c);
+            for p in &mut m.points {
+                p.opacity = opacity;
+            }
+            Arc::new(Node::new(NodeId(0), NodeKind::Mesh(m)))
+        };
+        let mut d = Document::new(200.0, 100.0);
+        add(&mut d, Node::group(NodeId(0), vec![mesh(10.0, a), mesh(30.0, b)]));
+        String::from_utf8_lossy(&export(&d, &PdfOptions::default()).unwrap()).matches("/ShadingType 6").count()
+    };
+    assert_eq!(two(Color::rgb(1.0, 0.0, 0.0), Color::rgb(0.0, 0.0, 1.0), 1.0), 1, "opaque, one model: one shading");
+    assert_eq!(two(Color::rgb(1.0, 0.0, 0.0), Color::rgb(0.0, 0.0, 1.0), 0.5), 4, "translucent: a shading and a mask each");
+    assert_eq!(two(Color::cmyk(0.6, 0.2, 0.1, 0.5), Color::rgb(0.0, 0.0, 1.0), 1.0), 2, "CMYK beside RGB: not forced into one model");
+}
+
+#[test]
 fn gradient_stop_opacity_round_trips() {
     let mut d = Document::new(100.0, 100.0);
     let mut stops = vec![GradientStop::new(0.0, Color::rgb(1.0, 0.0, 0.0)), GradientStop::new(1.0, Color::rgb(0.0, 0.0, 1.0))];
