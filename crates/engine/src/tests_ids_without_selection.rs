@@ -127,8 +127,16 @@ fn ids_and_selection(cmd: &str, picks: &[usize]) -> std::result::Result<bool, St
     let mut with_ids = params.clone();
     with_ids["ids"] = json!(list);
     let (a, b) = (given.execute(cmd, &with_ids), selected.execute(cmd, &params));
+    // A run time (`ms`, as lineweight.check reports) differs between two runs of the same work.
+    let timeless = |v: &Value| {
+        let mut v = v.clone();
+        if let Some(o) = v.as_object_mut() {
+            o.remove("ms");
+        }
+        v
+    };
     let same_result = match (&a, &b) {
-        (Ok(x), Ok(y)) => x == y,
+        (Ok(x), Ok(y)) => timeless(x) == timeless(y),
         (Err(x), Err(y)) => x.to_string() == y.to_string(),
         _ => false,
     };

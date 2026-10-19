@@ -152,7 +152,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Fit to Artwork Bounds",
             ["Object", "Artboards"],
             None,
-            "{index?: n | indices?: [n…] (0-based; the app passes the selected artboards: the Artboard tool's, else the active one; default: the first)} each artboard fits the art on it that shows (with its strokes and effects; hidden objects and layers, guides and template layers don't count), in one undo step: an object counts for every artboard its bounds overlap, and a group or clipping layer counts as one object; an artboard with no art stays as it is, and the command fails when no artboard it names has art",
+            "{index?: n | indices?: [n…] (0-based; the app passes the selected artboards: the Artboard tool's, else the active one; default: the first), document?: bool (default false; true: each fits ALL the art the document prints, on any artboard or none, as a print-preparation script needs)} each artboard fits the art on it that shows (with its strokes and effects; hidden objects and layers, guides and template layers don't count), in one undo step: an object counts for every artboard its bounds overlap, and a group or clipping layer counts as one object; an artboard with no art stays as it is, and the command fails when no artboard it names has art",
             has_doc,
             artboard_fit_art
         ),
@@ -908,10 +908,16 @@ fn artboard_fit_art(s: &mut Session, p: &Value) -> Result<Value> {
     let d = &s.doc()?.doc;
     let indices =
         if p.get("index").is_none() && p.get("indices").is_none() { vec![0] } else { super::panelcmds::artboard_indices(d, p, "artboard.fitToArt")? };
+    // `document`: all the art the document prints, wherever it lies; else the art on the artboard.
+    let document = match p.get("document") {
+        None | Some(Value::Null) => false,
+        Some(v) => v.as_bool().ok_or_else(|| bad("artboard.fitToArt", "document must be true or false"))?,
+    };
     let mut fits = vec![];
     for i in indices {
         let was = d.artboards.get(i).map(|a| a.rect).ok_or_else(|| EngineError::Other("no such artboard".into()))?;
-        if let Some(b) = vectorcraft_render::encode::art_bounds_on(d, was) {
+        let art = if document { vectorcraft_render::encode::art_bounds(d) } else { vectorcraft_render::encode::art_bounds_on(d, was) };
+        if let Some(b) = art {
             // At least 1 pt a side, as `rect_from` makes Artboard Options' sizes.
             fits.push((i, was, Rect::new(b.x0, b.y0, b.x0 + b.width().max(1.0), b.y0 + b.height().max(1.0))));
         }
