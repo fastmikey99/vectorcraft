@@ -42,6 +42,11 @@ fn indices_mode(order: &vectorcraft_pdf::PrintOrder, census: &crate::pdf::Census
             if source.is_none_or(|s| census.paints.get(i).is_none_or(|p| p.stroke != s.stroke)) {
                 return Err("Raw PDF fill/stroke kind differs from decoded coverage; interpreter substitution requires reconciliation".into());
             }
+            if source
+                .is_none_or(|s| census.paints.get(i).is_none_or(|p| p.overprint != s.overprint || u8::from(!p.overprint_zero) != s.overprint_mode))
+            {
+                return Err("Raw PDF overprint/OPM differs from decoded paint state; physical compositing is unresolved".into());
+            }
             indices.push(i);
         }
     }
@@ -278,6 +283,18 @@ mod tests {
         }
         bytes.extend(format!("trailer << /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", offsets.len()).as_bytes());
         bytes
+    }
+    #[test]
+    fn raw_overprint_and_opm_must_match_each_decoded_paint() {
+        let bytes = crate::pdf::tests::fixture_mode(true, 1, "Exact#20ink", "", None);
+        let order = vectorcraft_pdf::print_order(&bytes).unwrap();
+        let mut census = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+        assert!(indices(&order, &census).is_ok());
+        census.paints[1].overprint = !census.paints[1].overprint;
+        assert!(indices(&order, &census).unwrap_err().contains("overprint/OPM"));
+        census.paints[1].overprint = !census.paints[1].overprint;
+        census.paints[1].overprint_zero = !census.paints[1].overprint_zero;
+        assert!(indices(&order, &census).unwrap_err().contains("overprint/OPM"));
     }
     #[test]
     fn image_audit_survives_unresolved_reconciliation_and_exposes_omissions() {

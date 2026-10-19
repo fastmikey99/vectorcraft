@@ -3,6 +3,8 @@ use crate::{Evidence, Finding, Report, Request, Status, program::Program};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
+pub(crate) const REQUIRED_EMPTY_PLATE: &str = "Unconditionally required physical plate is empty after ordered ink compositing";
+
 fn combine(statuses: impl IntoIterator<Item = Status>) -> Status {
     let mut seen = false;
     let mut incomplete = false;
@@ -77,14 +79,18 @@ pub fn check(request: &Request, program: &Program, report: &mut Report) -> Resul
             // A physical plate can pass with no ink, or with ink from another
             // contribution. Neither proves a source-empty unconditional link.
             // Keep independently established failures instead of weakening them.
-            if report.findings.iter().any(|f| f.obligation.key == coverage && f.status != Status::Fail) {
+            if let Some(prior) = report.findings.iter().find(|f| f.obligation.key == coverage && f.status != Status::Fail).cloned() {
                 report.record(
                     &coverage,
                     Status::Incomplete,
-                    "Unconditional contribution has proven empty expected source; physical plate conformity cannot establish its coverage",
-                    json!({"source_rule":link.source_rule,"expected_source_empty":true}),
+                    format!("Unconditional contribution has proven empty expected source; physical plate conformity cannot establish its coverage. Prior physical finding: {}", prior.reason),
+                    json!({"source_rule":link.source_rule,"expected_source_empty":true,"prior_physical_finding":prior}),
                     evidence.clone(),
                 )?;
+                if let Some(finding) = report.findings.iter_mut().find(|f| f.obligation.key == coverage) {
+                    finding.location = None;
+                    finding.uncertainty_mm = None;
+                }
             }
         }
         let measured = references(&BTreeSet::from([link.key.as_str()]));
@@ -147,10 +153,7 @@ pub fn check(request: &Request, program: &Program, report: &mut Report) -> Resul
         };
         let observed = json!({"physical_findings":measured.iter().map(|f| &f.obligation.key).collect::<Vec<_>>(),"complete_rule_routing":complete,"unresolved_construction":program.unresolved.get(&rule.rule_key)});
         for (facet, status) in [("geometry", geometry), ("topology", topology)] {
-            let reason = if facet == "topology"
-                && status == Status::Incomplete
-                && measured.iter().any(|p| p.reason == "Unconditionally required physical plate is empty after ordered ink compositing")
-            {
+            let reason = if facet == "topology" && status == Status::Incomplete && measured.iter().any(|p| p.reason == REQUIRED_EMPTY_PLATE) {
                 "Physical plate absence is established; topology was not measured"
             } else {
                 "Rule assessed through all mapped physical outputs; shared boundaries covered by other authorised contributions need no separate objects"

@@ -83,9 +83,17 @@ pub fn check(request: &Request, plan: &Plan, census: &Census, report: &mut Repor
         let pieces: Vec<_> = links.iter().flat_map(|k| program.outputs.get(*k).into_iter().flatten()).collect();
         let ink = plate.get("name").and_then(Value::as_str);
         let required = plate.get("required").and_then(Value::as_bool) == Some(true);
-        let basis = "opaque binary named ink reconstructed in complete raw PDF paint order";
+        let composite = plate.get("name_mode").and_then(Value::as_str) == Some("composite");
+        let basis = if composite {
+            "opaque composite positive support across exclusively owned channels in complete raw PDF paint order"
+        } else {
+            "opaque binary named ink reconstructed in complete raw PDF paint order"
+        };
         let reconstructed = (|| -> Result<_, String> {
             crate::coverage::reconciled_vector_census(census)?;
+            if composite {
+                return crate::composite::reconstruct(request, plan, &program, census, plate, &mut coverage_budget);
+            }
             if plate.get("name_mode").and_then(Value::as_str) != Some("exact") {
                 return Err(
                     "Process and source destinations require qualified positive-support reconstruction and an explicit expected channel model".into(),
@@ -96,6 +104,9 @@ pub fn check(request: &Request, plan: &Plan, census: &Census, report: &mut Repor
             }
             let ink = ink.filter(|s| !s.is_empty()).ok_or("Exact physical ink name missing")?;
             exact_expected(&pieces, ink)?;
+            if crate::composite::exact_collision(request, &program, key, ink, &mut coverage_budget)? {
+                return Err(format!("Exact channel {ink} has ambiguous physical plate ownership"));
+            }
             let mut pages: BTreeSet<_> =
                 pieces.iter().map(|p| p.page).chain(census.paints.iter().filter(|p| p.ink.as_deref() == Some(ink)).filter_map(|p| p.page)).collect();
             // Even an apparently absent ink needs full tonal/census validation;
@@ -119,18 +130,11 @@ pub fn check(request: &Request, plan: &Plan, census: &Census, report: &mut Repor
         };
         let printable = reconstructed.values().any(|c| !c.path.is_empty());
         let reconstruction = json!({"basis":basis,"pages_examined":reconstructed.keys().collect::<Vec<_>>(),
-            "other_pages":"no expected piece or named-ink paint; complete global tonal census validated",
+            "other_pages":"no expected piece or owned-channel paint; complete global tonal census validated",
+            "location_scope":"representative page only; pages_examined and paint_object_ids retain full coverage",
             "paint_object_ids":reconstructed.values().flat_map(|c| &c.paint_object_ids).copied().collect::<BTreeSet<_>>()});
         if required && !printable {
-            record_physical(
-                request,
-                report,
-                key,
-                &links,
-                Status::Fail,
-                "Unconditionally required physical plate is empty after ordered ink compositing",
-                reconstruction,
-            )?;
+            record_physical(request, report, key, &links, Status::Fail, crate::contribution::REQUIRED_EMPTY_PLATE, reconstruction)?;
             let page = pieces.iter().find(|p| !p.path.is_empty()).map(|p| p.page).or_else(|| reconstructed.keys().next().copied()).unwrap_or(0);
             let bounds_mm = pieces.iter().find(|p| p.page == page && !p.path.is_empty()).map(|p| {
                 let b = p.path.to_bezpath().bounding_box();
@@ -153,14 +157,14 @@ pub fn check(request: &Request, plan: &Plan, census: &Census, report: &mut Repor
             all_geometry = false;
             continue;
         }
-        let named_objects = census.paints.iter().any(|p| p.ink.as_deref() == ink);
+        let named_objects = !composite && census.paints.iter().any(|p| p.ink.as_deref() == ink);
         if pieces.iter().all(|p| p.path.is_empty()) && !printable && !required && !named_objects {
             // Plate optionality does not imply contribution optionality. Attribution
             // alone waives conditional links; unconditional link findings stay visible.
             report.record(
                 &format!("plate/{key}"),
                 Status::NotApplicable,
-                "All contributions proven empty and complete physical census contains no named-ink paint",
+                "All contributions proven empty and complete physical census contains no owned-channel paint",
                 reconstruction,
                 evidence(request),
             )?;
@@ -184,10 +188,28 @@ pub fn check(request: &Request, plan: &Plan, census: &Census, report: &mut Repor
         let mut uncertainty = 0.0f64;
         for (page, coverage) in &reconstructed {
             let page = *page;
-            let expected = program::union(pieces.iter().filter(|p| p.page == page).map(|p| p.path.clone()))?;
+            let expected = match crate::coverage::aggregate(
+                pieces.iter().filter(|p| p.page == page).map(|p| crate::coverage::Coverage {
+                    path: p.path.clone(),
+                    construction_allowance_mm: 0.0,
+                    paint_object_ids: vec![],
+                }),
+                &mut coverage_budget,
+            ) {
+                Ok(value) => value,
+                Err(reason) => {
+                    if status != Status::Fail {
+                        status = Status::Incomplete;
+                    }
+                    measurements.push(json!({"page":page,"unresolved":reason}));
+                    continue;
+                }
+            };
             let observed = &coverage.path;
-            let construction_error =
-                pieces.iter().filter(|p| p.page == page).map(|p| p.construction_error_mm).fold(0.0, f64::max) + coverage.construction_allowance_mm;
+            let construction_error = pieces.iter().filter(|p| p.page == page).map(|p| p.construction_error_mm).fold(0.0, f64::max)
+                + expected.construction_allowance_mm
+                + coverage.construction_allowance_mm;
+            let expected = expected.path;
             let precision = (tolerance / 16.0).clamp(0.000001, 0.001);
             match geometry::compare(&expected, observed, tolerance, precision) {
                 Ok(mut m) => {
@@ -241,7 +263,7 @@ pub fn check(request: &Request, plan: &Plan, census: &Census, report: &mut Repor
             report.record(
                 &k,
                 status,
-                "Final ordered binary physical ink coverage compared against the complete recipe graph",
+                "Final ordered physical ink coverage compared against the complete recipe graph",
                 json!({"acceptance_mm":tolerance,"measurements":measurements,"reconstruction":reconstruction}),
                 evidence(request),
             )?;
@@ -258,7 +280,7 @@ pub fn check(request: &Request, plan: &Plan, census: &Census, report: &mut Repor
         "global/file_structure",
         if any_failure { Status::Fail } else { Status::Incomplete },
         if all_geometry {
-            "Opaque binary named-ink coverage follows verified paint order; independent interpreter and broader print semantics remain separate"
+            "Supported physical ink coverage follows verified paint order; independent interpreter and broader print semantics remain separate"
         } else {
             "Physical output coverage findings retained with unresolved areas"
         },
@@ -315,6 +337,254 @@ mod tests {
         r.identity.measurement_sha256 = crate::digest(&r.acceptance).unwrap();
         r.identity.pdf_sha256 = crate::sha256(bytes);
         r
+    }
+    fn composite_request(original: &[u8], output: &[u8]) -> Request {
+        let mut r = request(output);
+        let mut draft = crate::prepare::capture(original, "composite-test".into(), r.identity.job_revision.clone()).unwrap();
+        assert!(draft.diagnostics.is_empty(), "{:?}", draft.diagnostics);
+        draft.baseline.approval = r.baseline.as_ref().unwrap().approval.clone();
+        for region in &mut draft.baseline.regions {
+            for field in ["role", "coverage_exception"] {
+                region.facts.insert(field.into(), r.baseline.as_ref().unwrap().regions[0].facts[field].clone());
+            }
+        }
+        r.identity.original_sha256 = crate::sha256(original);
+        r.baseline = Some(draft.baseline);
+        r.geometry = Some(draft.geometry);
+        r.recipe.required_screens = Some(vec![]);
+        r.recipe.file_links[0].name_mode = "source".into();
+        r.recipe.file_links[0].separation_name = None;
+        r.recipe.file_links[0].destination = "Indigo".into();
+        let f = r.recipe.foundation.as_mut().unwrap();
+        f["input_routes"][0]["destination"] = json!("Indigo");
+        f["treatments"]["arbitrary"]["paint"] = json!({"mode":"source"});
+        f["treatments"]["arbitrary"]["partition"] = json!("object");
+        for plate in f["verification"]["plates"].as_array_mut().unwrap() {
+            plate["name_mode"] = json!("composite");
+            plate["destination"] = json!("Indigo");
+            plate["name"] = Value::Null;
+            plate["required"] = json!(false);
+        }
+        refresh_composite(&mut r);
+        r
+    }
+    fn refresh_composite(r: &mut Request) {
+        r.identity.recipe_sha256 = crate::digest(&r.recipe).unwrap();
+        r.identity.baseline_sha256 = crate::digest(r.baseline.as_ref().unwrap()).unwrap();
+        r.identity.assignments_sha256 = r.assignments_digest().unwrap();
+        assert!(r.recipe.contract_issues(r.garment).is_empty(), "{:?}", r.recipe.contract_issues(r.garment));
+    }
+    fn composite_status(r: &Request, bytes: &[u8], status: Status) -> Report {
+        let report = crate::pdf::check(r, bytes).unwrap();
+        let f = report.findings.iter().find(|f| f.obligation.key == "plate/dark-output").unwrap();
+        assert_eq!(f.status, status, "{}", serde_json::to_string_pretty(f).unwrap());
+        report
+    }
+    #[test]
+    fn composite_positive_support_uses_last_writer_and_owned_channel_aggregate() {
+        let cyan = "1 0 0 0 k 10 10 20 20 re f";
+        for (extra, status) in [
+            ("", Status::Pass),
+            ("/KO gs 0 0 0 0 k 15 15 5 5 re f", Status::Fail),
+            ("/OP1 gs 0 0 0 0 k 15 15 5 5 re f", Status::Pass),
+            ("/OP0 gs 0 0 0 0 k 15 15 5 5 re f", Status::Fail),
+            ("/Ink cs 1 scn 15 15 5 5 re f", Status::Incomplete),
+            ("/KO gs 1 0 0 0 k 60 60 5 5 re f", Status::Fail),
+        ] {
+            let original = crate::pdf::tests::composite_fixture(cyan);
+            let output = crate::pdf::tests::composite_fixture(&format!("{cyan} {extra}"));
+            composite_status(&composite_request(&original, &output), &output, status);
+        }
+        for stream in [
+            "1 0 0 0 k 10 10 20 20 re f 0 1 0 0 k 20 20 20 20 re f",
+            "1 0 0 0 k 10 10 20 20 re f /Ink cs 1 scn 20 20 20 20 re f",
+            ".3 0 0 0 k 10 10 20 20 re f /Ink cs .5 scn 20 20 20 20 re f",
+            ".001 0 0 0 k 10 10 20 20 re f",
+            ".5 g 10 10 20 20 re f",
+        ] {
+            let bytes = crate::pdf::tests::composite_fixture(stream);
+            composite_status(&composite_request(&bytes, &bytes), &bytes, Status::Pass);
+        }
+    }
+    #[test]
+    fn composite_pages_and_reversed_streams_keep_the_complete_page_union() {
+        for reverse in [false, true] {
+            let bytes = crate::pdf::tests::ordered_ink_fixture("1 0 0 0 k 10 10 20 20 re f", true, 1, false, reverse);
+            composite_status(&composite_request(&bytes, &bytes), &bytes, Status::Pass);
+        }
+        let bytes = crate::pdf::tests::ordered_ink_fixture("1 0 0 0 k 10 10 20 20 re f", true, 1, true, false);
+        composite_status(&composite_request(&bytes, &bytes), &bytes, Status::Pass);
+        let original = crate::pdf::tests::ordered_ink_fixture("", true, 1, true, false);
+        let extra = crate::pdf::tests::ordered_ink_fixture("/Ink cs 1 scn 60 60 5 5 re f", true, 1, true, false);
+        composite_status(&composite_request(&original, &extra), &extra, Status::Fail);
+    }
+    #[test]
+    fn composite_exact_ink_link_can_share_the_owned_destination() {
+        let bytes = crate::pdf::tests::composite_fixture("1 0 0 0 k 10 10 20 20 re f /OP1 gs /Ink cs 1 scn 15 15 5 5 re f");
+        let mut r = foreign_request(&bytes, &bytes, true, false);
+        r.recipe.file_links[1].destination = "Indigo".into();
+        let plates = r.recipe.foundation.as_mut().unwrap()["verification"]["plates"].as_array_mut().unwrap();
+        plates.retain(|p| p["destination"] == "Indigo");
+        for p in plates {
+            p["links"].as_array_mut().unwrap().push(json!("foreign"));
+        }
+        refresh_composite(&mut r);
+        composite_status(&r, &bytes, Status::Pass);
+    }
+    #[test]
+    fn composite_dense_allowance_and_exhausted_ownership_budget_refuse() {
+        let source = "1 0 0 0 k 10 10 20 20 re f";
+        let original = crate::pdf::tests::composite_fixture(source);
+        let bytes = crate::pdf::tests::composite_fixture(&format!("{source} ").repeat(200));
+        let mut r = composite_request(&original, &bytes);
+        r.acceptance.get_mut("geometry_tolerance_mm").unwrap().value = json!(0.001);
+        refresh_composite(&mut r);
+        r.identity.measurement_sha256 = crate::digest(&r.acceptance).unwrap();
+        composite_status(&r, &bytes, Status::Incomplete);
+        let plan = crate::attribution::resolve(&r).unwrap();
+        let program = program::execute(&r, &plan).unwrap();
+        let mut census = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+        crate::ordering::try_reconcile(&bytes, &mut census).unwrap();
+        let mut budget = crate::feature_offset::WorkBudget::new();
+        budget.charge(2_000_000).unwrap();
+        let plate = &r.recipe.foundation.as_ref().unwrap()["verification"]["plates"][0];
+        assert!(crate::composite::reconstruct(&r, &plan, &program, &census, plate, &mut budget).err().unwrap().contains("budget"));
+    }
+    #[test]
+    fn composite_rounding_cannot_manufacture_zero_or_full_tone_support() {
+        let cyan = "1 0 0 0 k 10 10 20 20 re f";
+        let original = crate::pdf::tests::composite_fixture(cyan);
+        for extra in [
+            format!("0.{}1 0 0 0 k 60 60 5 5 re f", "0".repeat(49)),
+            "0.999999999 g 15 15 5 5 re f".into(),
+            format!("0.{}1 0 0 0 k 60 60 5 5 re f", "0".repeat(400)),
+        ] {
+            let bytes = crate::pdf::tests::composite_fixture(&format!("{cyan} {extra}"));
+            let report = composite_status(&composite_request(&original, &bytes), &bytes, Status::Incomplete);
+            let audit = report.findings.iter().find(|f| f.obligation.key == "global/integrity").unwrap();
+            assert!(serde_json::to_string(audit).unwrap().contains("rounding changes"));
+        }
+    }
+    #[test]
+    fn composite_expected_zero_route_mismatch_and_unsupported_colour_refuse() {
+        for stream in [
+            "0.000000000000000000000000000001 0 0 0 k 10 10 20 20 re f",
+            "0 0 0 0 k 10 10 20 20 re f",
+            "1 0 0 0 k 10 10 20 20 re f 0 0 0 0 k 60 60 5 5 re f",
+            "1 0 0 rg 10 10 20 20 re f",
+        ] {
+            let bytes = crate::pdf::tests::composite_fixture(stream);
+            composite_status(&composite_request(&bytes, &bytes), &bytes, Status::Incomplete);
+        }
+        let bytes = crate::pdf::tests::composite_fixture("1 0 0 0 k 10 10 20 20 re f");
+        let mut r = composite_request(&bytes, &bytes);
+        r.recipe.foundation.as_mut().unwrap()["input_routes"][0]["destination"] = json!("Screen");
+        refresh_composite(&mut r);
+        let report = composite_status(&r, &bytes, Status::Incomplete);
+        assert!(report.findings.iter().find(|f| f.obligation.key == "plate/dark-output").unwrap().reason.contains("route disagrees"));
+    }
+    fn foreign_request(original: &[u8], output: &[u8], overprint: bool, lower: bool) -> Request {
+        let mut r = composite_request(original, output);
+        for region in &mut r.baseline.as_mut().unwrap().regions {
+            if region.facts.get("ink").is_some_and(|f| f.value == json!("Exact ink")) {
+                region.facts.get_mut("role").unwrap().value = json!("technical");
+            }
+        }
+        let mut rule = r.recipe.rules[0].clone();
+        rule.rule_key = "foreign".into();
+        r.recipe.rules.push(rule);
+        let mut link = r.recipe.file_links[0].clone();
+        link.key = "foreign".into();
+        link.source_rule = "foreign".into();
+        link.destination = "Screen".into();
+        link.name_mode = "exact".into();
+        link.separation_name = Some("Exact ink".into());
+        link.overprint = overprint;
+        if lower {
+            r.recipe.file_links[0].layer_order = link.layer_order + 1;
+        }
+        r.recipe.file_links.push(link);
+        let f = r.recipe.foundation.as_mut().unwrap();
+        f["treatments"]["foreign"] = f["treatments"]["arbitrary"].clone();
+        f["treatments"]["foreign"]["paint"] = json!({"mode":"output_ink"});
+        f["treatments"]["arbitrary"]["select"] = json!([[{"field":"role","operator":"equals","value":"ordinary"}]]);
+        f["treatments"]["foreign"]["select"] = json!([[{"field":"role","operator":"equals","value":"technical"}]]);
+        f["input_routes"] = json!([
+            {"when":[[{"field":"role","operator":"equals","value":"ordinary"}]],"destination":"Indigo","name":"source"},
+            {"when":[[{"field":"role","operator":"equals","value":"technical"}]],"destination":"Screen","name":"source"}
+        ]);
+        f["outputs"]["foreign"] = f["outputs"]["output"].clone();
+        f["verification"]["contributions"]["foreign"] = f["verification"]["contributions"]["output"].clone();
+        for garment in ["dark", "light"] {
+            f["verification"]["plates"].as_array_mut().unwrap().push(json!({"key":format!("{garment}-foreign"),"garment":garment,"name":"Exact ink","name_mode":"exact","destination":"Screen","required":false,"links":["foreign"],"evidence":"synthetic"}));
+        }
+        refresh_composite(&mut r);
+        r
+    }
+    #[test]
+    fn composite_foreign_paint_requires_safe_order_overprint_or_disjoint_support() {
+        let original = crate::pdf::tests::composite_fixture("1 0 0 0 k 10 10 20 20 re f /OP1 gs /Ink cs 1 scn 15 15 5 5 re f");
+        let knockout = crate::pdf::tests::composite_fixture("1 0 0 0 k 10 10 20 20 re f /KO gs /Ink cs 1 scn 15 15 5 5 re f");
+        for (op, output, status) in [(true, &original, Status::Pass), (true, &knockout, Status::Fail), (false, &knockout, Status::Incomplete)] {
+            composite_status(&foreign_request(&original, output, op, false), output, status);
+        }
+        let below = crate::pdf::tests::composite_fixture("/KO gs /Ink cs 1 scn 15 15 5 5 re f 1 0 0 0 k 10 10 20 20 re f");
+        composite_status(&foreign_request(&below, &below, false, true), &below, Status::Pass);
+        let disjoint = crate::pdf::tests::composite_fixture("1 0 0 0 k 10 10 20 20 re f /KO gs /Ink cs 1 scn 60 60 5 5 re f");
+        composite_status(&foreign_request(&disjoint, &disjoint, false, false), &disjoint, Status::Pass);
+        let mut r = foreign_request(&original, &original, true, false);
+        r.recipe.file_links[1].name_mode = "source".into();
+        r.recipe.file_links[1].separation_name = None;
+        let f = r.recipe.foundation.as_mut().unwrap();
+        f["treatments"]["foreign"]["paint"] = json!({"mode":"source"});
+        for p in f["verification"]["plates"].as_array_mut().unwrap().iter_mut().filter(|p| p["destination"] == "Screen") {
+            p["name_mode"] = json!("source");
+            p["name"] = Value::Null;
+        }
+        refresh_composite(&mut r);
+        composite_status(&r, &original, Status::Incomplete);
+    }
+    #[test]
+    fn composite_shared_channel_refuses_both_physical_plates_and_empty_ownership_is_explicit() {
+        let bytes = crate::pdf::tests::composite_fixture("1 0 0 0 k 10 10 20 20 re f /OP1 gs /Ink cs 1 scn 15 15 5 5 re f");
+        let mut r = foreign_request(&bytes, &bytes, true, false);
+        r.recipe.foundation.as_mut().unwrap()["treatments"]["arbitrary"]["select"] = json!([[]]);
+        refresh_composite(&mut r);
+        let report = composite_status(&r, &bytes, Status::Incomplete);
+        assert_eq!(report.findings.iter().find(|f| f.obligation.key == "plate/dark-foreign").unwrap().status, Status::Incomplete);
+        let only_spot = crate::pdf::tests::composite_fixture("/OP1 gs /Ink cs 1 scn 15 15 5 5 re f");
+        let r = foreign_request(&only_spot, &only_spot, true, false);
+        composite_status(&r, &only_spot, Status::NotApplicable);
+        let r = foreign_request(&only_spot, &bytes, true, false);
+        composite_status(&r, &bytes, Status::Incomplete);
+    }
+    #[test]
+    fn composite_named_zero_clears_only_owned_spot_and_can_preserve_process() {
+        let original = crate::pdf::tests::composite_fixture("1 0 0 0 k 10 10 20 20 re f /OP1 gs /Ink cs 1 scn 10 10 20 20 re f");
+        let output = crate::pdf::tests::composite_fixture("1 0 0 0 k 10 10 20 20 re f /OP1 gs /Ink cs 1 scn 10 10 20 20 re f 0 scn 15 15 5 5 re f");
+        composite_status(&composite_request(&original, &output), &output, Status::Pass);
+        let original = crate::pdf::tests::composite_fixture("/OP1 gs /Ink cs 1 scn 10 10 20 20 re f");
+        let output = crate::pdf::tests::composite_fixture("/OP1 gs /Ink cs 1 scn 10 10 20 20 re f 0 scn 15 15 5 5 re f");
+        composite_status(&composite_request(&original, &output), &output, Status::Fail);
+    }
+    #[test]
+    fn empty_required_coverage_retains_prior_cause_without_stale_measurement_location() {
+        let bytes = crate::pdf::tests::fixture(true, "Exact#20ink", "0 scn 10 10 20 20 re f", None);
+        let mut r = request(&bytes);
+        r.geometry.as_mut().unwrap().regions.get_mut("region-1").unwrap().path_mm = Default::default();
+        r.baseline.as_mut().unwrap().regions[0].geometry_sha256 = crate::digest(&r.geometry.as_ref().unwrap().regions["region-1"]).unwrap();
+        let f = r.recipe.foundation.as_mut().unwrap();
+        f["verification"]["contributions"]["output"]["emptiness"] = json!("required");
+        for p in f["verification"]["plates"].as_array_mut().unwrap() {
+            p["required"] = json!(false);
+        }
+        r.recipe.required_screens = Some(vec![]);
+        refresh_composite(&mut r);
+        let report = crate::pdf::check(&r, &bytes).unwrap();
+        let f = report.findings.iter().find(|f| f.obligation.key == "file/output/coverage").unwrap();
+        assert_eq!(f.status, Status::Incomplete);
+        assert!(f.observed.get("prior_physical_finding").is_some());
+        assert!(f.location.is_none() && f.uncertainty_mm.is_none());
     }
     #[test]
     fn exact_pdf_geometry_is_measured_and_extra_islands_get_locations() {

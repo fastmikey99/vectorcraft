@@ -2,6 +2,18 @@
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Absolute decoded-colour uncertainty already used by paint fidelity. Refusal
+/// below this envelope is computational, never a minimum printable tint.
+pub(crate) const DECODED_COLOUR_ENVELOPE: f64 = 4.0 * f32::EPSILON as f64;
+pub(crate) fn positive_supported(tones: &BTreeMap<String, f64>) -> Result<(), String> {
+    if tones.values().any(|n| !n.is_finite() || !(0.0..=1.0).contains(n)) {
+        return Err("Positive support tone is outside the finite unit interval".into());
+    }
+    if tones.values().any(|n| *n > 0.0 && *n <= DECODED_COLOUR_ENVELOPE) {
+        return Err("Positive support below decoded-colour envelope is unresolved; this is not a printing threshold".into());
+    }
+    Ok(())
+}
 pub(crate) fn tones(paint: &Value, ink: Option<&str>) -> Result<BTreeMap<String, f64>, String> {
     let tint = paint.get("tint").and_then(Value::as_f64).unwrap_or(1.0);
     if let Some(ink) = ink {

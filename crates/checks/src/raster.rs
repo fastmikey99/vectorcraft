@@ -292,8 +292,12 @@ mod tests {
         assert_eq!(kinds, [DeviceCmyk, Separation, DeviceN, Separation, DeviceCmyk]);
         assert_eq!(raw.sources[raw.source_indices[0][1]].colorants, ["Cyan"]);
         assert_eq!(raw.sources[raw.source_indices[0][2]].colorants, ["Cyan", "Magenta"]);
-        // DeviceCMYK is interned once despite graphics-state restoration and aliases.
-        assert_eq!(raw.sources.len(), 3);
+        // DeviceCMYK with different overprint/OPM states has distinct raw identities.
+        assert_eq!(raw.sources.len(), 4);
+        assert_eq!(
+            raw.source_indices[0].iter().map(|i| (raw.sources[*i].overprint, raw.sources[*i].overprint_mode)).collect::<Vec<_>>(),
+            [(false, 0), (true, 1), (true, 1), (true, 1), (true, 1)]
+        );
         let c = captured(&bytes);
         assert_eq!(c.paints.iter().map(|p| c.paint_sources[p.source_space.unwrap()].color_space).collect::<Vec<_>>(), kinds);
     }

@@ -588,6 +588,17 @@ pub(crate) mod tests {
         }
         objects_pdf(&objects)
     }
+    /// Original synthetic process/spot stream, with explicit overprint resources.
+    pub(crate) fn composite_fixture(stream: &str) -> Vec<u8> {
+        let stream = format!("/OC /Layer BDC {stream} EMC");
+        objects_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R] /D << /Order [5 0 R] /ON [5 0 R] >> >> >>".into(),
+            "<< /Type /Pages /Count 1 /Kids [3 0 R] >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /Properties << /Layer 5 0 R >> /ColorSpace << /Ink [/Separation /Exact#20ink /DeviceCMYK << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 1 0 0] /N 1 >>] >> /ExtGState << /OP0 << /Type /ExtGState /op true /OP true /OPM 0 >> /OP1 << /Type /ExtGState /op true /OP true /OPM 1 >> /KO << /Type /ExtGState /op false /OP false /OPM 1 >> >> >> /Contents 4 0 R >>".into(),
+            format!("<< /Length {} >>\nstream\n{stream}\nendstream",stream.len()),
+            "<< /Type /OCG /Name (Layer) >>".into(),
+        ])
+    }
     pub(crate) fn objects_pdf(objects: &[String]) -> Vec<u8> {
         let mut out = b"%PDF-1.7\n".to_vec();
         let mut offsets = vec![0];

@@ -24,6 +24,9 @@ pub enum PrintColorSpace {
 pub struct PrintPaintSource {
     /// Raw operator kind, retained to detect interpreter fill/stroke substitutions.
     pub stroke: bool,
+    /// Actual graphics-state flags, reconciled against the editable census.
+    pub overprint: bool,
+    pub overprint_mode: u8,
     pub color_space: PrintColorSpace,
     /// Decoded names, unchanged. Empty for device/unsupported spaces.
     pub colorants: Vec<String>,

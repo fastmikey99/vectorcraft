@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod attribution;
+mod composite;
 mod contract;
 mod contribution;
 mod coverage;

@@ -43,6 +43,17 @@ pub(crate) fn solid(census: &Census, page: usize, ink: &str) -> Result<Coverage,
     solid_with_budget(census, page, ink, &mut crate::feature_offset::WorkBudget::new())
 }
 pub(crate) fn solid_with_budget(census: &Census, page: usize, ink: &str, budget: &mut crate::feature_offset::WorkBudget) -> Result<Coverage, String> {
+    channel(census, page, ink, true, budget)
+}
+pub(crate) fn positive_with_budget(
+    census: &Census,
+    page: usize,
+    ink: &str,
+    budget: &mut crate::feature_offset::WorkBudget,
+) -> Result<Coverage, String> {
+    channel(census, page, ink, false, budget)
+}
+fn channel(census: &Census, page: usize, ink: &str, binary: bool, budget: &mut crate::feature_offset::WorkBudget) -> Result<Coverage, String> {
     if page >= census.pages || ink.is_empty() || matches!(ink, "All" | "None") {
         return Err("Physical coverage page or ink is invalid".into());
     }
@@ -53,10 +64,14 @@ pub(crate) fn solid_with_budget(census: &Census, page: usize, ink: &str, budget:
     let mut count = 0usize;
     let mut paint_object_ids = std::collections::BTreeSet::new();
     for paint in &census.paints {
+        budget.charge(1)?;
         let source = paint.source_space.and_then(|i| census.paint_sources.get(i)).ok_or("Physical coverage source identity missing")?;
         let tones = crate::tone::source_tones(paint, source)?;
-        if tones.values().any(|t| !t.is_finite() || ![0.0, 1.0].contains(t)) {
+        if tones.values().any(|t| !t.is_finite() || !(0.0..=1.0).contains(t) || (binary && ![0.0, 1.0].contains(t))) {
             return Err("Physical feature coverage requires binary solid ink; partial tone needs a separate approved criterion".into());
+        }
+        if !binary {
+            crate::tone::positive_supported(&tones)?;
         }
         let painted_page = paint.page.ok_or("Physical coverage page unresolved")?;
         let shape = paint.geometry_mm.as_ref().ok_or("Physical coverage geometry unresolved")?;
@@ -76,13 +91,39 @@ pub(crate) fn solid_with_budget(census: &Census, page: usize, ink: &str, budget:
             continue;
         };
         paint_object_ids.insert(paint.id);
+        if tone == 0.0 && path.is_empty() {
+            continue;
+        }
         let sweep = vectorcraft_pathops::measurement_boolean_epsilon(&path, shape).map_err(|e| e.to_string())?;
-        path = boolean(&path, shape, if tone == 1.0 { BoolOp::Union } else { BoolOp::Difference })?;
+        path = boolean(&path, shape, if tone > 0.0 { BoolOp::Union } else { BoolOp::Difference })?;
         // Retain input error and a Boolean construction allowance (not a certified enclosure); never use it as
         // a manufacturing tolerance or suppress a small component.
         construction_allowance_mm += paint.geometry_error_mm + 2.0 * sweep;
     }
     Ok(Coverage { path, construction_allowance_mm, paint_object_ids: paint_object_ids.into_iter().collect() })
+}
+
+/// Budget and retain every aggregate Boolean construction allowance.
+pub(crate) fn aggregate(parts: impl IntoIterator<Item = Coverage>, budget: &mut crate::feature_offset::WorkBudget) -> Result<Coverage, String> {
+    let mut result = Coverage { path: PathData::default(), construction_allowance_mm: 0.0, paint_object_ids: vec![] };
+    let mut ids = std::collections::BTreeSet::new();
+    for part in parts {
+        budget.charge(elements(&result.path).saturating_add(elements(&part.path)))?;
+        result.construction_allowance_mm += part.construction_allowance_mm;
+        ids.extend(part.paint_object_ids);
+        if part.path.is_empty() {
+            continue;
+        }
+        if result.path.is_empty() {
+            result.path = part.path;
+            continue;
+        }
+        let sweep = vectorcraft_pathops::measurement_boolean_epsilon(&result.path, &part.path).map_err(|e| e.to_string())?;
+        result.path = boolean(&result.path, &part.path, BoolOp::Union)?;
+        result.construction_allowance_mm += 2.0 * sweep;
+    }
+    result.paint_object_ids = ids.into_iter().collect();
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -98,6 +139,19 @@ mod tests {
     }
     fn contains(c: &Coverage, x: f64, y: f64) -> bool {
         c.path.to_bezpath().winding(Point::new(x * 25.4 / 72.0, (100.0 - y) * 25.4 / 72.0)) != 0
+    }
+    #[test]
+    fn aggregate_and_off_page_census_validation_consume_the_shared_budget() {
+        let c = coverage("", 1, "Exact ink").unwrap();
+        let mut budget = crate::feature_offset::WorkBudget::new();
+        budget.charge(2_000_000).unwrap();
+        assert!(aggregate([c], &mut budget).err().unwrap().contains("budget"));
+        let bytes = crate::pdf::tests::ordered_ink_fixture("", true, 1, true, false);
+        let mut census = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+        crate::ordering::try_reconcile(&bytes, &mut census).unwrap();
+        let mut budget = crate::feature_offset::WorkBudget::new();
+        budget.charge(2_000_000).unwrap();
+        assert!(positive_with_budget(&census, 1, "Exact ink", &mut budget).err().unwrap().contains("budget"));
     }
     #[test]
     fn final_coverage_obeys_named_zero_and_later_knockout() {
@@ -175,10 +229,32 @@ mod independent_tests {
         ] {
             cases.push((name, crate::pdf::tests::ordered_ink_fixture(second, overprint, 1, second_page, reverse), "Exact ink"));
         }
+        for (name, paint, mode) in [
+            ("positive-gray-black-opm0", "0 g", "OP0"),
+            ("positive-gray-black-opm1", "0 g", "OP1"),
+            ("positive-gray-white-opm1", "1 g", "OP1"),
+            ("positive-gray-half-opm1", ".5 g", "OP1"),
+            ("positive-gray-knockout", "0 g", "KO"),
+            ("positive-cmyk-zero-opm0", "0 0 0 0 k", "OP0"),
+            ("positive-cmyk-zero-opm1", "0 0 0 0 k", "OP1"),
+            ("positive-spot-knockout", "/Ink cs 1 scn", "KO"),
+        ] {
+            let bytes = crate::pdf::tests::composite_fixture(&format!(
+                "1 1 1 0 k 0 0 100 100 re f /OP1 gs /Ink cs 1 scn 0 0 100 100 re f /{mode} gs {paint} 50 0 50 100 re f"
+            ));
+            for ink in ["Cyan", "Magenta", "Yellow", "Black", "Exact ink"] {
+                cases.push((name, bytes.clone(), ink));
+            }
+        }
         for (name, bytes, ink) in cases {
             let mut census = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
             crate::ordering::try_reconcile(&bytes, &mut census).unwrap();
-            let coverage = solid(&census, 0, ink).unwrap();
+            let positive = name.starts_with("positive-");
+            let coverage = if positive {
+                positive_with_budget(&census, 0, ink, &mut crate::feature_offset::WorkBudget::new()).unwrap()
+            } else {
+                solid(&census, 0, ink).unwrap()
+            };
             let boundary = crate::geometry::Boundary::new(&coverage.path, FillRule::NonZero, 0.000001).unwrap();
             let config = crate::independent::Configuration {
                 binary: binary.clone().into(),
@@ -189,7 +265,7 @@ mod independent_tests {
                 max_output_bytes: 16 * 1024 * 1024,
                 qualification_sha256: None,
             };
-            let output = base.join(format!("feature-coverage-{name}-{run}"));
+            let output = base.join(format!("feature-coverage-{name}-{ink}-{run}"));
             let rendering = crate::independent::render(&config, &bytes, &output).unwrap();
             let plane = rendering.planes.iter().find(|p| p.page == 1 && p.name == ink).unwrap();
             let image = crate::raster::read_plane(plane).unwrap();
@@ -204,16 +280,42 @@ mod independent_tests {
                 }
                 let expected = if boundary.contains(p, FillRule::NonZero) { 0 } else { 255 };
                 compared += 1;
-                if pixel.0[0] != expected {
+                if if positive { (pixel.0[0] < 255) != (expected == 0) } else { pixel.0[0] != expected } {
                     wrong += 1;
                 }
             }
             assert!(compared > 1000);
             assert_eq!(wrong, 0, "{name}");
-            evidence.push(serde_json::json!({"case":name,"pdf_sha256":crate::sha256(&bytes),"configuration_sha256":rendering.configuration_sha256,"plane_sha256":plane.sha256,"pixels_compared":compared,"wrong_pixels":wrong}));
+            evidence.push(serde_json::json!({"case":name,"channel":ink,"positive_support_only":positive,"pdf_sha256":crate::sha256(&bytes),"configuration_sha256":rendering.configuration_sha256,"plane_sha256":plane.sha256,"pixels_compared":compared,"wrong_pixels":wrong}));
             if std::env::var_os("CHECK_FEATURE_EVIDENCE_DIR").is_none() {
                 std::fs::remove_dir_all(output).unwrap();
             }
+        }
+        // An 8-bit plane cannot independently establish the support of a tiny
+        // nonzero tint. Retain this limitation as explicit refusal evidence.
+        let bytes = crate::pdf::tests::composite_fixture("0.0000001 0 0 0 k 10 10 20 20 re f");
+        let mut census = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+        crate::ordering::try_reconcile(&bytes, &mut census).unwrap();
+        let refusal = positive_with_budget(&census, 0, "Cyan", &mut crate::feature_offset::WorkBudget::new()).err().unwrap();
+        assert!(refusal.contains("decoded-colour envelope"));
+        let config = crate::independent::Configuration {
+            binary: binary.clone().into(),
+            binary_sha256: crate::sha256(&std::fs::read(&binary).unwrap()),
+            version: "10.07.1".into(),
+            dpi: 144,
+            timeout_ms: 10_000,
+            max_output_bytes: 16 * 1024 * 1024,
+            qualification_sha256: None,
+        };
+        let output = base.join(format!("sub-decoder-{run}"));
+        let rendering = crate::independent::render(&config, &bytes, &output).unwrap();
+        let plane = rendering.planes.iter().find(|p| p.name == "Cyan").unwrap();
+        let image = crate::raster::read_plane(plane).unwrap();
+        assert!(image.pixels().all(|p| p.0[0] == 255));
+        if std::env::var_os("CHECK_FEATURE_EVIDENCE_DIR").is_some() {
+            std::fs::write(base.join(format!("sub-decoder-render-{run}.json")), serde_json::to_vec_pretty(&serde_json::json!({"engine":crate::ENGINE_VERSION,"refusal":refusal,"raw_cyan":0.0000001,"plane_all_white":true,"pdf_sha256":crate::sha256(&bytes),"plane_sha256":plane.sha256,"configuration_sha256":rendering.configuration_sha256})).unwrap()).unwrap();
+        } else {
+            std::fs::remove_dir_all(output).unwrap();
         }
         if std::env::var_os("CHECK_FEATURE_EVIDENCE_DIR").is_some() {
             std::fs::write(

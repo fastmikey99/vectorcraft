@@ -471,7 +471,7 @@ struct Walker<'w, 'p> {
     ink_index: HashMap<Vec<String>, u32>,
     /// More inks or changes of ink than are kept: the page's inks are left out.
     inks_cut: bool,
-    print_sources: HashMap<(PrintColorSpace, Option<u32>, bool), usize>,
+    print_sources: HashMap<(PrintColorSpace, Option<u32>, bool, bool, u8), usize>,
 }
 
 impl Walker<'_, '_> {
@@ -590,8 +590,10 @@ impl Walker<'_, '_> {
         }
         let kind = state.spaces[usize::from(stroke)];
         let ink = state.inks[usize::from(stroke)].space;
+        let overprint = if stroke { state.stroke } else { state.fill };
+        let overprint_mode = u8::from(state.nonzero);
         if let Some(order) = &mut self.out.print_order {
-            let source = if let Some(&i) = self.print_sources.get(&(kind, ink, stroke)) {
+            let source = if let Some(&i) = self.print_sources.get(&(kind, ink, stroke, overprint, overprint_mode)) {
                 i
             } else {
                 let names = ink.and_then(|i| self.out.inks.get(i as usize)).map(Vec::as_slice).unwrap_or_default();
@@ -603,8 +605,8 @@ impl Walker<'_, '_> {
                     order.issues.insert("Reserved All/None colourant coverage requires print-semantic reconciliation".into());
                 }
                 let i = order.sources.len();
-                order.sources.push(PrintPaintSource { stroke, color_space: kind, colorants: names.to_vec() });
-                self.print_sources.insert((kind, ink, stroke), i);
+                order.sources.push(PrintPaintSource { stroke, overprint, overprint_mode, color_space: kind, colorants: names.to_vec() });
+                self.print_sources.insert((kind, ink, stroke, overprint, overprint_mode), i);
                 i
             };
             if order.layers.len() >= 50_000 {
@@ -774,7 +776,7 @@ impl Walker<'_, '_> {
         let outer = self.out.print_order.is_some().then(|| (self.visible.clone(), self.layers.clone()));
         let floor = self.marked_floor;
         self.marked_floor = marked;
-        self.walk_ops(&mut iter, res, depth);
+        self.walk_ops(&mut iter, data, res, depth);
         if self.out.print_order.is_some() && self.layers.len() != marked {
             self.order_issue("Unbalanced form marked content cannot establish print order");
             if let Some((visible, layers)) = outer {
@@ -804,7 +806,7 @@ impl Walker<'_, '_> {
         loop {
             let (committed, needs_more) = {
                 let mut ops = TypedIter::new_window(&window, exhausted);
-                self.walk_ops(&mut ops, resources, 0);
+                self.walk_ops(&mut ops, &window, resources, 0);
                 (ops.committed(), ops.needs_more())
             };
             if committed > window.len() {
@@ -838,8 +840,25 @@ impl Walker<'_, '_> {
         self.states.truncate(saved);
     }
 
-    fn walk_ops(&mut self, iter: &mut TypedIter<'_>, res: &Resources<'_>, depth: u32) {
-        while let Some(op) = iter.next() {
+    fn walk_ops(&mut self, iter: &mut TypedIter<'_>, data: &[u8], res: &Resources<'_>, depth: u32) {
+        loop {
+            let start = iter.committed();
+            let Some(op) = iter.next() else {
+                break;
+            };
+            let colour = matches!(
+                &op,
+                TypedInstruction::NonStrokeColor(_)
+                    | TypedInstruction::StrokeColor(_)
+                    | TypedInstruction::NonStrokeColorNamed(_)
+                    | TypedInstruction::StrokeColorNamed(_)
+                    | TypedInstruction::NonStrokeColorDeviceGray(_)
+                    | TypedInstruction::StrokeColorDeviceGray(_)
+                    | TypedInstruction::NonStrokeColorDeviceRgb(_)
+                    | TypedInstruction::StrokeColorDeviceRgb(_)
+                    | TypedInstruction::NonStrokeColorCmyk(_)
+                    | TypedInstruction::StrokeColorCmyk(_)
+            );
             if self.out.cut {
                 return;
             }
@@ -1070,10 +1089,47 @@ impl Walker<'_, '_> {
                 }
                 _ => {}
             }
+            if colour && self.out.print_order.is_some() && data.get(start..iter.committed()).is_none_or(|raw| !colour_endpoints_preserved(raw)) {
+                self.order_issue("Colour component rounding changes zero/full-tone support; raw precision reconciliation required");
+            }
         }
     }
 }
 
+/// Preserve literal zero/one classification before the editable f32 colour
+/// decode. A numerical refusal is not a manufacturing tint threshold. Read raw
+/// decimals so even values that underflow f64 or round to one cannot look exact.
+fn colour_endpoints_preserved(raw: &[u8]) -> bool {
+    for line in raw.split(|b| matches!(b, b'\r' | b'\n')) {
+        let line = line.split(|b| *b == b'%').next().unwrap_or_default();
+        for token in line.split(|b| *b == 0 || b.is_ascii_whitespace()).filter(|t| !t.is_empty()) {
+            if !token.first().is_some_and(|b| b.is_ascii_digit() || matches!(b, b'+' | b'-' | b'.')) {
+                continue;
+            }
+            let Ok(text) = std::str::from_utf8(token) else {
+                return false;
+            };
+            let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
+            if !unsigned.bytes().all(|b| b.is_ascii_digit() || b == b'.') || !unsigned.bytes().any(|b| b.is_ascii_digit()) {
+                return false;
+            }
+            let zero = unsigned.bytes().all(|b| b == b'0' || b == b'.');
+            let (integer, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+            let one = !text.starts_with('-') && integer.trim_start_matches('0') == "1" && fraction.bytes().all(|b| b == b'0');
+            let Ok(number) = text.parse::<f64>() else {
+                return false;
+            };
+            if !number.is_finite() || !(0.0..=1.0).contains(&number) {
+                return false;
+            }
+            let decoded = number as f32;
+            if (decoded == 0.0) != zero || (decoded == 1.0) != one {
+                return false;
+            }
+        }
+    }
+    true
+}
 /// The fonts of a document by cache key: base font name, and whether the file carries the glyphs
 /// ([`embeds_glyphs`]).
 pub(crate) type FontNames = HashMap<u128, (String, bool)>;
@@ -1208,4 +1264,28 @@ pub(crate) fn scan_print_order(
         return Err(incomplete_content());
     }
     scan.print_order.ok_or_else(incomplete_content)
+}
+
+#[cfg(test)]
+mod colour_precision_tests {
+    use super::colour_endpoints_preserved;
+    #[test]
+    fn literal_colour_endpoints_survive_comments_and_float_limits() {
+        for raw in
+            ["0 .5 1 .25 +1.0 -0 k", "1% ignored 0.999999999\n 0 0 0 k", "0.000000000000000000000000000001 0 0 0 k", "0\0.5 1 rg", "0.0000 01.000 k"]
+        {
+            assert!(colour_endpoints_preserved(raw.as_bytes()), "{raw}");
+        }
+        for raw in [
+            "0.999999999 g".to_string(),
+            format!("0.{}1 0 0 0 k", "0".repeat(49)),
+            format!("0.{}1 scn", "0".repeat(400)),
+            "0.999999999999999999999999999999 scn".into(),
+            ". g".into(),
+            "-0.5 g".into(),
+            "1.1 g".into(),
+        ] {
+            assert!(!colour_endpoints_preserved(raw.as_bytes()), "{raw}");
+        }
+    }
 }
