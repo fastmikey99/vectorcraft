@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use vectorcraft_geom::{Affine, Point};
 
 struct ImagePaint<'a> {
+    overprint: bool,
     clip: Option<crate::geometry::Boundary>,
     transform: Affine,
     samples: &'a vectorcraft_pdf::PrintImageSamples,
@@ -37,10 +38,16 @@ fn paints<'a>(
     images
         .iter()
         .map(|image| {
-            if image.overprint || image.compositing_unresolved || image.description.optional_content || image.description.interpolate {
-                return Err("Image overprint, graphics state, optional content or interpolation requires broader compositing qualification".into());
+            if image.compositing_unresolved || image.description.optional_content || image.description.interpolate {
+                return Err("Image graphics state, optional content or interpolation requires broader compositing qualification".into());
             }
             let samples = image.samples.as_ref().ok_or_else(|| image.sample_error.clone().unwrap_or("Image samples missing".into()))?;
+            if image.overprint && samples.has_source_mask() {
+                return Err("Image-owned masks under overprint require transparency-specific qualification".into());
+            }
+            if samples.devicen_attributes {
+                return Err("DeviceN image attributes require separate physical prediction qualification".into());
+            }
             let transform = page_transform * Affine::new(image.matrix.ok_or("Image transform missing")?);
             if !transform.determinant().is_finite() || transform.determinant() == 0.0 {
                 return Err("Singular image transform".into());
@@ -51,7 +58,7 @@ fn paints<'a>(
             if margin.iter().any(|n| !n.is_finite()) || margin[0] * f64::from(samples.width) >= 0.5 || margin[1] * f64::from(samples.height) >= 0.5 {
                 return Err("Independent resolution cannot resolve image sample boundaries".into());
             }
-            Ok(ImagePaint { samples, inverse, margin, clip: None, transform })
+            Ok(ImagePaint { overprint: image.overprint, samples, inverse, margin, clip: None, transform })
         })
         .collect()
 }
@@ -76,8 +83,13 @@ impl ImagePaint<'_> {
         let alpha = self.samples.alpha(at).map_err(|_| ())?;
         let tone = match self.samples.colourants.iter().position(|n| n == name) {
             Some(channel) => self.samples.tone(at, channel).map_err(|_| ())?,
+            None if self.overprint && !(self.samples.uses_gray_process() && ["Cyan", "Magenta", "Yellow", "Black"].contains(&name)) => {
+                return Ok(None);
+            }
             None => 0.0,
         };
+        // ISO 32000-1 8.6.7: OPM1 zero suppression does not apply to sampled
+        // images. Named or process zeros replace their own channels in both modes.
         Ok(Some((tone, alpha)))
     }
 }
@@ -121,7 +133,7 @@ impl PaintEvent<'_> {
 fn vector_paint(paint: &crate::pdf::PaintedObject, census: &crate::pdf::Census) -> Result<VectorPaint, String> {
     let path = paint.geometry_mm.as_ref().ok_or("Mixed vector paint has no coverage")?;
     let source = paint.source_space.and_then(|i| census.paint_sources.get(i)).ok_or("Mixed vector source space missing")?;
-    let inks = crate::raster::source_tones(paint, source)?;
+    let inks = crate::raw_named::prediction_tones(paint, source)?;
     if inks.values().any(|v| !v.is_finite() || !(0.0..=1.0).contains(v)) {
         return Err("Mixed vector source tone invalid".into());
     }
@@ -218,12 +230,10 @@ pub(crate) fn compare(bytes: &[u8], render: &Render, tolerance: Option<f64>) -> 
         {
             return Ok(incomplete("Native and raw physical page frames differ".into()));
         }
-        census.unresolved.extend(
-            crate::pdf::import_messages(imported.warnings)
-                .0
-                .into_iter()
-                .filter(|w| w != "original PDF page boxes are not retained for a rotated, scaled-unit or artwork-bounds import"),
-        );
+        census.unresolved.extend(crate::pdf::import_messages(imported.warnings).0.into_iter().filter(|w| {
+            w != "original PDF page boxes are not retained for a rotated, scaled-unit or artwork-bounds import"
+                && w != crate::raw_named::PREVIEW_NOTICE
+        }));
         if let Err(reason) = crate::ordering::reconcile_paths_for_images(&order, &mut census) {
             return Ok(incomplete(reason));
         }
@@ -1106,5 +1116,166 @@ mod tests {
         let result = compare(&bytes, &render, Some(2.0)).unwrap();
         assert_eq!(result.status, Status::Incomplete);
         assert!(result.issues.iter().any(|s| s.contains("aggregate geometry storage budget")), "{result:?}");
+    }
+    fn mixed_named_pdf(stream: &str, named_image: bool, own_mask: bool, attributes: &str) -> Vec<u8> {
+        let colour = if named_image { format!("[/DeviceN [/One /Two] /DeviceCMYK 6 0 R {attributes}]") } else { "/DeviceCMYK".into() };
+        let samples = if named_image { "ff0000ff8040ffff>" } else { "ff00000000ff00000000ff00000000ff>" };
+        let mask = if own_mask { "/SMask 7 0 R" } else { "" };
+        objects_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 96 72] /Resources << /XObject << /Im 5 0 R >> /ColorSpace << /D [/DeviceN [/One /Two] /DeviceCMYK 6 0 R] >> /ExtGState << /OP0 << /op true /OPM 0 >> /OP1 << /op true /OPM 1 >> /KO << /op false /OPM 1 >> >> >> /Contents 4 0 R >>".into(),
+            format!("<< /Length {} >>\nstream\n{stream}\nendstream",stream.len()),
+            format!("<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 /ColorSpace {colour} {mask} /Filter /ASCIIHexDecode /Length {} >>\nstream\n{samples}\nendstream",samples.len()),
+            "<< /FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1 0 1] /Length 7 >>\nstream\n{ 0 0 }\nendstream".into(),
+            "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /ASCIIHexDecode /Length 9 >>\nstream\n00ff80ff>\nendstream".into(),
+        ])
+    }
+    #[test]
+    fn mixed_named_prediction_preserves_raw_vector_and_image_inks() {
+        let Ok(binary) = std::env::var("CHECK_GS_BINARY") else { return };
+        for named_image in [false, true] {
+            for own_mask in [false, true] {
+                for mode in ["OP0", "OP1", "KO"] {
+                    for vector_first in [false, true] {
+                        let vector = format!("q /{mode} gs /D cs 0 0.75 scn 8 6 80 60 re f Q");
+                        let stream = if vector_first { format!("{vector} {IMAGE}") } else { format!("{IMAGE} {vector}") };
+                        let bytes = mixed_named_pdf(&stream, named_image, own_mask, "");
+                        for dpi in [72, 144] {
+                            let name = format!("named-mixed-{named_image}-{own_mask}-{mode}-{vector_first}");
+                            let output = evidence_directory(&name, dpi);
+                            let config = crate::independent::Configuration {
+                                binary: binary.clone().into(),
+                                binary_sha256: crate::sha256(&std::fs::read(&binary).unwrap()),
+                                version: "10.07.1".into(),
+                                dpi,
+                                timeout_ms: 10000,
+                                max_output_bytes: 16 * 1024 * 1024,
+                                qualification_sha256: None,
+                            };
+                            let mut rendering = crate::independent::render(&config, &bytes, &output).unwrap();
+                            let positive = compare(&bytes, &rendering, Some(2.0)).unwrap();
+                            retain_result(&output, &rendering, &positive, "comparison");
+                            assert_eq!(positive.status, Status::Pass, "{name}/{dpi}: {positive:?}");
+                            let plane = rendering.planes.iter_mut().find(|p| p.name == "Two").unwrap();
+                            let mut image = crate::raster::read_plane(plane).unwrap();
+                            let (x, y) = (20 * dpi / 72, 20 * dpi / 72);
+                            image.put_pixel(x, y, image::Luma([255 - image.get_pixel(x, y).0[0]]));
+                            plane.path = output.join("changed-two.tif");
+                            image.save(&plane.path).unwrap();
+                            plane.sha256 = crate::sha256(&std::fs::read(&plane.path).unwrap());
+                            let negative = compare(&bytes, &rendering, Some(2.0)).unwrap();
+                            retain_result(&output, &rendering, &negative, "defect");
+                            assert_eq!(negative.status, Status::Fail, "{name}/{dpi}: {negative:?}");
+                            finish_evidence(&output);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn mixed_named_image_attributes_remain_unqualified() {
+        let bytes = mixed_named_pdf(IMAGE, true, false, "<< /Subtype /NChannel >>");
+        let audit = vectorcraft_pdf::print_order(&bytes).unwrap();
+        let image = &audit.images[0][0];
+        let samples = image.samples.as_ref().unwrap();
+        assert!(samples.devicen_attributes);
+        assert_eq!(samples.colourants, ["One", "Two"]);
+        assert!(image.sample_error.is_none());
+        let plain = vectorcraft_pdf::print_order(&mixed_named_pdf(IMAGE, true, false, "")).unwrap();
+        assert!(!plain.images[0][0].samples.as_ref().unwrap().devicen_attributes);
+        assert_eq!(samples.sample_sha256, plain.images[0][0].samples.as_ref().unwrap().sample_sha256);
+        let info = vectorcraft_pdf::production_info(&bytes).unwrap();
+        let reason = paints(&info.pages[0], &audit.images[0], 0.001).err().expect("attributes must remain unqualified");
+        assert!(reason.contains("attributes"));
+        let indexed = overprint_image_pdf(
+            "KO",
+            "/BitsPerComponent 1 /ColorSpace [/Indexed [/DeviceN [/One /Two] /DeviceCMYK 6 0 R << /Subtype /NChannel >>] 1 <ff0000ff>]",
+            "4080>",
+            false,
+        );
+        let indexed_audit = vectorcraft_pdf::print_order(&indexed).unwrap();
+        let indexed_samples = indexed_audit.images[0][0].samples.as_ref().unwrap();
+        assert!(indexed_samples.devicen_attributes);
+        assert_eq!(indexed_samples.colourants, ["One", "Two"]);
+        assert_eq!(indexed_samples.tone(0, 0).unwrap(), 1.0);
+        let indexed_info = vectorcraft_pdf::production_info(&indexed).unwrap();
+        assert!(paints(&indexed_info.pages[0], &indexed_audit.images[0], 0.001).err().unwrap().contains("attributes"));
+        let unresolved = mixed_named_pdf(IMAGE, true, false, "99 0 R");
+        let unresolved_audit = vectorcraft_pdf::print_order(&unresolved).unwrap();
+        assert!(unresolved_audit.images[0][0].samples.as_ref().unwrap().devicen_attributes);
+        let unresolved_info = vectorcraft_pdf::production_info(&unresolved).unwrap();
+        assert!(paints(&unresolved_info.pages[0], &unresolved_audit.images[0], 0.001).err().unwrap().contains("attributes"));
+    }
+    fn overprint_image_pdf(mode: &str, description: &str, samples: &str, mask: bool) -> Vec<u8> {
+        let stream =
+            format!("0.6 0.5 0.4 0.3 k 0 0 96 72 re f q /OP0 gs /D cs 0.8 0.7 scn 0 0 96 72 re f Q q /{mode} gs 48 0 0 48 12 12 cm /Im Do Q");
+        let mask = if mask { "/SMask 7 0 R" } else { "" };
+        objects_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 96 72] /Resources << /XObject << /Im 5 0 R >> /ColorSpace << /D [/DeviceN [/One /Two] /DeviceCMYK 6 0 R] >> /ExtGState << /OP0 << /op true /OPM 0 >> /OP1 << /op true /OPM 1 >> /KO << /op false /OPM 1 >> >> >> /Contents 4 0 R >>".into(),
+            format!("<< /Length {} >>\nstream\n{stream}\nendstream",stream.len()),
+            format!("<< /Type /XObject /Subtype /Image /Width 2 /Height 2 {description} {mask} /Filter /ASCIIHexDecode /Length {} >>\nstream\n{samples}\nendstream",samples.len()),
+            "<< /FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1 0 1] /Length 7 >>\nstream\n{ 0 0 }\nendstream".into(),
+            "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /ASCIIHexDecode /Length 9 >>\nstream\nffffffff>\nendstream".into(),
+        ])
+    }
+    #[test]
+    fn opaque_sampled_image_overprint_keeps_named_channels_but_not_opm_zero_suppression() {
+        let Ok(binary) = std::env::var("CHECK_GS_BINARY") else { return };
+        let cases = [
+            ("cmyk", "/BitsPerComponent 8 /ColorSpace /DeviceCMYK", "ff00000000ff00000000ff00000000ff>"),
+            ("gray", "/BitsPerComponent 8 /ColorSpace /DeviceGray", "ff005580>"),
+            (
+                "named-black",
+                "/BitsPerComponent 8 /ColorSpace [/Separation /Black /DeviceCMYK << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 0 0 1] /N 1 >>]",
+                "00ff5580>",
+            ),
+            ("two-spots", "/BitsPerComponent 8 /ColorSpace [/DeviceN [/One /Two] /DeviceCMYK 6 0 R]", "0000ff008040ffff>"),
+            ("indexed-cmyk", "/BitsPerComponent 1 /ColorSpace [/Indexed /DeviceCMYK 1 <ff00000000ff0000>]", "4080>"),
+            ("indexed-gray", "/BitsPerComponent 1 /ColorSpace [/Indexed /DeviceGray 1 <00ff>]", "4080>"),
+        ];
+        for (name, description, samples) in cases {
+            for mode in ["OP0", "OP1", "KO"] {
+                for mask in [false, true] {
+                    let bytes = overprint_image_pdf(mode, description, samples, mask);
+                    let want = if mask && mode != "KO" { Status::Incomplete } else { Status::Pass };
+                    for dpi in [72, 144] {
+                        let label = format!("image-op-{name}-{mode}-mask-{mask}");
+                        let output = evidence_directory(&label, dpi);
+                        let config = crate::independent::Configuration {
+                            binary: binary.clone().into(),
+                            binary_sha256: crate::sha256(&std::fs::read(&binary).unwrap()),
+                            version: "10.07.1".into(),
+                            dpi,
+                            timeout_ms: 10000,
+                            max_output_bytes: 16 * 1024 * 1024,
+                            qualification_sha256: None,
+                        };
+                        let mut rendering = crate::independent::render(&config, &bytes, &output).unwrap();
+                        let comparison = compare(&bytes, &rendering, Some(2.0)).unwrap();
+                        retain_result(&output, &rendering, &comparison, "comparison");
+                        assert_eq!(comparison.status, want, "{label}/{dpi}: {comparison:?}");
+                        if want == Status::Pass {
+                            let plane = rendering.planes.iter_mut().find(|p| p.name == "Cyan").unwrap();
+                            let mut image = crate::raster::read_plane(plane).unwrap();
+                            let (x, y) = (20 * dpi / 72, 20 * dpi / 72);
+                            image.put_pixel(x, y, image::Luma([255 - image.get_pixel(x, y).0[0]]));
+                            plane.path = output.join("changed-cyan.tif");
+                            image.save(&plane.path).unwrap();
+                            plane.sha256 = crate::sha256(&std::fs::read(&plane.path).unwrap());
+                            let negative = compare(&bytes, &rendering, Some(2.0)).unwrap();
+                            retain_result(&output, &rendering, &negative, "defect");
+                            assert_eq!(negative.status, Status::Fail, "{label}/{dpi}: {negative:?}");
+                        } else {
+                            assert!(comparison.issues.iter().any(|s| s.contains("masks under overprint")));
+                        }
+                        finish_evidence(&output);
+                    }
+                }
+            }
+        }
     }
 }

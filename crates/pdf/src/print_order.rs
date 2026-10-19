@@ -187,6 +187,10 @@ mod budget_tests {
         let nested = print_order(&pdf_with(&[nested_page], &[TWO_INK_FUNCTION, "<< /Subtype /NChannel >>", &outer, &inner], None)).unwrap();
         assert!(nested.issues.is_empty(), "{:?}", nested.issues);
         assert_eq!(nested.source_indices[0].iter().map(|i| nested.sources[*i].devicen_attributes).collect::<Vec<_>>(), [true, false, true, true]);
+        let mut missing_page = PdfPage::new(72.0, 72.0, "/D cs .25 .75 scn 0 0 2 2 re f");
+        missing_page.resources = "/ColorSpace << /D [/DeviceN [/Cyan /Magenta] /DeviceCMYK 5 0 R 99 0 R] >>".into();
+        let missing = print_order(&pdf_with(&[missing_page], &[TWO_INK_FUNCTION], None)).unwrap();
+        assert!(missing.sources[missing.source_indices[0][0]].devicen_attributes);
     }
 
     #[test]

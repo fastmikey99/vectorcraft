@@ -20,6 +20,9 @@ pub struct PrintImageSamples {
     /// Exact colourants. Gray maps to Black; named spaces keep zero named values.
     pub colourants: Vec<String>,
     pub direct_cmyk: bool,
+    /// Presence is retained separately; physical attribute interpretation is unqualified.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub devicen_attributes: bool,
     pub sample_sha256: String,
     pub minimum_alpha: f64,
     pub maximum_alpha: f64,
@@ -31,6 +34,16 @@ pub struct PrintImageSamples {
     mask: Mask,
 }
 impl PrintImageSamples {
+    /// DeviceGray and Indexed Gray use process CMYK on the pinned separation
+    /// device; a Separation named Black is deliberately not classified as Gray.
+    pub fn uses_gray_process(&self) -> bool {
+        self.space.gray
+    }
+    /// Mask declarations invoke semantics beyond opaque image overprint, even
+    /// when the particular decoded mask happens to contain only full alpha.
+    pub fn has_source_mask(&self) -> bool {
+        !matches!(&self.mask, Mask::Opaque)
+    }
     /// Byte storage only; sample evaluation stays in source precision.
     pub fn retained_sample_bytes(&self) -> usize {
         self.raw.bytes.len()
@@ -111,6 +124,7 @@ struct Space {
     names: Vec<String>,
     gray: bool,
     direct_cmyk: bool,
+    devicen_attributes: bool,
     palette: Option<Box<[f64]>>,
 }
 fn space<'a>(value: Object<'a>, res: &Resources<'a>, depth: u8) -> Result<Space, String> {
@@ -128,7 +142,7 @@ fn space<'a>(value: Object<'a>, res: &Resources<'a>, depth: u8) -> Result<Space,
             if Name::new(default).and_then(|n| res.get_color_space(&n)).is_some() {
                 return Err("Image default colour-space substitution is unresolved".into());
             }
-            Ok(Space { names: names.into_iter().map(String::from).collect(), gray, direct_cmyk: direct, palette: None })
+            Ok(Space { names: names.into_iter().map(String::from).collect(), gray, direct_cmyk: direct, devicen_attributes: false, palette: None })
         }
         Object::Array(a) => {
             let mut items = a.flex_iter();
@@ -192,7 +206,13 @@ fn space<'a>(value: Object<'a>, res: &Resources<'a>, depth: u8) -> Result<Space,
                 {
                     return Err("Special or duplicate image colourants require reconciliation".into());
                 }
-                Ok(Space { names, gray: false, direct_cmyk: false, palette: None })
+                Ok(Space {
+                    names,
+                    gray: false,
+                    direct_cmyk: false,
+                    devicen_attributes: crate::print_color::has_devicen_attributes(&a),
+                    palette: None,
+                })
             } else {
                 Err("Image colour space needs qualified source-space decoding".into())
             }
@@ -390,6 +410,7 @@ pub(crate) fn decode(
         height: raw.height,
         colourants: space.names.clone(),
         direct_cmyk: space.direct_cmyk,
+        devicen_attributes: space.devicen_attributes,
         sample_sha256: String::new(),
         minimum_alpha: 1.0,
         maximum_alpha: 0.0,

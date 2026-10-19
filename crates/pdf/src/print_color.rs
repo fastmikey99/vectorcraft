@@ -51,8 +51,7 @@ pub(crate) fn has_devicen_attributes(array: &Array<'_>) -> bool {
     if items.next::<Name<'_>>().as_deref() != Some(b"DeviceN") {
         return false;
     }
-    let _names = items.next::<Object<'_>>();
-    let _alternate = items.next::<Object<'_>>();
-    let _transform = items.next::<Object<'_>>();
-    items.next::<Object<'_>>().is_some()
+    // Presence must survive an unreadable indirect attribute reference. Resolving
+    // it here would turn malformed extra semantics into apparent absence.
+    crate::import_color::items(array).nth(4).is_some()
 }
