@@ -729,3 +729,9 @@ All nine CI gates, 349 PDF tests and 232 checker tests pass. Current core native
 Raw image audit retains exact FormBBox containment and rejects unknown/inherited path clips, crops, touching boundaries and unproved arithmetic. Graphics-state restore guards prevent escaping Form context. The saved Gray browser fixture now resolves scoped source continuity while full-file eligibility remains incomplete; CMYK opacity-group reconciliation remains open.
 
 Two Codex reviews, all nine CI gates, explicit physical tests, native/WASI parity and current catalogue/Reporter replay support this bounded extension. Headline readiness/parity estimates are unchanged. Broader clipping, compositing and full production qualification remain unfinished.
+
+## HC40 — Plain CMYK image-mask export and source continuity (2026-10-20)
+
+A plain exact-grid CMYK image/Gray mask pair exports with image-owned alpha under a narrow untagged, nonstandard, noninterpolated, lossless policy. Complex/enclosing compositing retains the existing path. Both Gray and CMYK browser fixtures now resolve scoped source continuity after save/reopen while full-file eligibility stays incomplete.
+
+Two Codex reviews, full CI, native/WASI/Reporter replay and actual prior/current exporter separation-plane comparisons support this bounded extension. Headline readiness estimates and broader PDF, numerical and production-qualification gaps remain unchanged.

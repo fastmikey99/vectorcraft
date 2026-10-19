@@ -422,6 +422,48 @@ mod tests {
         }
     }
     #[test]
+    fn exported_cmyk_image_masks_preserve_continuity_and_detect_source_changes() {
+        let indexed = "[/Indexed /DeviceCMYK 2 <ff00000000ff00000000ff00>]";
+        let indices = "000102000102000102";
+        let source = image(indices, ALPHA, MATRIX, "Source", "", indexed);
+        let options = vectorcraft_pdf::PdfOptions {
+            settings: vectorcraft_pdf::PdfSettings { disable_image_interpolation: true, create_layers: true, ..Default::default() },
+            ..Default::default()
+        };
+        for (case, samples, alpha, expected) in [
+            ("unchanged", indices, ALPHA, Status::Pass),
+            ("changed-ink", "010102000102000102", ALPHA, Status::Fail),
+            ("changed-alpha", indices, "ffffffffffffffff00", Status::Fail),
+            ("fractional-alpha", indices, "ffffffff80ffffffff", Status::Incomplete),
+        ] {
+            let input = image(samples, alpha, MATRIX, "TECH Output", "", indexed);
+            let mut doc = vectorcraft_pdf::import(&input).unwrap();
+            for round in 1..=2 {
+                let bytes = vectorcraft_pdf::export(&doc, &options).unwrap();
+                let request = request_for_original(&source, &bytes, &[]);
+                check_source(&format!("exported-cmyk-{case}-{round}"), &request, &bytes, &source, expected);
+                let report = crate::pdf::check(&request, &bytes).unwrap();
+                assert_eq!(report.validity, crate::Validity::Provisional);
+                assert_ne!(report.status, Status::Pass);
+                assert_eq!(report.findings.iter().find(|f| f.obligation.key == "global/independent").unwrap().status, Status::Incomplete);
+                doc = vectorcraft_pdf::import(&bytes).unwrap();
+            }
+        }
+        let input = image(indices, ALPHA, MATRIX, "TECH Output", "", indexed);
+        let mut doc = vectorcraft_pdf::import(&input).unwrap();
+        for case in ["interpolation", "parent-opacity"] {
+            let mut options = options.clone();
+            if case == "interpolation" {
+                options.settings.disable_image_interpolation = false;
+            } else {
+                std::sync::Arc::make_mut(&mut doc.layers[0]).opacity = 0.5;
+            }
+            let bytes = vectorcraft_pdf::export(&doc, &options).unwrap();
+            let request = request_for_original(&source, &bytes, &[]);
+            check_source(&format!("exported-cmyk-{case}"), &request, &bytes, &source, Status::Incomplete);
+        }
+    }
+    #[test]
     fn indexed_and_direct_process_encodings_match_independent_planes_and_detect_defects() {
         let Ok(binary) = std::env::var("CHECK_GS_BINARY") else { return };
         let base = std::env::var_os("CHECK_FEATURE_EVIDENCE_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);

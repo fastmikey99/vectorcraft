@@ -610,3 +610,6 @@ fn vector_cmyk_keeps_fractional_press_values() {
     }
     assert_eq!(colours(&back), colours(&doc));
 }
+
+#[path = "tests_cmyk_mask.rs"]
+mod mask_tests;

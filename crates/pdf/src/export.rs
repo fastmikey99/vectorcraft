@@ -468,6 +468,8 @@ pub(crate) struct Exporter<'a> {
     brushes: Option<Vec<vectorcraft_brush::Brush>>,
     /// Whether the group being written is a knockout group (what its neutral children inherit).
     knockout: bool,
+    /// Whether ancestors permit exact image-mask lowering without changing compositing.
+    simple_image_context: bool,
     /// Spot colours written with a Lab alternate ([`crate::lab_spot`]): colorant name, Lab values.
     lab_spots: Vec<(String, vectorcraft_color::cms::Lab)>,
     /// Images may ask viewers to smooth them (not in PDF/A).
@@ -519,6 +521,7 @@ impl<'a> Exporter<'a> {
             images: HashMap::new(),
             brushes: None,
             knockout: doc.page_knockout,
+            simple_image_context: !doc.page_knockout && set.standard == Standard::None,
             lab_spots: vec![],
             interpolate: set.standard != Standard::PdfA2b && !set.disable_image_interpolation,
             compression: &set.compression,
@@ -1006,6 +1009,14 @@ impl Exporter<'_> {
         krilla::mask::Mask::new(sb.finish(), krilla::mask::MaskType::Luminosity)
     }
 
+    /// Artwork painted inside a brush, pattern or text run can inherit paint-local state.
+    /// Keep its existing group masks until that context is separately qualified.
+    fn paint_node(&mut self, s: &mut Surface, n: &Node, page: Rect, force: bool) {
+        let enclosing = std::mem::replace(&mut self.simple_image_context, false);
+        self.node(s, n, page, force);
+        self.simple_image_context = enclosing;
+    }
+
     fn node(&mut self, s: &mut Surface, n: &Node, page: Rect, force: bool) {
         if self.layers
             && self.in_layer != address(n)
@@ -1032,6 +1043,32 @@ impl Exporter<'_> {
             None if !n.is_container() => return,
             _ => {}
         }
+        let masked_image = if matches!(n.kind, NodeKind::Image(_))
+            && n.extras().mask.is_some()
+            && self.simple_image_context
+            && !self.knockout
+            && !self.interpolate
+            && self.compression.color.downsample == crate::Downsample::None
+            && self.compression.gray.downsample == crate::Downsample::None
+            && self.compression.mono.downsample == crate::Downsample::None
+            && matches!(self.compression.color.compression, crate::ImageCodec::Auto | crate::ImageCodec::Zip | crate::ImageCodec::None)
+            && matches!(self.compression.gray.compression, crate::ImageCodec::Auto | crate::ImageCodec::Zip | crate::ImageCodec::None)
+            && !self.out.tagged
+            && self.out.cmyk_pixels().is_none()
+            && self.out.pixels().is_none()
+        {
+            crate::images::masked_cmyk(self.doc, n)
+        } else {
+            None
+        };
+        let enclosing_image_context = self.simple_image_context;
+        self.simple_image_context &= n.opacity == 1.0
+            && n.blend == BlendMode::Normal
+            && !n.isolate
+            && n.knockout == vectorcraft_doc::Knockout::Neutral
+            && !n.knockout_shape
+            && n.extras().mask.is_none()
+            && n.appearance.effects.is_empty();
         self.warn_raster(&n.appearance.effects, || format!("{} objects", n.kind_label().to_lowercase()));
         let container = n.is_container() && !matches!(n.kind, NodeKind::Compound { .. });
         // Whether this container's children knock each other out (a knockout group is written as a group).
@@ -1056,6 +1093,7 @@ impl Exporter<'_> {
         }
         if let Some(m) = n.extras().mask.as_deref()
             && !m.disabled
+            && masked_image.is_none()
         {
             let mask = self.soft_mask(s, m, page);
             s.push_mask(mask);
@@ -1096,7 +1134,7 @@ impl Exporter<'_> {
                 self.shape(s, n, &bp, *rule, page);
             }
             NodeKind::Text(t) => self.text(s, n, t, page),
-            NodeKind::Image(im) => self.image(s, im),
+            NodeKind::Image(im) => self.image(s, im, masked_image),
             NodeKind::SymbolInstance { symbol, xf } => {
                 if let Some(sym) = self.doc.symbols.iter().find(|x| &x.name == symbol) {
                     let mut art = (*sym.art).clone();
@@ -1118,6 +1156,7 @@ impl Exporter<'_> {
             }
         }
         self.knockout = enclosing;
+        self.simple_image_context = enclosing_image_context;
         for _ in 0..pushes {
             s.pop();
         }
@@ -1170,7 +1209,9 @@ impl Exporter<'_> {
         let white = || self.doc.setup.discard_white_overprint && vectorcraft_doc::overprint::is_white(paint);
         if overprints && self.overprint && !paint.is_none() && !white() {
             self.overprinted = true;
+            let enclosing = std::mem::replace(&mut self.simple_image_context, false);
             crate::forms::form(s, Mark::Overprint(zero), |s| draw(self, s));
+            self.simple_image_context = enclosing;
         } else {
             draw(self, s);
         }
@@ -1220,7 +1261,7 @@ impl Exporter<'_> {
         match p {
             Paint::Pattern { pattern, xf } => {
                 for inst in doc.pattern(pattern).map(|def| def.instances_in(*xf, area)).unwrap_or_default() {
-                    self.node(s, &inst, area, true);
+                    self.paint_node(s, &inst, area, true);
                 }
             }
             Paint::Gradient(g) => self.field_image(s, g, bounds, area),
@@ -1402,7 +1443,7 @@ impl Exporter<'_> {
             pushes += 1;
         }
         for piece in &art {
-            self.node(s, piece, page, false);
+            self.paint_node(s, piece, page, false);
         }
         for _ in 0..pushes {
             s.pop();
@@ -1498,7 +1539,7 @@ impl Exporter<'_> {
                 let mut node = (*sym.art).clone();
                 // Strokes scale with the art, as on the canvas.
                 node.transform(t.xf * ig.xf * doc.symbol_natural_xf(&art.symbol), true);
-                self.node(s, &node, page, true);
+                self.paint_node(s, &node, page, true);
             }
             self.inline_depth -= 1;
         }
@@ -1687,7 +1728,7 @@ impl Exporter<'_> {
         img
     }
 
-    fn image(&mut self, s: &mut Surface, im: &vectorcraft_doc::ImageObject) {
+    fn image(&mut self, s: &mut Surface, im: &vectorcraft_doc::ImageObject, embedded: Option<Image>) {
         // An image placed or sized beyond [`MAX_COORD`] is left out.
         if !writable(s, im.xf, Rect::new(0.0, 0.0, im.width.max(1).into(), im.height.max(1).into())) {
             return;
@@ -1695,7 +1736,7 @@ impl Exporter<'_> {
         // The size it is placed at: its pixel grid's sides through its transform.
         let [a, b, c, d, ..] = im.xf.as_coeffs();
         let size = (im.width as f64 * a.hypot(b), im.height as f64 * c.hypot(d));
-        let Some(img) = self.load_image(&im.key, size) else { return };
+        let Some(img) = embedded.or_else(|| self.load_image(&im.key, size)) else { return };
         let Some(size) = Size::from_wh(im.width.max(1) as f32, im.height.max(1) as f32) else { return };
         s.push_transform(&xf(im.xf));
         s.draw_image(img, size);
