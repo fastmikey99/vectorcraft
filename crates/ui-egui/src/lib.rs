@@ -427,6 +427,9 @@ pub struct VectorcraftApp {
     clipboard_publishing: sysclip::Publishing,
     /// A URL to open through egui next frame (when the host has no `open_url` service).
     pending_url: Option<String>,
+    /// A page's raster-effects floor (ppi) waiting for the document its open makes, and the documents
+    /// open before it: a PDF with several pages opens after the Import PDF dialog, frames later.
+    raster_floor: Option<(f64, Vec<u64>)>,
     /// Windows and Linux: the window has no OS decorations, so the app bar is the title bar (drag,
     /// double-click to maximize, caption buttons) and invisible edge zones resize the window.
     pub custom_titlebar: bool,
@@ -538,6 +541,7 @@ impl VectorcraftApp {
             clipboard_in: None,
             clipboard_publishing: Default::default(),
             pending_url: None,
+            raster_floor: None,
             control_rx: None,
             pending_screenshots: vec![],
             queued_screenshots: vec![],
@@ -1043,6 +1047,8 @@ impl VectorcraftApp {
             // Acknowledge only after both the document and its panel context are installed.
             let report = self.services.host_open_result.take();
             let before: Vec<u64> = self.session.documents().iter().map(|d| d.uid).collect();
+            // Applied to the document this open makes, now or after a dialog ([`Self::apply_raster_floor`]).
+            self.raster_floor = raster_effects_ppi.filter(|p| (1..=2400).contains(p)).map(|p| (f64::from(p), before.clone()));
             let opened = if print_production {
                 io::open_document(self, &name, &bytes, None, &serde_json::json!({"printProduction": true}))
             } else {
@@ -1053,17 +1059,6 @@ impl VectorcraftApp {
                     let context = serde_json::to_value(c).map_err(|e| e.to_string())?;
                     self.run("production.separations.configure", serde_json::json!({"context":context}))?;
                     self.run("window.panel.activate", serde_json::json!({"panel":"productionSeparations"}))?;
-                }
-                if let Some(ppi) = raster_effects_ppi.filter(|p| (1..=2400).contains(p)).map(f64::from)
-                    && let Some(st) = self.session.active_mut()
-                    && st.doc.raster_effects_ppi < ppi
-                {
-                    // As the file arrived plus the page's floor: nothing to save, nothing to undo.
-                    let clean = !st.is_dirty();
-                    std::sync::Arc::make_mut(&mut st.doc).raster_effects_ppi = ppi;
-                    if clean {
-                        st.mark_saved();
-                    }
                 }
                 Ok(r)
             });
@@ -1083,10 +1078,34 @@ impl VectorcraftApp {
                 Err(e) => io::report_open_error(self, &name, &e),
             }
         }
+        self.apply_raster_floor();
         if self.services.single_document {
             self.keep_one_document();
         }
         place::drain(self);
+    }
+
+    /// Raise a document the page's open made to the page's raster-effects floor, as the file
+    /// arrived plus the floor: one that was unchanged stays unchanged (nothing to save or undo).
+    /// Waits, frame by frame, while that document is still behind a dialog.
+    fn apply_raster_floor(&mut self) {
+        let Some((ppi, before)) = &self.raster_floor else { return };
+        let (ppi, before) = (*ppi, before.clone());
+        let new: Vec<u64> = self.session.documents().iter().map(|d| d.uid).filter(|u| !before.contains(u)).collect();
+        if new.is_empty() {
+            return;
+        }
+        self.raster_floor = None;
+        for uid in new {
+            let Some(st) = self.session.document_mut(uid) else { continue };
+            if st.doc.raster_effects_ppi < ppi {
+                let clean = !st.is_dirty();
+                std::sync::Arc::make_mut(&mut st.doc).raster_effects_ppi = ppi;
+                if clean {
+                    st.mark_saved();
+                }
+            }
+        }
     }
 
     /// Close the documents with these uids without asking to save them.
