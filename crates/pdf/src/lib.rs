@@ -74,7 +74,10 @@ pub use editing::{EDITING_FILE, Editing, LEGACY_EDITING_FILE, editing, editing_w
 pub use encrypt::Encryption;
 pub use export::{export, export_with_report, page_areas};
 pub use file_info::{FileInfo, file_info};
-pub use import::{OFF_ARTBOARD_NOTE, PAST_PAGE_NOTE, import, import_with_report};
+pub use import::{
+    OFF_ARTBOARD_NOTE, OUTLINED_TEXT_NOTE, PAST_PAGE_NOTE, UNMATCHED_GLYPHS_NOTE, UNNAMED_CHARACTERS_NOTE, holds_outlines, import,
+    import_with_report, is_glyph_outlines, is_outlines_note,
+};
 pub use pages::{PageInfo, PdfInfo, has_illustrator_data, illustrator_data, info, is_postscript};
 pub use post::{THUMBNAIL_SIZE, Thumbnail};
 pub use presets::*;
@@ -93,6 +96,8 @@ pub struct PdfOptions {
     pub title: Option<String>,
     /// Creation date as Unix seconds (UTC); `None` = now (native) / omitted (wasm). PDF/A needs a date.
     pub created: Option<i64>,
+    /// Modification date as Unix seconds (UTC); `None` = the creation date.
+    pub modified: Option<i64>,
     /// The native document (`.vectorcraft` bytes) Preserve Editing embeds.
     pub native: Option<Vec<u8>>,
     /// The pages drawn small, in page order: what Embed Page Thumbnails embeds (the writer
@@ -210,6 +215,9 @@ pub enum PdfError {
     Unsupported(String),
     #[error("PDF writer error: {0}")]
     Write(String),
+    /// The caller asked for the export to stop ([`vectorcraft_doc::cancel`]).
+    #[error("cancelled")]
+    Cancelled,
     #[error("cannot read PDF: {0}")]
     Parse(String),
     #[error("the PDF has no pages")]

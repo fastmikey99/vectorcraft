@@ -73,6 +73,13 @@ fn all_anchors(nodes: &[Node]) -> Vec<Point> {
     v
 }
 
+/// `cmd` with `p` fails with the error for `key`, which `p` gives as something other than a number.
+fn refuses_non_number(s: &mut Session, cmd: &str, p: &Value, key: &str) {
+    let r = s.execute(cmd, p);
+    let want = format!("`{key}` must be a number, not {}", p[key]);
+    assert!(matches!(&r, Err(EngineError::BadParams { msg, .. }) if *msg == want), "{cmd} {p}: {r:?}");
+}
+
 // ---------- Blend ----------
 
 #[test]
@@ -92,6 +99,76 @@ fn blend_specified_steps_count() {
     let mut s = session();
     let (_, _, g) = blend(&mut s, json!({"steps": 3}));
     assert_eq!(steps_of(&s, g).len(), 5);
+}
+
+/// Specified Steps that are not a whole number are an error, in Make and in Blend Options, and
+/// nothing changes; 4.0 is a whole number of steps.
+#[test]
+fn blend_steps_that_are_not_a_whole_number_are_refused() {
+    let mut s = session();
+    let (_, _, g) = blend(&mut s, json!({"steps": 3}));
+    let (a, b) = (rect(&mut s, 0.0, 50.0, 10.0, 10.0), rect(&mut s, 100.0, 50.0, 10.0, 10.0));
+    let n = undo_len(&s);
+    for p in [json!({"ids": [a.0, b.0], "steps": 2.5}), json!({"ids": [a.0, b.0], "spacing": "steps", "value": 2.5})] {
+        let key = if p.get("value").is_some() { "value" } else { "steps" };
+        let r = s.execute("object.blend.make", &p);
+        assert!(matches!(&r, Err(EngineError::BadParams { msg, .. }) if *msg == format!("`{key}` must be a whole number")), "{p}: {r:?}");
+    }
+    sel(&mut s, &[g]);
+    for p in [json!({"steps": 2.5}), json!({"spacing": "steps", "value": 1.5})] {
+        assert!(s.execute("object.blend.options", &p).is_err(), "{p}");
+    }
+    assert_eq!((undo_len(&s), steps_of(&s, g).len()), (n, 5), "nothing changed");
+    s.execute("object.blend.options", &json!({"steps": 4.0})).unwrap();
+    assert_eq!(steps_of(&s, g).len(), 6);
+}
+
+/// Make refuses Specified Steps or Distance given as text or as another value that is not a number,
+/// and makes no blend; `steps: 8` as a number makes 8 steps.
+#[test]
+fn blend_make_refuses_a_number_given_as_text() {
+    let mut s = session();
+    let (a, b) = (rect(&mut s, 0.0, 0.0, 10.0, 10.0), rect(&mut s, 100.0, 0.0, 10.0, 10.0));
+    sel(&mut s, &[a, b]);
+    let n = undo_len(&s);
+    for (key, p) in [
+        ("steps", json!({"steps": "8"})),
+        ("distance", json!({"distance": "10"})),
+        ("value", json!({"spacing": "steps", "value": "3"})),
+        ("value", json!({"spacing": "distance", "value": [5]})),
+        ("distance", json!({"spacing": "distance", "distance": true})),
+    ] {
+        refuses_non_number(&mut s, "object.blend.make", &p, key);
+    }
+    assert_eq!(undo_len(&s), n, "nothing changed");
+    assert!(matches!(node(&s, a).kind, NodeKind::Path { .. }), "not blended");
+    let g = id_of(&s.execute("object.blend.make", &json!({"steps": 8})).unwrap());
+    assert_eq!(steps_of(&s, g).len(), 10);
+}
+
+/// Blend Options refuses Specified Steps or Distance given as text, for the selected blends and for
+/// the options new blends start with, and changes neither.
+#[test]
+fn blend_options_refuse_a_number_given_as_text() {
+    let mut s = session();
+    let (_, _, g) = blend(&mut s, json!({"steps": 3}));
+    let n = undo_len(&s);
+    let calls = [
+        ("steps", json!({"steps": "4"})),
+        ("value", json!({"spacing": "steps", "value": "4"})),
+        ("distance", json!({"distance": "20"})),
+        ("distance", json!({"spacing": "distance", "value": null, "distance": "20"})),
+    ];
+    for (key, p) in &calls {
+        refuses_non_number(&mut s, "object.blend.options", p, key);
+    }
+    assert_eq!((undo_len(&s), steps_of(&s, g).len()), (n, 5), "the blend kept its options");
+    s.execute("select.none", &json!({})).unwrap();
+    let defaults = s.prefs.blend_options;
+    for (key, p) in &calls {
+        refuses_non_number(&mut s, "object.blend.options", p, key);
+    }
+    assert_eq!(s.prefs.blend_options, defaults, "the options new blends start with stayed");
 }
 
 #[test]
@@ -457,6 +534,95 @@ fn envelope_options_and_edit_contents() {
     assert_eq!(s.doc().unwrap().selection.objects, vec![e]);
 }
 
+/// The warp's `bend`, and `h` and `v` by those keys or by their long names, given as text.
+fn warp_numbers_as_text() -> [(&'static str, Value); 5] {
+    [
+        ("bend", json!({"bend": "40"})),
+        ("h", json!({"h": "10"})),
+        ("v", json!({"v": "-10"})),
+        ("horizontalDistortion", json!({"horizontalDistortion": "10"})),
+        ("verticalDistortion", json!({"verticalDistortion": "10%"})),
+    ]
+}
+
+/// Make with Warp refuses a bend or distortion given as text, and makes no envelope.
+#[test]
+fn envelope_make_with_warp_refuses_a_number_given_as_text() {
+    let mut s = session();
+    let a = text_rect(&mut s);
+    sel(&mut s, &[a]);
+    let n = undo_len(&s);
+    for (key, p) in warp_numbers_as_text() {
+        refuses_non_number(&mut s, "object.envelope.makeWithWarp", &p, key);
+    }
+    assert_eq!(undo_len(&s), n, "nothing changed");
+    assert!(matches!(node(&s, a).kind, NodeKind::Path { .. }), "not enveloped");
+}
+
+/// Reset with Warp refuses a bend or distortion given as text, and the envelope keeps its warp.
+#[test]
+fn envelope_reset_with_warp_refuses_a_number_given_as_text() {
+    let mut s = session();
+    let a = text_rect(&mut s);
+    sel(&mut s, &[a]);
+    let e = id_of(&s.execute("object.envelope.makeWithWarp", &json!({"style": "arc", "bend": 50})).unwrap());
+    let (before, n) = (node(&s, e), undo_len(&s));
+    for (key, p) in warp_numbers_as_text() {
+        refuses_non_number(&mut s, "object.envelope.resetWithWarp", &p, key);
+    }
+    assert_eq!((node(&s, e), undo_len(&s)), (before, n), "nothing changed");
+}
+
+/// Make with Mesh refuses rows or columns given as text, and makes no envelope.
+#[test]
+fn envelope_make_with_mesh_refuses_a_number_given_as_text() {
+    let mut s = session();
+    let a = text_rect(&mut s);
+    sel(&mut s, &[a]);
+    let n = undo_len(&s);
+    for (key, p) in [("rows", json!({"rows": "3"})), ("cols", json!({"cols": "3"})), ("columns", json!({"rows": 2, "columns": "3"}))] {
+        refuses_non_number(&mut s, "object.envelope.makeWithMesh", &p, key);
+    }
+    assert_eq!(undo_len(&s), n, "nothing changed");
+    assert!(matches!(node(&s, a).kind, NodeKind::Path { .. }), "not enveloped");
+}
+
+/// Reset with Mesh refuses rows or columns given as text, and the envelope keeps its mesh.
+#[test]
+fn envelope_reset_with_mesh_refuses_a_number_given_as_text() {
+    let mut s = session();
+    let a = text_rect(&mut s);
+    sel(&mut s, &[a]);
+    let e = id_of(&s.execute("object.envelope.makeWithMesh", &json!({"rows": 2, "cols": 2})).unwrap());
+    let (before, n) = (node(&s, e), undo_len(&s));
+    for (key, p) in [("rows", json!({"rows": "3"})), ("cols", json!({"cols": "3"})), ("columns", json!({"columns": "3", "maintainShape": false}))] {
+        refuses_non_number(&mut s, "object.envelope.resetWithMesh", &p, key);
+    }
+    assert_eq!((node(&s, e), undo_len(&s)), (before, n), "nothing changed");
+}
+
+/// Envelope Options refuses a fidelity, bend or distortion given as text, for the selected
+/// envelope and for the options new envelopes get, and changes neither.
+#[test]
+fn envelope_options_refuse_a_number_given_as_text() {
+    let mut s = session();
+    let a = text_rect(&mut s);
+    sel(&mut s, &[a]);
+    let e = id_of(&s.execute("object.envelope.makeWithWarp", &json!({"style": "arc", "bend": 50})).unwrap());
+    let (before, n) = (node(&s, e), undo_len(&s));
+    let mut calls = vec![("fidelity", json!({"fidelity": "80", "antiAlias": false}))];
+    calls.extend(warp_numbers_as_text());
+    for (key, p) in &calls {
+        refuses_non_number(&mut s, "object.envelope.options", p, key);
+    }
+    assert_eq!((node(&s, e), undo_len(&s)), (before, n), "nothing changed");
+    s.execute("select.none", &json!({})).unwrap();
+    for (key, p) in &calls {
+        refuses_non_number(&mut s, "object.envelope.options", p, key);
+    }
+    assert_eq!(s.envelope_defaults, None, "the options new envelopes get stayed");
+}
+
 #[test]
 fn envelope_renders_distorted() {
     let mut s = session();
@@ -580,6 +746,76 @@ fn mesh_add_line_and_delete_point() {
     let m = mesh_of(&s, a);
     assert_eq!((m.rows, m.cols), (1, 1));
     assert!(s.execute("object.mesh.deletePoint", &json!({"id": a.0, "index": 0})).is_err(), "corner lines can't go");
+}
+
+/// A mesh point `index`, and `rows`, `cols` or `columns` for Create Gradient Mesh, that is not a
+/// whole number is an error that changes nothing; 4.0 names point 4.
+#[test]
+fn mesh_commands_refuse_an_index_or_count_that_is_not_a_whole_number() {
+    let mut s = session();
+    let a = rect(&mut s, 0.0, 0.0, 100.0, 100.0);
+    let b = rect(&mut s, 200.0, 0.0, 100.0, 100.0);
+    sel(&mut s, &[a]);
+    s.execute("object.mesh.create", &json!({"rows": 2, "cols": 2})).unwrap();
+    let (before, n) = (mesh_of(&s, a), undo_len(&s));
+    sel(&mut s, &[b]);
+    for (key, p) in [("rows", json!({"rows": 2.5})), ("cols", json!({"cols": 1.5})), ("columns", json!({"columns": 3.25}))] {
+        let r = s.execute("object.mesh.create", &p);
+        assert!(matches!(&r, Err(EngineError::BadParams { msg, .. }) if *msg == format!("`{key}` must be a whole number")), "{p}: {r:?}");
+    }
+    assert!(matches!(node(&s, b).kind, NodeKind::Path { .. }), "still a path");
+    for (cmd, p) in [
+        ("object.mesh.setPointColor", json!({"id": a.0, "index": 4.5, "color": "#00ff00"})),
+        ("object.mesh.movePoint", json!({"id": a.0, "index": 4.5, "x": 10, "y": 10})),
+        ("object.mesh.movePoint", json!({"id": a.0, "index": 3.5, "x": 10, "y": 10, "handle": 0})),
+        ("object.mesh.deletePoint", json!({"id": a.0, "index": 4.5})),
+    ] {
+        let r = s.execute(cmd, &p);
+        assert!(matches!(&r, Err(EngineError::BadParams { msg, .. }) if msg == "`index` must be a whole number"), "{cmd} {p}: {r:?}");
+    }
+    assert_eq!((mesh_of(&s, a), undo_len(&s)), (before, n), "nothing changed");
+    s.execute("object.mesh.movePoint", &json!({"id": a.0, "index": 4.0, "x": 40, "y": 60})).unwrap();
+    assert_eq!(mesh_of(&s, a).points[4].p, Point::new(40.0, 60.0));
+}
+
+/// Create Gradient Mesh refuses rows, columns or a highlight given as text, and an `at` that is not
+/// two numbers, and makes no mesh; `at: [50, 40]` with a null highlight makes one.
+#[test]
+fn mesh_create_refuses_a_number_given_as_text() {
+    let mut s = session();
+    let a = rect(&mut s, 0.0, 0.0, 100.0, 100.0);
+    sel(&mut s, &[a]);
+    let n = undo_len(&s);
+    for (key, p) in [
+        ("rows", json!({"rows": "3"})),
+        ("cols", json!({"cols": "2"})),
+        ("columns", json!({"columns": "2"})),
+        ("highlight", json!({"appearance": "center", "highlight": "50"})),
+    ] {
+        refuses_non_number(&mut s, "object.mesh.create", &p, key);
+    }
+    for at in [json!(["50", "40"]), json!([50]), json!(50), json!({"x": 50, "y": 40})] {
+        let r = s.execute("object.mesh.create", &json!({ "at": at }));
+        assert!(matches!(&r, Err(EngineError::BadParams { msg, .. }) if msg == "`at` must be [x, y]"), "{at}: {r:?}");
+    }
+    assert_eq!(undo_len(&s), n, "nothing changed");
+    assert!(matches!(node(&s, a).kind, NodeKind::Path { .. }), "still a path");
+    s.execute("object.mesh.create", &json!({"at": [50, 40], "highlight": null})).unwrap();
+    assert_eq!((mesh_of(&s, a).rows, mesh_of(&s, a).cols), (2, 2));
+}
+
+/// Set Mesh Point Color refuses an opacity given as text, and the point keeps its color and opacity.
+#[test]
+fn mesh_set_point_color_refuses_an_opacity_given_as_text() {
+    let mut s = session();
+    let a = rect(&mut s, 0.0, 0.0, 100.0, 100.0);
+    sel(&mut s, &[a]);
+    s.execute("object.mesh.create", &json!({"rows": 1, "cols": 1})).unwrap();
+    let (before, n) = (mesh_of(&s, a), undo_len(&s));
+    for p in [json!({"id": a.0, "index": 3, "color": "#00ff00", "opacity": "0.5"}), json!({"id": a.0, "index": 3, "opacity": "50%"})] {
+        refuses_non_number(&mut s, "object.mesh.setPointColor", &p, "opacity");
+    }
+    assert_eq!((mesh_of(&s, a), undo_len(&s)), (before, n), "nothing changed");
 }
 
 #[test]
@@ -731,4 +967,67 @@ fn disabled_without_live_selection() {
     assert!(s.execute("object.mesh.expand", &json!({})).is_err());
     assert!(s.execute("object.blend.make", &json!({})).is_err(), "needs two objects");
     let _ = Paint::solid(Color::BLACK);
+}
+
+/// A selected embedded 8×4 image at (100, 50), 2 pt per pixel: red on the left half, blue on the
+/// right half (which is transparent when `clear_right`). `link` makes it a linked image.
+fn two_colour_image(s: &mut Session, clear_right: bool, linked: bool) -> NodeId {
+    let right = image::Rgba([0, 0, 255, if clear_right { 0 } else { 255 }]);
+    let img = image::RgbaImage::from_fn(8, 4, |x, _| if x < 4 { image::Rgba([255, 0, 0, 255]) } else { right });
+    let mut png = vec![];
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    s.edit("Place", |d, sel| {
+        d.images.insert("pic".into(), vectorcraft_doc::ImageBlob::png(png));
+        let id = d.alloc_id();
+        let xf = vectorcraft_geom::Affine::translate((100.0, 50.0)) * vectorcraft_geom::Affine::scale(2.0);
+        let link = linked.then(|| vectorcraft_doc::LinkInfo { path: "/tmp/pic.png".into(), ..Default::default() });
+        let im = vectorcraft_doc::ImageObject { key: "pic".into(), width: 8, height: 4, xf, link, placement: Default::default() };
+        d.insert(d.default_layer(), 0, Node::new(id, NodeKind::Image(Box::new(im))))?;
+        sel.set([id]);
+        Ok(id)
+    })
+    .unwrap()
+}
+
+#[test]
+fn mesh_create_on_an_embedded_image_takes_its_colours_and_placement() {
+    let mut s = session();
+    let id = two_colour_image(&mut s, false, false);
+    let undo = s.doc().unwrap().history.undo.len();
+    s.execute("object.mesh.create", &json!({"rows": 1, "cols": 2})).unwrap();
+    assert_eq!(s.doc().unwrap().history.undo.len(), undo + 1, "one undo step");
+    let m = mesh_of(&s, id);
+    assert_eq!((m.rows, m.cols, m.points.len()), (1, 2, 6));
+    // Row 0 is the image's top: red at the left edge, the average of both halves in the middle
+    // (an area, not one pixel), blue at the right edge.
+    let hex = |i: usize| m.points[i].color.to_hex();
+    assert_eq!((hex(0).as_str(), hex(1).as_str(), hex(2).as_str()), ("#ff0000", "#800080", "#0000ff"));
+    assert_eq!((hex(3).as_str(), hex(5).as_str()), ("#ff0000", "#0000ff"));
+    assert!(m.points.iter().all(|p| p.opacity == 1.0));
+    // The mesh keeps the image's transform: (100, 50) to (116, 58).
+    let near = |p: Point, x: f64, y: f64| close(p.x, x) && close(p.y, y);
+    assert!(near(m.points[0].p, 100.0, 50.0) && near(m.points[2].p, 116.0, 50.0) && near(m.points[5].p, 116.0, 58.0));
+    assert_eq!(node(&s, id).kind_label(), "Mesh");
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(node(&s, id).kind_label(), "Image");
+}
+
+#[test]
+fn mesh_create_on_an_image_keeps_alpha_and_refuses_linked_and_big_grids() {
+    let mut s = session();
+    let id = two_colour_image(&mut s, true, false);
+    s.execute("object.mesh.create", &json!({"rows": 1, "cols": 1})).unwrap();
+    let m = mesh_of(&s, id);
+    assert_eq!(m.points.iter().map(|p| p.opacity).collect::<Vec<_>>(), [1.0, 0.0, 1.0, 0.0]);
+    assert_eq!(m.points[0].color.to_hex(), "#ff0000");
+
+    let mut s = session();
+    two_colour_image(&mut s, false, false);
+    assert!(s.execute("object.mesh.create", &json!({"rows": 51, "cols": 4})).is_err(), "grid capped");
+
+    let mut s = session();
+    let id = two_colour_image(&mut s, false, true);
+    let e = s.execute("object.mesh.create", &json!({})).unwrap_err().to_string();
+    assert!(e.contains("linked"), "{e}");
+    assert_eq!(node(&s, id).kind_label(), "Image", "left as it was");
 }

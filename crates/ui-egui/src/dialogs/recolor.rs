@@ -255,7 +255,7 @@ fn confirm(app: &mut VectorcraftApp, d: &Dialog) -> Result<Value, String> {
     sync(app, &mut d);
     if d.bool("__newGroup") {
         let colors: Vec<Value> = rows(&d).into_iter().filter(|r| !excluded(r)).map(|r| r["to"].clone()).collect();
-        return form::commit_preview(app, "swatch.newGroup", json!({"name": d.str("groupName"), "colors": colors}));
+        return form::commit_preview(app, "swatch.newGroup", json!({"name": d.str("groupName"), "colors": colors, "keepModel": true}));
     }
     form::commit_preview(app, CMD, apply_params(&d))
 }
@@ -537,6 +537,9 @@ fn move_color(rows: &mut [Value], i: usize, hsb: [f32; 3], linked: bool) {
     }
 }
 
+/// The rows when a drag on the Edit tab's wheel started.
+const DRAG: &str = "__drag";
+
 /// The Edit tab. Returns true when the rows changed.
 fn edit_tab(ui: &mut Ui, d: &mut Dialog, rows: &mut [Value]) -> bool {
     let t = Tokens::get(ui.ctx());
@@ -569,9 +572,25 @@ fn edit_tab(ui: &mut Ui, d: &mut Dialog, rows: &mut [Value]) -> bool {
     if let Some(k) = w.pressed {
         d.fields.insert("__sel".into(), json!([active[k]]));
     }
-    if let Some((k, hsb)) = w.moved {
-        move_color(rows, active[k], hsb, linked);
-        changed = true;
+    // A drag (of a marker or the brightness slider) moves the rows as they were when it started:
+    // a new colour read back from its model (CMYK through the colour profile) isn't exactly the
+    // colour written, so building on last frame's rows drifted the linked colours (#1733).
+    if let Some((k, set)) = w.moved {
+        let start = match d.fields.get(DRAG).and_then(Value::as_array) {
+            Some(s) if s.len() == rows.len() => s.clone(),
+            _ => rows.to_vec(),
+        };
+        // What the control didn't set comes from the start too, not from last frame's colour.
+        if let Some(old) = start.get(active[k]).and_then(to_color).map(|c| c.to_hsb()) {
+            let hsb = [0, 1, 2].map(|n| set[n].unwrap_or(old[n]));
+            rows.clone_from_slice(&start);
+            move_color(rows, active[k], hsb, linked);
+            changed = true;
+        }
+        d.fields.insert(DRAG.into(), Value::Array(start));
+    }
+    if !ui.input(|i| i.pointer.any_down()) {
+        d.fields.remove(DRAG);
     }
     ui.add_space(6.0);
     // The new colours: click one to make it the base colour.
@@ -648,5 +667,17 @@ mod tests {
         let mut r = rows();
         apply_rule(&mut r, Harmony::Triad, 0, Color::rgb(1.0, 0.0, 0.0), &[0, 1, 2]);
         assert_eq!([&r[0]["to"], &r[1]["to"], &r[2]["to"]], ["rgb 255 0 0", "rgb 0 255 0", "rgb 0 0 255"]);
+    }
+
+    /// In a CMYK document colors opened alone are saved as a new color group in their own model.
+    #[test]
+    fn a_new_group_from_colors_keeps_their_model_in_a_cmyk_document() {
+        let mut app = VectorcraftApp::new(vectorcraft_engine::Session::new(), Default::default());
+        app.run("file.new", json!({"width": 100, "height": 100, "colorMode": "cmyk"})).unwrap();
+        app.run("ui.recolorDialog", json!({"colors": ["#ff8000"]})).unwrap();
+        let d = app.ui.dialog.clone().expect("Recolor Artwork opens");
+        confirm(&mut app, &d).unwrap();
+        let g = app.session.doc().unwrap().doc.swatch_groups.last().expect("a new color group");
+        assert_eq!(g.swatches.iter().filter_map(|w| w.paint.color()).collect::<Vec<_>>(), [Color::rgb8(255, 128, 0)]);
     }
 }

@@ -30,13 +30,14 @@ mod settings;
 mod tiling;
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use kurbo::{Affine, Rect};
 use serde::Serialize;
 use vectorcraft_color::cms::{self, ProfileKind};
 use vectorcraft_doc::marks::PrinterMarks;
-use vectorcraft_doc::overprint::{clear_overprints, multiply_overprints};
+use vectorcraft_doc::overprint::{clear_overprints, darken_overprints};
 use vectorcraft_doc::{ColorMode, Document, Node, NodeKind};
 
 pub use layout::{MAX_TILES, TileGrid};
@@ -44,7 +45,7 @@ pub use plates::print_inks;
 pub use settings::*;
 pub use tiling::{TilingPage, tiling};
 
-use crate::export::{Exporter, Sheet, Writer};
+use crate::export::{Exporter, Sheet, Writer, leaving_out_undecodable};
 use crate::marks::PageBoxes;
 use crate::{AdvancedSettings, ColorConversion, CompressionSettings, OutputSettings, Overprint, PdfError, PdfSettings};
 use layout::Layout;
@@ -167,7 +168,7 @@ pub fn printed_document<'a>(doc: &'a Document, set: &PrintSettings) -> Cow<'a, D
 }
 
 /// Overprinting fills and strokes in composite output: discarded (they knock out) or simulated
-/// (drawn with Multiply, as Overprint Preview shows them), after which nothing overprints any
+/// (drawn with Darken, as Overprint Preview shows them), after which nothing overprints any
 /// more; or preserved. Separations always honour them.
 fn composite_overprints(doc: &mut Document, set: &PrintSettings) {
     let how = set.advanced.overprints;
@@ -179,7 +180,7 @@ fn composite_overprints(doc: &mut Document, set: &PrintSettings) {
     let nodes = doc.layers.iter_mut().chain(symbols).chain(doc.patterns.iter_mut().flat_map(|p| p.art.iter_mut()));
     for n in nodes {
         if how == PrintOverprints::Simulate {
-            multiply_overprints(n, discard_white);
+            darken_overprints(n, discard_white);
         }
         clear_overprints(n);
     }
@@ -354,7 +355,7 @@ pub fn plan<'a>(doc: &'a Document, opts: &PrintOptions) -> Result<PrintPlan<'a>,
     let set = &opts.settings;
     let job = Job::new(doc, set, opts.postscript)?;
     let title = opts.title.clone().unwrap_or_else(|| job.doc.title.clone());
-    let created = opts.created.or_else(vectorcraft_doc::metadata::now_unix);
+    let created = opts.created.or_else(vectorcraft_doc::metadata::output_time);
     let sep = Separator::new(&job.doc, set);
     let plates: Vec<Document> = (0..job.plates.len()).filter_map(|p| job.ink(Some(p))).map(|i| sep.plate(&i.name)).collect();
     let marks = set.marks.printer_marks();
@@ -391,10 +392,10 @@ pub fn plan<'a>(doc: &'a Document, opts: &PrintOptions) -> Result<PrintPlan<'a>,
 
 /// Print `doc` to a PDF as `opts` say.
 pub fn print(doc: &Document, opts: &PrintOptions) -> Result<PrintReport, PdfError> {
-    craft_pdf::write::guard(|| print_inner(doc, opts))
+    craft_pdf::write::guard(|| leaving_out_undecodable(|left_out| print_inner(doc, opts, left_out)))
 }
 
-fn print_inner(doc: &Document, opts: &PrintOptions) -> Result<PrintReport, PdfError> {
+fn print_inner(doc: &Document, opts: &PrintOptions, left_out: &mut HashSet<String>) -> Result<PrintReport, PdfError> {
     let plan = plan(doc, opts)?;
     let doc = &*plan.doc;
     let separations = opts.settings.output.mode == OutputMode::Separations;
@@ -411,8 +412,9 @@ fn print_inner(doc: &Document, opts: &PrintOptions) -> Result<PrintReport, PdfEr
         ex.intent = opts.settings.color.intent;
         // The writer's colour output: the printer profile's conversion.
         ex.out = w.out.clone();
-        // Composite output keeps overprints as the Advanced option says (plates multiply them).
+        // Composite output keeps overprints as the Advanced option says (plates darken them).
         ex.overprint = !separations && pdf.advanced.overprint == Overprint::Preserve;
+        ex.left_out = left_out.clone();
     }
     for &i in &plan.order {
         let Some(s) = plan.sheets.get(i) else { continue };
@@ -423,7 +425,7 @@ fn print_inner(doc: &Document, opts: &PrintOptions) -> Result<PrintReport, PdfEr
     for ex in exporters {
         w.absorb(ex);
     }
-    let (bytes, more) = w.finish()?;
+    let (bytes, more) = w.finish(left_out)?;
     let bytes = crate::forms::finish(bytes, doc, &pdf, false, overprinted)?;
     let mut warnings = plan.warnings;
     for m in more {

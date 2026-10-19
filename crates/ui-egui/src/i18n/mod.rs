@@ -94,7 +94,7 @@ fn plural_polish(n: u64) -> usize {
 }
 
 /// The registry. English first: it is the fallback and the source language.
-pub static LANGUAGES: [LangInfo; 20] = [
+pub static LANGUAGES: [LangInfo; 24] = [
     LangInfo { code: "en", name: "English", source: "", plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
     // Greek: the whole interface and the status and error messages, keeping the same names in
     // English as Spanish; every `el-*` locale (including `el-GR` and `el-CY`) resolves here.
@@ -153,6 +153,12 @@ pub static LANGUAGES: [LangInfo; 20] = [
         plural: plural_one_other,
         complete_menus: true,
         catalog: OnceLock::new(),
+    },
+    // Georgian: the whole interface and the status and error messages, keeping the same names in
+    // English as Spanish. Georgian nouns stay singular after a number, so one plural form;
+    // `ka-GE` and `ka_GE.UTF-8` resolve here.
+    LangInfo {
+        code: "ka", name: "ქართული", source: include_str!("ka.tsv"), plural: plural_none, complete_menus: true, catalog: OnceLock::new()
     },
     // Russian: the whole interface and the status and error messages, keeping the same names in
     // English as Spanish; every `ru-*` locale (`ru-RU`, `ru-BY`, `ru-KZ` …) resolves here.
@@ -213,8 +219,8 @@ pub static LANGUAGES: [LangInfo; 20] = [
         complete_menus: true,
         catalog: OnceLock::new(),
     },
-    // Traditional Chinese in the vocabulary used in Taiwan; `zh-TW`, `zh-HK`, `zh-MO` and `zh-Hant-*`
-    // locales all resolve here (see `candidates`).
+    // Traditional Chinese in the vocabulary used in Taiwan: the whole interface and the status and
+    // error messages; `zh-TW`, `zh-HK`, `zh-MO` and `zh-Hant-*` locales all resolve here (see `candidates`).
     LangInfo {
         code: "zh-hant",
         name: "繁體中文",
@@ -223,12 +229,32 @@ pub static LANGUAGES: [LangInfo; 20] = [
         complete_menus: true,
         catalog: OnceLock::new(),
     },
-    // Simplified Chinese in the vocabulary used in mainland China; `zh-CN`, `zh-SG`, `zh-Hans-*` and a
-    // bare `zh` resolve here (see `candidates`).
+    // Simplified Chinese in the vocabulary used in mainland China: the whole interface and the status
+    // and error messages; `zh-CN`, `zh-SG`, `zh-Hans-*` and a bare `zh` resolve here (see `candidates`).
     LangInfo {
         code: "zh-hans",
         name: "简体中文",
         source: include_str!("zh-hans.tsv"),
+        plural: plural_none,
+        complete_menus: true,
+        catalog: OnceLock::new(),
+    }, // Dutch; every `nl-*` locale (`nl-NL`, `nl-BE`, `nl_NL.UTF-8`…) resolves here.
+    LangInfo {
+        code: "nl",
+        name: "Nederlands",
+        source: include_str!("nl.tsv"),
+        plural: plural_one_other,
+        complete_menus: true,
+        catalog: OnceLock::new(),
+    },
+    // Danish; every `da-*` locale (`da-DK`, `da_DK.UTF-8`…) resolves here.
+    LangInfo { code: "da", name: "Dansk", source: include_str!("da.tsv"), plural: plural_one_other, complete_menus: true, catalog: OnceLock::new() },
+    // Indonesian; every `id-*` locale (`id-ID`, `id_ID.UTF-8`…) resolves here. CLDR `id` counts
+    // have one form, so `@plural` entries list a single form.
+    LangInfo {
+        code: "id",
+        name: "Bahasa Indonesia",
+        source: include_str!("id.tsv"),
         plural: plural_none,
         complete_menus: true,
         catalog: OnceLock::new(),
@@ -437,19 +463,33 @@ fn detect_system_lang() -> Lang {
     Lang::EN
 }
 
-/// Index into [`LANGUAGES`] of the language the UI is drawn in this frame.
-static CURRENT: AtomicUsize = AtomicUsize::new(0);
+/// Index into [`LANGUAGES`] of the language the UI is drawn in this frame. The app keeps one
+/// index for the whole process. Unit tests keep one per thread, as `ui_mirror!` keeps the
+/// shortcut and workspace mirrors, so a language one test sets does not change the language of
+/// the tests running beside it on other threads.
+fn current_index() -> &'static AtomicUsize {
+    #[cfg(not(test))]
+    {
+        static CURRENT: AtomicUsize = AtomicUsize::new(0);
+        &CURRENT
+    }
+    #[cfg(test)]
+    {
+        thread_local!(static CURRENT: &'static AtomicUsize = Box::leak(Box::default()));
+        CURRENT.with(|c| *c)
+    }
+}
 
 /// Set the UI language for drawing (the shell calls this once per frame from the preference), so
 /// widgets can translate without every call site carrying a language around.
 pub fn set_current(lang: Lang) {
     let i = LANGUAGES.iter().position(|l| l.code == lang.code()).unwrap_or(0);
-    CURRENT.store(i, Ordering::Relaxed);
+    current_index().store(i, Ordering::Relaxed);
 }
 
 /// The language the UI is drawn in.
 pub fn current() -> Lang {
-    Lang(LANGUAGES.get(CURRENT.load(Ordering::Relaxed)).unwrap_or(&LANGUAGES[0]))
+    Lang(LANGUAGES.get(current_index().load(Ordering::Relaxed)).unwrap_or(&LANGUAGES[0]))
 }
 
 /// Does `lang` have a catalog entry for this plain string? (English never does: it is the source.)

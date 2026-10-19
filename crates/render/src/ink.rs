@@ -130,7 +130,9 @@ fn inks(c: &Color) -> [f32; 4] {
     let cms = cms::active();
     SEPARATED.with(|s| {
         let (owner, seen) = &mut *s.borrow_mut();
-        if !owner.as_ref().is_some_and(|o| Arc::ptr_eq(o, &cms)) || seen.len() >= 4096 {
+        // Large enough for the many colours of gradient meshes and blends, which otherwise cleared
+        // it over and over and separated every colour through the profile again.
+        if !owner.as_ref().is_some_and(|o| Arc::ptr_eq(o, &cms)) || seen.len() >= 1 << 16 {
             seen.clear();
             *owner = Some(cms.clone());
         }
@@ -153,7 +155,7 @@ pub(crate) struct InkLut(CmykLut);
 impl InkLut {
     fn build(cms: &Cms) -> Self {
         Self(CmykLut::build(|inks| {
-            let [x, y, z] = lab::lab_to_xyz(cms.cmyk_to_lab(inks));
+            let [x, y, z] = lab::lab_to_xyz(cms.cmyk_display_lab(inks));
             [x, y, z, 0.0]
         }))
     }

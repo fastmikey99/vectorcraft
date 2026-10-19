@@ -16,6 +16,9 @@
 //!   (`crop: "bounding"`).
 //! - A text file becomes area type, decoded and cleaned up with the Text Import Options (`text`,
 //!   [`text`]).
+//! - An RTF file becomes area type with its character and paragraph formatting ([`rtf`]).
+//! - A Word document (`.docx`) becomes area type with the character and paragraph formatting its
+//!   styles and direct formatting give ([`docx`]).
 //! - A VectorCraft document placed from a file with Link (the default) becomes a placed document:
 //!   one locked object showing the artboard `page`, linked to the file and read again when it
 //!   changes ([`document`]); without Link, an editable copy of its art.
@@ -27,13 +30,15 @@
 
 pub(crate) mod adopt;
 pub(crate) mod document;
+mod docx;
+mod rtf;
 mod text;
 
 use std::sync::Arc;
 
 use serde_json::{Value, json};
 use vectorcraft_color::Paint;
-use vectorcraft_doc::{Appearance, AppearanceItem, Document, ImageObject, LinkInfo, Node, NodeId, NodeKind, Scaling};
+use vectorcraft_doc::{Appearance, AppearanceItem, Document, ImageObject, LinkInfo, Node, NodeId, NodeKind, Scaling, SymbolBoxes};
 use vectorcraft_geom::{Affine, Point, Rect, shapes};
 use vectorcraft_pdf::CropTo;
 
@@ -57,7 +62,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Place…",
             ["File"],
             Some("Cmd+Shift+P"),
-            "{path | name | dataBase64 (a file's path, or its name with its bytes), link?: true (a raster image keeps its file's path; a VectorCraft document at path becomes one locked placed document showing artboard `page`, linked to the file and read again when it changes (links.update; saving it in this app updates it at once), drawn as vectors in every output; false: an editable copy of its art, as from dataBase64; other files are embedded), text?: {characterSet?: \"unicode\" (UTF-8, or UTF-16 with a byte-order mark; other bytes as the platform's 8-bit set) | \"ansi\" (the platform's 8-bit set), platform?: \"windows\" (Windows-1252) | \"mac\" (Mac Roman), removeLineReturns?: false (each block of lines becomes one paragraph; blank lines end paragraphs), removeParagraphReturns?: false (drop blank lines), replaceSpaces?: n (runs of n ≥ 2 spaces become a tab)} (a .txt file, placed as area type filling rect, the replaced object's bounds, or else the artboard less a 36 pt margin), template?: false (onto a new locked template layer below the current layer), replace?: false (swap the one selected object, keeping its stacking place, its opacity, blending mode, isolation, knockout, opacity mask and effects, and its transform unless rect is given; an image with fills or strokes of its own is refused, as the art can't take them over; no at), fitReplaced?: false (with replace: fitted inside the replaced object's own frame, aspect kept: an image's pixel area through its transform, rotated, mirrored, scaled or skewed as it is, else its bounds; no rect), at?: [x, y] centre (default: the first artboard's centre), rect?: [x, y, width, height] fit inside; aspect kept (wins over at), page?: 1 (PDF/.ai page, or a native document's artboard), crop?: \"crop\" (clipped to that page or artboard, default; an SVG, only when given: framed and clipped by its viewBox, else by its art's bounds) | \"bounding\" (the art's bounds) | \"art\" | \"trim\" | \"bleed\" | \"media\" (a PDF page's boxes), password? (an encrypted PDF), dxf?: {…the DXF options of document.open} (a .dxf drawing: fit fills the artboard under at, else the first; fitted or uncentred art lands with its drawing's artboard on that artboard, else it is centred on at)} → {ids, name, format, linked, width, height, warnings}. Raster images come in at 100% of their physical size (the file's ppi, else 72); SVG, DXF, PDF/.ai, EMF/WMF (clipped to the picture's frame), EPS (clipped to its bounding box; as document.open reads it) and native documents as one group, with the images, symbols, patterns and swatches they use. One undo step; selects what it placed (unless on a template layer); never touches the clipboard",
+            "{path | name | dataBase64 (a file's path, or its name with its bytes), link?: true (a raster image keeps its file's path; a VectorCraft document at path becomes one locked placed document showing artboard `page`, linked to the file and read again when it changes (links.update; saving it in this app updates it at once), drawn as vectors in every output; false: an editable copy of its art, as from dataBase64; other files are embedded), text?: {characterSet?: \"unicode\" (UTF-8, or UTF-16 with a byte-order mark; other bytes as the platform's 8-bit set) | \"ansi\" (the platform's 8-bit set), platform?: \"windows\" (Windows-1252) | \"mac\" (Mac Roman), removeLineReturns?: false (each block of lines becomes one paragraph; blank lines end paragraphs), removeParagraphReturns?: false (drop blank lines), replaceSpaces?: n (runs of n ≥ 2 spaces become a tab)} (a .txt file, placed as area type filling rect, the replaced object's bounds, or else the artboard less a 36 pt margin), template?: false (onto a new locked template layer below the current layer), replace?: false (swap the one selected object, keeping its stacking place, its opacity, blending mode, isolation, knockout, opacity mask and effects, and its transform unless rect is given; an image with fills or strokes of its own is refused, as the art can't take them over; no at), fitReplaced?: false (with replace: fitted inside the replaced object's own frame, aspect kept: an image's pixel area through its transform, rotated, mirrored, scaled or skewed as it is, else its bounds; no rect), at?: [x, y] centre (default: the first artboard's centre), rect?: [x, y, width, height] fit inside; aspect kept (wins over at), page?: 1 (PDF/.ai page, or a native document's artboard), crop?: \"crop\" (clipped to that page or artboard, default; an SVG, only when given: framed and clipped by its viewBox, else by its art's bounds) | \"bounding\" (the bounds of the art that shows, with its strokes and effects, as an export measures them: hidden objects and guides left out) | \"art\" | \"trim\" | \"bleed\" | \"media\" (a PDF page's boxes), password? (an encrypted PDF), dxf?: {…the DXF options of document.open} (a .dxf drawing: fit fills the artboard under at, else the first; fitted or uncentred art lands with its drawing's artboard on that artboard, else it is centred on at)} → {ids, name, format, linked, width, height, warnings}. Raster images come in at 100% of their physical size (the file's ppi, else 72); SVG, DXF, PDF/.ai, EMF/WMF (clipped to the picture's frame), EPS (clipped to its bounding box; as document.open reads it) and native documents as one group, with the images, symbols, patterns and swatches they use. One undo step; selects what it placed (unless on a template layer); never touches the clipboard",
             has_doc,
             place
         ),
@@ -96,8 +101,9 @@ pub fn specs() -> Vec<CommandSpec> {
 /// A file's art at its natural size, before it joins a document.
 enum Art {
     Image(RasterImage),
-    /// A text file's text, placed as area type filling the natural box.
-    Text(String),
+    /// A text file's, an RTF file's or a Word document's text, placed as area type filling the
+    /// natural box.
+    Text(text::Story),
     /// A VectorCraft document placed linked: the file read, the link, and whether the art's
     /// bounds (not the artboard) are shown.
     Document(document::Source, LinkInfo, bool),
@@ -142,7 +148,24 @@ fn load(p: &Value, cmd: &str, board: Option<Rect>) -> Result<Loaded> {
         if text.trim().is_empty() {
             return Err(bad(cmd, format!("`{name}` has no text to place")));
         }
-        return Ok(Loaded { name, format: &text::FORMAT, art: Art::Text(text), natural: TEXT_FRAME, warnings: vec![], link: None, board: None });
+        let art = Art::Text(text::Story::plain(text));
+        return Ok(Loaded { name, format: &text::FORMAT, art, natural: TEXT_FRAME, warnings: vec![], link: None, board: None });
+    }
+    // An RTF file is recognized by its content, whatever its name says (a .txt file is plain text).
+    if rtf::is_rtf(&src.bytes) {
+        let story = rtf::import(&src.bytes, cmd)?;
+        if story.plain_text().trim().is_empty() {
+            return Err(bad(cmd, format!("`{name}` has no text to place")));
+        }
+        return Ok(Loaded { name, format: &rtf::FORMAT, art: Art::Text(story), natural: TEXT_FRAME, warnings: vec![], link: None, board: None });
+    }
+    // A Word document is recognized by its name or by its package's `word/document.xml`.
+    if docx::is_docx(src.name, &src.bytes) {
+        let story = docx::import(&src.bytes, cmd)?;
+        if story.plain_text().trim().is_empty() {
+            return Err(bad(cmd, format!("`{name}` has no text to place")));
+        }
+        return Ok(Loaded { name, format: &docx::FORMAT, art: Art::Text(story), natural: TEXT_FRAME, warnings: vec![], link: None, board: None });
     }
     let format = fileio::detect(src.name, &src.bytes)
         .ok_or_else(|| bad(cmd, format!("can't place `{name}`: not a format VectorCraft reads (see document.formats)")))?;
@@ -216,6 +239,7 @@ fn load(p: &Value, cmd: &str, board: Option<Rect>) -> Result<Loaded> {
     doc.drop_edit_modes();
     let board = doc.artboards.first().map(|a| a.rect).filter(|_| anchored);
     let layers = std::mem::take(&mut doc.layers);
+    let symbols = doc.symbol_boxes();
     let (nodes, clip) = if matches!(format.id, "svg" | "svgz" | "dxf") {
         // An SVG with `crop: "crop"` asked for is framed and clipped by its viewBox (its artboard),
         // as a PDF by its page: art drawn on a shared canvas keeps its place and scale (#788). By
@@ -230,16 +254,28 @@ fn load(p: &Value, cmd: &str, board: Option<Rect>) -> Result<Loaded> {
         let board = doc.artboards.get(index).map(|a| a.rect).ok_or_else(|| bad(cmd, format!("page {page}: `{name}` has {n} page(s)")))?;
         // A PDF import has one layer per page; an EPS file's art is whatever lies on the artboard.
         let pages = if pdf { layers.get(index..=index).unwrap_or_default() } else { &layers[..] };
-        (on_artboard(pages, board), crop.then_some(board))
+        (on_artboard(&symbols, pages, board), crop.then_some(board))
     };
-    let natural = clip.or_else(|| nodes.iter().fold(None, |acc, n| vectorcraft_geom::union_opt(acc, n.visual_bounds())));
+    let natural = clip.or_else(|| shown_bounds(&symbols, &nodes));
     let natural = natural.filter(|r| r.width() > 0.0 || r.height() > 0.0).ok_or_else(|| bad(cmd, format!("`{name}` has no art to place")))?;
     Ok(Loaded { name, format, art: Art::Vector { src: Box::new(doc), nodes, clip }, natural, warnings, link: None, board })
 }
 
-/// The placeable art of `layers` that lies on `board`.
-fn on_artboard(layers: &[Arc<Node>], board: Rect) -> Vec<Node> {
-    let on_board = |c: &&Arc<Node>| c.visual_bounds().is_some_and(|b| b.intersect(board).area() > 0.0 || board.contains(b.origin()));
+/// The bounds of what `nodes` draw, as an export measures art
+/// ([`vectorcraft_render::encode::drawn_bounds`]): hidden objects, guides and template layers
+/// left out, symbol instances measured by their art in `symbols`.
+pub(crate) fn shown_bounds(symbols: &SymbolBoxes, nodes: &[Node]) -> Option<Rect> {
+    nodes.iter().fold(None, |acc, n| vectorcraft_geom::union_opt(acc, vectorcraft_render::encode::drawn_bounds(symbols, n)))
+}
+
+/// The placeable art of `layers` that lies on `board`: each object whose drawn bounds
+/// ([`vectorcraft_render::encode::drawn_bounds`]) lie on it, or, for an object that draws nothing,
+/// each object whose visual bounds lie on it.
+fn on_artboard(symbols: &SymbolBoxes, layers: &[Arc<Node>], board: Rect) -> Vec<Node> {
+    let on_board = |c: &&Arc<Node>| {
+        let b = vectorcraft_render::encode::drawn_bounds(symbols, c).or_else(|| c.visual_bounds_with(symbols));
+        b.is_some_and(|b| b.intersect(board).area() > 0.0 || board.contains(b.origin()))
+    };
     art_of(layer_art(layers).filter(on_board))
 }
 
@@ -298,7 +334,7 @@ fn build(d: &mut Document, l: Loaded, link: Option<LinkInfo>) -> Node {
             };
             Node::new(d.alloc_id(), NodeKind::Image(Box::new(im)))
         }
-        Art::Text(t) => Node::new(d.alloc_id(), NodeKind::Text(Box::new(text::area_text(t, l.natural)))),
+        Art::Text(t) => Node::new(d.alloc_id(), NodeKind::Text(Box::new(text::area_text(t, l.natural, &d.setup)))),
         Art::Document(s, link, bounding) => document::node(d, &s, link, bounding),
         Art::Vector { src, mut nodes, clip } => {
             adopt::adopt(d, &src, &mut nodes);
@@ -353,7 +389,7 @@ fn replace_xf(d: &Document, old: &Node, natural: Rect, image_xf: bool) -> Affine
             return im.xf * full.inverse() * Affine::translate(centre - natural.center());
         }
     }
-    let c = old.geometric_bounds().map_or(natural.center(), |b| b.center());
+    let c = old.geometric_bounds_with(&d.symbol_boxes()).map_or(natural.center(), |b| b.center());
     Affine::translate(c - natural.center())
 }
 
@@ -452,7 +488,7 @@ fn place(s: &mut Session, p: &Value) -> Result<Value> {
     // Type reflows rather than scales: its frame takes the size it is placed at.
     let is_text = matches!(loaded.art, Art::Text(_));
     if is_text {
-        let size = match (old_node.and_then(Node::geometric_bounds), rect) {
+        let size = match (old_node.and_then(|o| o.geometric_bounds_with(&st.doc.symbol_boxes())), rect) {
             (_, Some(r)) => r.size(),
             (Some(b), None) => b.size(),
             (None, None) => text_frame(&st.doc, at).size(),
@@ -498,7 +534,7 @@ fn place(s: &mut Session, p: &Value) -> Result<Value> {
         if let Some(look) = look {
             look.put_on(&mut node)?;
         }
-        let size = node.geometric_bounds().unwrap_or_default();
+        let size = node.geometric_bounds_with(&d.symbol_boxes()).unwrap_or_default();
         let (into, index) = match old {
             Some(old) => {
                 let (par, idx, _) = d.position(old).ok_or(EngineError::NoNode(old))?;
@@ -522,9 +558,9 @@ fn place(s: &mut Session, p: &Value) -> Result<Value> {
     )
 }
 
-/// The artboard under `at`, else the first.
+/// The artboard under `at` (its edges included, [`Document::artboard_holding`]), else the first.
 fn board_at(d: &Document, at: Option<Point>) -> Option<Rect> {
-    at.and_then(|c| d.artboards.iter().find(|a| a.rect.contains(c))).or(d.artboards.first()).map(|a| a.rect)
+    at.and_then(|c| d.artboard_holding(c, false)).and_then(|i| d.artboards.get(i)).or(d.artboards.first()).map(|a| a.rect)
 }
 
 /// Placed type's frame without `rect` or Replace: the artboard under `at` (else the first) less a

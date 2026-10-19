@@ -1,6 +1,6 @@
 //! Direction, source-cluster and editing regressions; no RTL font assets required.
 use super::*;
-use kurbo::{Point, Rect, Shape};
+use kurbo::{Affine, BezPath, Point, Rect, Shape};
 use std::sync::Arc;
 use vectorcraft_doc::{CharStyle, TextKind, TextRun};
 
@@ -101,6 +101,82 @@ fn rtl_hit_testing_arrows_and_selection_follow_visual_positions() {
     assert_eq!(caret_horizontal(&l, 0, false), 2);
     assert_eq!(caret_horizontal(&l, 2, true), 0);
     assert!(!selection_quads(&l, 0, s.len()).is_empty());
+}
+
+/// Lines of glyphs, one glyph per cluster, each line given in visual order as (byte, len, advance)
+/// and starting at x 0.
+fn lines_of_clusters(lines: &[&[(usize, usize, f64)]], rtl: bool) -> TextLayout {
+    let mut l = TextLayout::default();
+    for (li, clusters) in lines.iter().enumerate() {
+        let (glyph_start, baseline) = (l.glyphs.len(), li as f64 * 20.0);
+        let mut x = 0.0;
+        for &(byte, len, advance) in *clusters {
+            l.glyphs.push(PositionedGlyph {
+                outline: BezPath::new(),
+                run: 0,
+                byte,
+                origin: Point::new(x, baseline),
+                advance,
+                len,
+                angle: 0.0,
+                line: li,
+                font_id: 0,
+                gid: 0,
+                xf: Affine::IDENTITY,
+                rtl,
+                scale: 1.0,
+            });
+            x += advance;
+        }
+        l.lines.push(LineInfo {
+            rtl,
+            baseline,
+            x0: 0.0,
+            x1: x,
+            ascent: 10.0,
+            descent: 3.0,
+            first_baseline: 0.0,
+            start: clusters.iter().map(|c| c.0).min().unwrap_or(0),
+            end: clusters.iter().map(|c| c.0 + c.1).max().unwrap_or(0),
+            glyph_start,
+            glyph_end: l.glyphs.len(),
+            avail: (0.0, x),
+            region: 0,
+        });
+    }
+    l
+}
+
+fn arrow_steps(l: &TextLayout, from: usize, right: bool, steps: usize) -> Vec<usize> {
+    let mut caret = from;
+    (0..steps)
+        .map(|_| {
+            caret = caret_horizontal(l, caret, right);
+            caret
+        })
+        .collect()
+}
+
+#[test]
+fn arrows_step_through_both_caret_stops_of_a_cluster_without_advance() {
+    // A letter (bytes 0..6), a zero width non-joiner drawn as its own glyph with no advance
+    // (6..9) and a letter (9..12): the stops at 6 and 9 share one x.
+    let l = lines_of_clusters(&[&[(0, 6, 10.0), (6, 3, 0.0), (9, 3, 10.0)]], false);
+    assert_eq!(arrow_steps(&l, 0, true, 4), [6, 9, 12, 12]);
+    assert_eq!(arrow_steps(&l, 12, false, 4), [9, 6, 0, 0]);
+    // The same clusters right to left: the glyphs run from byte 9 at the left to byte 0 at the right.
+    let l = lines_of_clusters(&[&[(9, 3, 10.0), (6, 3, 0.0), (0, 6, 10.0)]], true);
+    assert_eq!(arrow_steps(&l, 12, true, 4), [9, 6, 0, 0]);
+    assert_eq!(arrow_steps(&l, 0, false, 4), [6, 9, 12, 12]);
+}
+
+#[test]
+fn arrows_keep_to_their_line_where_a_wrapped_line_starts_at_the_same_x() {
+    // A soft wrap at byte 2: the end of the first line is the start of the second, at the same x
+    // as the start of the first.
+    let l = lines_of_clusters(&[&[(0, 1, 10.0), (1, 1, 10.0)], &[(2, 1, 10.0), (3, 1, 10.0)]], false);
+    assert_eq!(arrow_steps(&l, 0, true, 4), [1, 2, 3, 4]);
+    assert_eq!(caret_horizontal(&l, 1, false), 0);
 }
 
 #[test]
@@ -233,6 +309,35 @@ fn different_style_arabic_boundary_receives_joining_context() {
             (usize::from(glyph.byte >= beh_len), glyph.byte, beh_len),
             "every component must retain its source run and cluster"
         );
+    }
+}
+
+#[test]
+fn a_change_of_paint_in_a_mixed_direction_line_moves_no_glyph() {
+    let db = FontDb::global();
+    let text = "AVAV سلام AVAV";
+    if db.face_covering('س').is_none_or(|face| !face.covers('ل')) {
+        eprintln!("SKIPPED: a_change_of_paint_in_a_mixed_direction_line_moves_no_glyph; no font covers Arabic seen and lam");
+        return;
+    }
+    let plain = layout(db, &TextObject::point(Point::ZERO, text, CharStyle::default()));
+    assert!(plain.glyphs.iter().any(|g| g.rtl) && plain.glyphs.iter().any(|g| !g.rtl), "{plain:?}");
+    let seen = text.find('س').unwrap_or_default();
+    let mut restyled = TextObject::point(Point::ZERO, text, CharStyle::default());
+    for byte in [1, seen] {
+        let end = byte + text[byte..].chars().next().map_or(1, char::len_utf8);
+        edit::style_range(&mut restyled.runs, byte, end, |s| s.fill = Default::default());
+    }
+    assert_eq!(restyled.runs.len(), 5);
+    let restyled_layout = layout(db, &restyled);
+    assert_same_shaped_glyphs(&plain, &restyled_layout);
+    for glyph in &restyled_layout.glyphs {
+        let run_ends = restyled.runs.iter().scan(0, |end, r| {
+            *end += r.text.len();
+            Some(*end)
+        });
+        let expected = run_ends.take_while(|end| *end <= glyph.byte).count();
+        assert_eq!(glyph.run, expected, "glyph {glyph:?}");
     }
 }
 

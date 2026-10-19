@@ -8,9 +8,16 @@ use serde_json::Value;
 
 const BIN: &str = env!("CARGO_BIN_EXE_vectorcraft-cli");
 
+/// Returns the path of `name` in `vectorcraft-cli-fileio-<pid>` in the temp folder. The first call
+/// removes that folder and creates it again empty.
 fn tmp(name: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("vectorcraft-cli-fileio-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    let dir = DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("vectorcraft-cli-fileio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    });
     dir.join(name).to_string_lossy().to_string()
 }
 
@@ -171,4 +178,29 @@ fn convert_writes_legacy_ai_with_its_options() {
     let bad = Command::new(BIN).args(["convert", &src, &tmp("bad.ai"), "--ai-version", "7", "--hidden-objects", "behind"]).output().unwrap();
     assert!(!bad.status.success());
     assert!(String::from_utf8_lossy(&bad.stderr).contains("hiddenObjects"), "{}", String::from_utf8_lossy(&bad.stderr));
+}
+
+/// convert and `run --export` write a `.ait` as Save as Template does: a PDF-compatible template of
+/// every artboard that opens as a new untitled document.
+#[test]
+fn convert_and_run_write_ait_templates() {
+    let pdf = tmp("template-in.pdf");
+    make(&pdf, 120, 80);
+    let (converted, exported) = (tmp("converted.ait"), tmp("exported.ait"));
+    let r: Value = serde_json::from_str(&ok(&["convert", &pdf, &converted])).unwrap();
+    assert_eq!((&r["format"], &r["path"]), (&Value::from("ait"), &Value::from(converted.as_str())), "{r}");
+    let r: Value = serde_json::from_str(ok(&["run", "--in", &pdf, "--export", &exported]).lines().nth(1).unwrap()).unwrap();
+    assert_eq!(r["result"]["format"], "ait", "{r}");
+    for ait in [&converted, &exported] {
+        assert!(std::fs::read(ait).unwrap().starts_with(b"%PDF"), "{ait}");
+        let opened: Value = serde_json::from_str(ok(&["run", "--in", ait]).lines().next().unwrap()).unwrap();
+        let opened = &opened["result"];
+        assert_eq!((&opened["format"], &opened["restored"]), (&Value::from("ait"), &Value::from(true)), "{opened}");
+        assert!(opened["title"].as_str().is_some_and(|t| t.starts_with("Untitled-")), "{opened}");
+        assert_eq!(info(ait)["artboards"].as_array().unwrap().len(), 2, "{ait}");
+    }
+    // A template holds every artboard: one can't be picked.
+    let one = Command::new(BIN).args(["convert", &pdf, &tmp("one.ait"), "--artboard", "0"]).output().unwrap();
+    assert!(!one.status.success());
+    assert!(String::from_utf8_lossy(&one.stderr).contains("every artboard"), "{}", String::from_utf8_lossy(&one.stderr));
 }

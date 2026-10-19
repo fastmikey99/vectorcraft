@@ -158,6 +158,10 @@ fn body(app: &mut VectorcraftApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
             free_distort::fields(app, ui, d);
             values_changed(d)
         }
+        None if id == vectorcraft_effects::RASTERIZE => {
+            super::raster_effects::effect_fields(app, ui, d);
+            values_changed(d)
+        }
         None => {
             let doc = vectorcraft_effects::effect_info(&id).map(|e| e.params).unwrap_or_default();
             let unit = app.session.general_unit();
@@ -213,11 +217,11 @@ const GLASS: &str = "distort.glass";
 /// loaded, and Load Texture… with the loaded texture's size. Returns whether the values differ from
 /// those last previewed.
 fn glass_fields(app: &mut VectorcraftApp, ui: &mut egui::Ui, d: &mut Dialog) -> bool {
-    use vectorcraft_effects::pixel::{GLASS_TEXTURES, GLASS_TEXTURES_LOADED, TEXTURE_IMAGE, texture};
+    use vectorcraft_effects::pixel::{TEXTURE_IMAGE, texture};
     // The stored texture is shown as its size, not as a text field.
     let stored = d.fields.remove(TEXTURE_IMAGE);
     let size = stored.as_ref().and_then(Value::as_str).and_then(texture).map(|t| t.size());
-    let menu: form::Choices = if size.is_some() { &GLASS_TEXTURES_LOADED } else { &GLASS_TEXTURES };
+    let menu = glass_textures(size.is_some());
     let doc = vectorcraft_effects::effect_info(GLASS).map(|e| e.params).unwrap_or_default();
     let unit = app.session.general_unit();
     let pick = |k: &str| if k == "texture" { Some(menu) } else { choices(GLASS, k) };
@@ -240,6 +244,12 @@ fn glass_fields(app: &mut VectorcraftApp, ui: &mut egui::Ui, d: &mut Dialog) -> 
         app.status(e);
     }
     values_changed(d)
+}
+
+/// Glass's Texture menu, ending with Loaded Texture once a texture is `loaded`.
+fn glass_textures(loaded: bool) -> form::Choices {
+    use vectorcraft_effects::pixel::{GLASS_TEXTURES, GLASS_TEXTURES_LOADED};
+    if loaded { &GLASS_TEXTURES_LOADED } else { &GLASS_TEXTURES }
 }
 
 /// Glass's Load Texture…: an image file the user picks, read into `textureImage` as Glass stores
@@ -278,6 +288,60 @@ fn choices(effect: &str, key: &str) -> Option<form::Choices> {
         ("distort.roughen" | "distort.zigZag", "points") => Some(&[("Smooth", "smooth"), ("Corner", "corner")]),
         _ => None,
     }
+}
+
+/// The parameters whose dialogs list their values in their own bodies, as (label, value), each
+/// label as that dialog passes it to its dropdown or radio buttons, which translate it into the UI
+/// language: Revolve's edge, Extrude & Bevel's bevel (Rounded translated in the "3d" context
+/// first), every Warp style's orientation, Rasterize's Color Model (its `document` value labeled
+/// CMYK when `cmyk`, for a document in CMYK, and RGB otherwise), Background and Anti-aliasing, and
+/// the channel of Levels and Curves.
+pub(super) fn own_choices(effect: &str, key: &str, cmyk: bool) -> Option<Vec<(&'static str, &'static str)>> {
+    let c3 = |s: &'static str| crate::i18n::tr_ctx(crate::i18n::current(), "3d", s);
+    Some(match (effect, key) {
+        (vectorcraft_effects::REVOLVE, "edge") => vec![(tl!("Left"), "left"), (tl!("Right"), "right")],
+        (vectorcraft_effects::EXTRUDE, "bevel") => vec![
+            (tl!("None"), "none"),
+            (tl!("Classic"), "classic"),
+            (c3("Rounded"), "rounded"),
+            (tl!("Cove"), "cove"),
+            (tl!("Step"), "step"),
+            (tl!("Ogee"), "ogee"),
+        ],
+        (_, "orientation") if super::warp_effect::is_warp(effect) => vec![(tl!("Horizontal"), "horizontal"), (tl!("Vertical"), "vertical")],
+        (vectorcraft_effects::RASTERIZE, "colorModel") => {
+            vec![(if cmyk { "CMYK" } else { "RGB" }, "document"), (tl!("Grayscale"), "grayscale"), (tl!("Bitmap"), "bitmap")]
+        }
+        (vectorcraft_effects::RASTERIZE, "background") => vec![(tl!("White"), "white"), (tl!("Transparent"), "transparent")],
+        (vectorcraft_effects::RASTERIZE, "antiAlias") => vectorcraft_render::AntiAlias::ALL.iter().map(|a| (a.label(), a.id())).collect(),
+        ("adjust.levels" | "adjust.curves", "channel") => vec![("RGB", "rgb"), (tl!("Red"), "red"), (tl!("Green"), "green"), (tl!("Blue"), "blue")],
+        _ => return None,
+    })
+}
+
+/// The values that parameter `key` of applied effect `effect` picks from, as its dialog lists
+/// them, as (label, value): our own effects' labels in the UI language, a plug-in's choices as the
+/// plug-in names them. Glass's Texture menu ends with Loaded Texture when the effect's values
+/// `params` hold a loaded texture, and the lists of [`own_choices`] are translated as their
+/// dialogs translate them (`cmyk`: the document is in CMYK). `None` for a parameter that is not one
+/// of these lists.
+pub(crate) fn shown_choices(effect: &str, key: &str, params: &Map<String, Value>, cmyk: bool) -> Option<Vec<(String, String)>> {
+    if let Some(plugin) = vectorcraft_plugins::effect::installed(effect) {
+        return plugin.manifest().params.iter().find(|(k, _)| k == key).and_then(|(_, spec)| match spec {
+            vectorcraft_plugins::ParamSpec::Choice { options, .. } => Some(options.iter().map(|o| (o.clone(), o.clone())).collect()),
+            _ => None,
+        });
+    }
+    if let Some(own) = own_choices(effect, key, cmyk) {
+        return Some(own.into_iter().map(|(label, value)| (tl!(label).to_string(), value.to_string())).collect());
+    }
+    let options = if effect == GLASS && key == "texture" {
+        use vectorcraft_effects::pixel::{TEXTURE_IMAGE, texture};
+        glass_textures(params.get(TEXTURE_IMAGE).and_then(Value::as_str).and_then(texture).is_some())
+    } else {
+        choices(effect, key)?
+    };
+    Some(options.iter().map(|(label, value)| (form::choice_label(label).to_string(), value.to_string())).collect())
 }
 
 /// Where parameter `key` comes in the effect's parameter documentation `doc` (`{radius: …,
@@ -343,14 +407,9 @@ fn adjust_fields(ui: &mut egui::Ui, d: &mut Dialog) -> bool {
         form::slider_w(ui, d, (key, label, LABEL_W), *min..=*max, "", rail);
     }
     if d.fields.contains_key("channel") {
-        form::choice(
-            ui,
-            d,
-            "channel",
-            tl!("Channel"),
-            (LABEL_W, 120.0),
-            &[("rgb", "RGB"), ("red", tl!("Red")), ("green", tl!("Green")), ("blue", tl!("Blue"))],
-        );
+        let channels: Vec<(&str, &str)> =
+            own_choices(&id, "channel", false).unwrap_or_default().into_iter().map(|(label, value)| (value, label)).collect();
+        form::choice(ui, d, "channel", tl!("Channel"), (LABEL_W, 120.0), &channels);
     }
     if d.fields.contains_key("points") {
         ui.horizontal(|ui| {
@@ -428,7 +487,12 @@ fn zig_zag_fields(ui: &mut egui::Ui, d: &mut Dialog, unit: vectorcraft_doc::Unit
     widgets::subheader(ui, tl!("Options"));
     // Size is a share of the object's size (Relative) or a distance (Absolute).
     widgets::label_row(ui, tl!("Size:"), LABEL_W, |ui| {
-        form::slider_rail(ui, d, "size", 0.0..=100.0, &track);
+        let shown = if relative {
+            Some(widgets::SliderValue::field(d.f64("size", 10.0).clamp(0.0, 100.0), 0.0..=100.0, "%", 0))
+        } else {
+            form::length_value(d, "size", unit, 0.0..=100.0)
+        };
+        form::slider_rail_valued(ui, d, "size", tl!("Size:"), 0.0..=100.0, shown, &track);
         if !relative {
             form::length(ui, d, "size", unit, FIELD_W);
         } else if let Some(n) = widgets::range_field(ui, ("zz", "size"), d.f64("size", 10.0), 0.0..=100.0, "%", 0, FIELD_W) {
@@ -444,7 +508,7 @@ fn zig_zag_fields(ui: &mut egui::Ui, d: &mut Dialog, unit: vectorcraft_doc::Unit
         }
     });
     widgets::label_row(ui, tl!("Ridges per segment:"), LABEL_W, |ui| {
-        form::slider_rail(ui, d, "ridges", 0.0..=100.0, &track);
+        form::slider_rail_named(ui, d, "ridges", tl!("Ridges per segment:"), 0.0..=100.0, &track);
         if let Some(n) = widgets::range_field(ui, ("zz", "ridges"), d.f64("ridges", 4.0), 0.0..=100.0, "", 0, FIELD_W) {
             d.fields.insert("ridges".into(), json!(n));
         }
@@ -604,26 +668,14 @@ fn command(d: &Dialog) -> (&'static str, Value) {
 
 fn confirm(app: &mut VectorcraftApp, d: &Dialog) -> Result<Value, String> {
     let (cmd, p) = command(d);
-    if super::warp_effect::is_warp(&d.str("__effect")) {
-        let r = form::commit_preview(app, cmd, p.clone())?;
-        if cmd == "effect.apply" {
-            app.last_effect = Some((d.str("__effect"), p["params"].clone()));
-        }
-        return Ok(r);
-    }
-    let r = if app.session.in_interaction() {
-        // Live preview already applied: keep it (the interaction commits as one undo step).
-        let _ = app.session.preview(cmd, &p);
-        app.session.commit_interaction().map(|_| Value::Null).map_err(|e| e.to_string())
-    } else {
-        app.run(cmd, p.clone())
-    };
+    // A live preview commits as one undo step. When the command refuses the values (a Color the
+    // effect can't draw), the dialog stays open and the error is returned.
+    let r = form::commit_preview(app, cmd, p.clone())?;
     // Last Effect repeats applied effects, not edits.
     if cmd == "effect.apply" {
         app.last_effect = Some((d.str("__effect"), p["params"].clone()));
     }
-    app.ui.dialog = None;
-    r
+    Ok(r)
 }
 
 #[cfg(test)]
@@ -645,6 +697,32 @@ mod tests {
             let values: Vec<String> = choices(effect, key).unwrap().iter().map(|(_, v)| format!("\"{v}\"")).collect();
             assert_eq!(values.join("|"), listed, "{effect} {key}");
         }
+    }
+
+    /// The lists that dialogs draw in their own bodies hold the values the effect's parameter
+    /// documentation lists, in its order; Rasterize's Color Model names the document's mode first.
+    #[test]
+    fn lists_drawn_in_a_dialogs_body_are_the_documented_values() {
+        for (effect, key) in [
+            (vectorcraft_effects::REVOLVE, "edge"),
+            (vectorcraft_effects::EXTRUDE, "bevel"),
+            ("warp.arc", "orientation"),
+            ("warp.twist", "orientation"),
+            (vectorcraft_effects::RASTERIZE, "background"),
+            (vectorcraft_effects::RASTERIZE, "antiAlias"),
+            ("adjust.levels", "channel"),
+            ("adjust.curves", "channel"),
+        ] {
+            let doc = vectorcraft_effects::effect_info(effect).unwrap().params;
+            let listed = doc.split(&format!("{key}: ")).nth(1).unwrap().split([',', '}', ' ']).next().unwrap().replace('"', "");
+            let values: Vec<&str> = own_choices(effect, key, false).unwrap().iter().map(|(_, v)| *v).collect();
+            assert_eq!(values.join("|"), listed, "{effect} {key}");
+        }
+        for (cmyk, mode) in [(false, "RGB"), (true, "CMYK")] {
+            let models = own_choices(vectorcraft_effects::RASTERIZE, "colorModel", cmyk).unwrap();
+            assert_eq!(models, [(mode, "document"), ("Grayscale", "grayscale"), ("Bitmap", "bitmap")]);
+        }
+        assert!(own_choices("distort.twist", "orientation", false).is_none() && own_choices("adjust.hueSaturation", "channel", false).is_none());
     }
 
     /// Glass's Load Texture… reads the picked image into the dialog, the Texture menu shows Loaded

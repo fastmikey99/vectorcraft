@@ -34,6 +34,7 @@ mod halftone;
 pub mod help;
 pub mod importmatches;
 pub(crate) mod inline;
+mod interactivity;
 mod intertwine;
 mod layer;
 mod layerpanel;
@@ -181,6 +182,10 @@ pub fn can_undo(s: &Session) -> std::result::Result<(), String> {
 pub fn can_redo(s: &Session) -> std::result::Result<(), String> {
     s.active().filter(|d| !d.history.redo.is_empty()).map(|_| ()).ok_or_else(|| "nothing to redo".into())
 }
+/// The active document has a step to undo or to redo (Clear History).
+pub fn can_clear_history(s: &Session) -> std::result::Result<(), String> {
+    s.active().filter(|d| !d.history.undo.is_empty() || !d.history.redo.is_empty()).map(|_| ()).ok_or_else(|| "no history to clear".into())
+}
 pub fn has_clipboard(s: &Session) -> std::result::Result<(), String> {
     has_doc(s)?;
     if s.clipboard.is_empty() { Err("clipboard is empty".into()) } else { Ok(()) }
@@ -265,6 +270,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(library::specs());
         v.extend(expand::specs());
         v.extend(attributes::specs());
+        v.extend(interactivity::specs());
         v.extend(newart::specs());
         v.extend(colortheme::specs());
         v.extend(fileio::pdf::specs());
@@ -496,7 +502,7 @@ pub(crate) fn date_param(p: &Value, key: &str, cmd: &str) -> Result<Option<Optio
 /// no clock). It joins the running command's journal entry as `key`, so a replay of the journal
 /// gives the same date whenever it runs (an action leaves it out: [`crate::Session::journal_for_action`]).
 pub(crate) fn clock_date(s: &mut Session, key: &str, given: Option<Option<i64>>) -> Option<i64> {
-    let t = given.unwrap_or_else(vectorcraft_doc::metadata::now_unix);
+    let t = given.unwrap_or_else(vectorcraft_doc::metadata::output_time);
     s.note_journal(key, serde_json::json!(t));
     t
 }

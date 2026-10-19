@@ -1,6 +1,6 @@
 # Localization parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-16 · **Change:** minor (Bulgarian (`bg`) and Greek (`el`) catalogs complete under the tests, #1909, #2076; Finnish (`fi`) catalog added, complete under the tests; Swedish (`sv`) catalog added, complete under the tests; scores and estimates unchanged; Brazilian Portuguese (`pt-br`) catalog completed under the tests: menus, `tl!` literals and messages; 12-language score 71% → 74%; #1914) · **Target:** Adobe Illustrator 2026 (30.x)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-16 · **Change:** minor (Georgian (`ka`) interface catalog; Bulgarian (`bg`) and Greek (`el`) catalogs complete under the tests, #1909, #2076; Finnish (`fi`) catalog added, complete under the tests; Swedish (`sv`) catalog added, complete under the tests; scores and estimates unchanged; Brazilian Portuguese (`pt-br`) catalog completed under the tests: menus, `tl!` literals and messages; 12-language score 71% → 74%; #1914) · **Target:** Adobe Illustrator 2026 (30.x)
 
 Per-language status of VectorCraft's interface. How the catalogs work and how to add a language:
 [`development.md` › Localisation](development.md#localisation). Part of
@@ -17,16 +17,16 @@ in-app help, and the docs are English.
 
 **Native review:** every catalog was written clean-room from the English meaning, most of it by agents
 (`bflatastic`), with community contributors adding or correcting (German by `dwetscher`, Japanese and Traditional
-Chinese by `imachus`). None is recorded as reviewed by a native speaker; the catalog headers ask for one.
+Chinese by `imachus`). Only Georgian is recorded as reviewed by a native speaker; the other catalog headers ask for one.
 
 ## The twelve key languages
 
 | Language | Code | UI strings translated | Dialogs / tooltips / messages | Script support | Native review | Status | To `full` (h) |
 |---|---|---|---|---|---|---|---|
 | English | `en` | source, 100% | all | Latin | — | full | — |
-| Simplified Chinese (Mandarin) | `zh-hans` | 3,647 rows; menus, panels, dialogs complete (tests); 85% overall | messages in English (1 of 604) | CJK UI font from craft-fonts (BIZ UDPGothic) when embedded, else a system font; IME with marked text at the caret; vertical type partial ([type-parity.md](type-parity.md)) | no | partial | 2–3 |
+| Simplified Chinese (Mandarin) | `zh-hans` | 4,761 rows, 714 of them `@msg` (counted 2026-10-16): menus, `tl!` literals and messages complete (tests) | all | CJK UI font from craft-fonts (BIZ UDPGothic) when embedded, else a system font; IME with marked text at the caret; vertical type partial ([type-parity.md](type-parity.md)) | no | full | — (review) |
 | Spanish | `es` | 4,009 / 4,020 (99.7%) | all (604 messages) | Latin | no | full | — (review) |
-| Hindi | `hi` | 0 | none | Devanagari: the document's text shapes (HarfRust), untested for Devanagari, but the egui interface does no complex shaping | no | none | 20–30 |
+| Hindi | `hi` | 0 | none | Devanagari: the document's text shapes (HarfRust), with tests of conjuncts, reph, pre-base matras, nukta forms and caret stops that run when an OpenType Devanagari font is installed, but the egui interface does no complex shaping | no | none | 20–30 |
 | Arabic | `ar` | 0 | none | document text: bidi layout and Paragraph Direction; interface: no right-to-left layout, no Arabic shaping in egui | no | none | 25–40 |
 | French | `fr` | 4,020 / 4,020 (100%) | all | Latin | no | full | — (review) |
 | Portuguese | `pt-br` | 4,707 catalog entries: menus, `tl!` literals and messages complete (tests); one|other plurals | all | Latin | contributor is a Brazilian Portuguese speaker; further native review welcome | full | — (review) |
@@ -45,7 +45,7 @@ plus review. Native-speaker review is human work and isn't in the hours.
 
 | Language | Code | Translated | Status |
 |---|---|---|---|
-| Traditional Chinese (Taiwan) | `zh-hant` | 3,425 rows, menus and literals complete; messages in English (80% overall) | partial |
+| Traditional Chinese (Taiwan) | `zh-hant` | 4,741 rows, 742 of them `@msg` (counted 2026-10-17): menus, `tl!` literals and messages complete under the tests (80% overall) | partial |
 | Italian | `it` | 4,011 / 4,020 | full |
 | Russian | `ru` | 4,009 / 4,020 | full |
 | Ukrainian | `uk` | 4,009 / 4,020 (one/few/many plurals) | full |
@@ -56,8 +56,9 @@ plus review. Native-speaker review is human work and isn't in the hours.
 | Swedish | `sv` | 4,770 rows, 668 of them `@msg` (counted 2026-10-15): menus, `tl!` literals and messages complete (tests); one/other plurals | full; native review welcome |
 | Bulgarian | `bg` | 4,910 rows, 703 of them `@msg` (counted 2026-10-16): menus, `tl!` literals and messages complete (tests) | full; AI-drafted, native review pending |
 | Greek | `el` | 4,880 rows, 709 of them `@msg` (counted 2026-10-16): menus, `tl!` literals and messages complete (tests) | full; native review welcome |
+| Georgian | `ka` | 5,066 rows (counted 2026-10-18): menus, panels, dialogs, plurals (one count-neutral form) and messages, tested complete; reviewed by a native speaker | full |
 
-Eighteen non-English catalogs in all. Illustrator, as its public documentation lists, ships around two dozen
+Nineteen non-English catalogs in all. Illustrator, as its public documentation lists, ships around two dozen
 interface languages (including Polish, Dutch, Turkish, the Nordic languages, Hungarian, and Middle East
 editions with Arabic and Hebrew); it doesn't ship Hindi, Indonesian or Vietnamese.
 
@@ -72,8 +73,10 @@ contextual radial adjective. PDF/Print mark styles use `mark-style`, so `Japanes
 
 The search placeholder, Home screen, toolbar/panel tooltips and Preferences already use lookups.
 No new `tl!("literal")` keys were needed: only `cs.tsv` adds 19 AI-draft rows and revises the gradient
-template. Other catalogs fall back to English for new variable/template lookups. Native review is
-still needed, and catalog coverage does not prove that every variable in the UI is translated.
+template. Every other complete catalog (`complete_menus`) has the same rows and a `Roman` row for the
+other mark style; `complete_catalogs_translate_render_site_labels` fails when one of them lacks a row.
+Native review is still needed, and catalog coverage does not prove that every variable in the UI is
+translated.
 
 ## Not done in any language
 
@@ -97,5 +100,6 @@ font for the web build.
 | 2026-10-12 | minor | Korean (`ko`) catalog added, complete under the tests (menus, literals, messages); 12-language score 54% → 63%, hours 70–110 → 60–100 |
 | 2026-10-12 | minor | Polish (`pl`) catalog added, complete under the tests (menus, literals, messages; one/few/many plurals) |
 | 2026-10-12 | minor | Hungarian (`hu`) catalog added, complete under the tests |
+| 2026-10-12 | minor | Georgian (`ka`) catalog, complete |
 | 2026-10-11 | minor | Czech render-site follow-up: file-dialog filters, diagnostics, preset numbering, contributor tooltips/plurals, gradient grammar and contextual printer mark styles; estimates unchanged |
 | 2026-10-10 | major | First per-language table, measured from the catalog row counts against the complete French catalog |

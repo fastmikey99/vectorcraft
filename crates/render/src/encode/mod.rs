@@ -111,13 +111,11 @@ impl RasterExportOptions {
     }
 
     /// Encode a rendered image as `format`. A CMYK JPEG separates the screen colours, and a PSD is
-    /// flat; [`Renderer::export_region`] draws the inks and the layers instead. PNGs hold the
-    /// display's sRGB colours and say so (an `sRGB` chunk), so viewers needn't assume it.
+    /// flat; [`Renderer::export_region`] draws the inks and the layers instead.
     pub fn encode(&self, img: &Rendered, format: RasterFormat) -> Result<Vec<u8>, String> {
         match format {
             RasterFormat::Png => {
                 png::encode(&img.to_straight(), img.width, img.height, &png::PngOptions { ppi: Some(self.ppi), interlaced: self.interlaced })
-                    .map(png::with_srgb)
             }
             RasterFormat::Jpeg => {
                 let px = match self.jpeg.color_model {
@@ -131,7 +129,7 @@ impl RasterExportOptions {
                 let ix = quantize::quantize(&img.to_straight(), img.width, img.height, &self.palette);
                 match format {
                     RasterFormat::Gif => gif::encode(&ix, self.interlaced),
-                    _ => png::encode_indexed(&ix, &png::PngOptions { ppi: Some(self.ppi), interlaced: self.interlaced }).map(png::with_srgb),
+                    _ => png::encode_indexed(&ix, &png::PngOptions { ppi: Some(self.ppi), interlaced: self.interlaced }),
                 }
             }
             RasterFormat::Tiff => tiff::encode(img, self.ppi, &self.tiff),
@@ -221,7 +219,11 @@ pub fn art_bounds_on(doc: &Document, rect: Rect) -> Option<Rect> {
     doc.layers.iter().fold(None, |acc, l| vectorcraft_geom::union_opt(acc, on(&symbols, l, rect)))
 }
 
-fn drawn_bounds(symbols: &SymbolBoxes, n: &Node) -> Option<Rect> {
+/// Bounds of what an export draws of object `n` ([`art_bounds`]): `None` when `n` is hidden, a
+/// guide or a template layer. The hidden objects, guides and template layers in it are left out,
+/// except in a group or layer with effects of its own that keep all its members (`without_undrawn`
+/// lists them). Symbol instances are measured by their art in `symbols`.
+pub fn drawn_bounds(symbols: &SymbolBoxes, n: &Node) -> Option<Rect> {
     if !n.visible {
         return None;
     }
