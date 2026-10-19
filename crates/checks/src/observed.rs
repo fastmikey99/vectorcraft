@@ -102,8 +102,19 @@ fn positive_ink(c: &Census, p: &PaintedObject, composite: bool) -> bool {
         };
         return keys.iter().any(|k| color.and_then(|c| c.get(k)).and_then(Value::as_f64).is_some_and(|v| v.is_finite() && v > 0.0));
     }
+    let source = p.source_space.and_then(|i| c.paint_sources.get(i));
+    if let Some(source) = source
+        && source.color_space == vectorcraft_pdf::PrintColorSpace::Separation
+        && source.colorants.len() == 1
+        && source.colorants.first().is_some_and(|n| ["Cyan", "Magenta", "Yellow", "Black"].contains(&n.as_str()))
+    {
+        // Direct subtractive process colourants retain their named component;
+        // their alternate is not a process-colour conversion oracle. Reuse the
+        // raw-space tonal reconciliation, including its component validation.
+        return crate::tone::source_tones(p, source).is_ok_and(|tones| tones.values().any(|t| *t > 0.0));
+    }
     let color = p.paint.get("color");
-    let keys: &[&str] = match p.source_space.and_then(|i| c.paint_sources.get(i)).map(|s| s.color_space) {
+    let keys: &[&str] = match source.map(|s| s.color_space) {
         Some(vectorcraft_pdf::PrintColorSpace::DeviceCmyk) => &["c", "m", "y", "k"],
         Some(vectorcraft_pdf::PrintColorSpace::DeviceGray) => &["k"],
         _ => return false, // RGB/profile-dependent ink presence needs qualified conversion.
@@ -135,6 +146,9 @@ impl Survival {
             }
         }
         out
+    }
+    fn composite_unmodified(&self, p: &PaintedObject) -> bool {
+        self.unmodified(p) && p.page.is_some_and(|page| self.process.get(&page).is_none_or(|last| *last <= p.order))
     }
     fn unmodified(&self, p: &PaintedObject) -> bool {
         p.page.is_some_and(|page| {
@@ -301,9 +315,10 @@ pub(crate) fn check(r: &Request, c: &Census, report: &mut Report) -> Result<(), 
                 .collect();
             let routed_count = objects.iter().filter(|p| links.iter().any(|l| members.contains(l.key.as_str()) && matches(l, p))).count();
             let required = plate.get("required").and_then(Value::as_bool) == Some(true);
-            let surviving = objects
-                .iter()
-                .any(|p| positive_ink(c, p, plate.get("name_mode").and_then(Value::as_str) == Some("composite")) && survival.unmodified(p));
+            let surviving = objects.iter().any(|p| {
+                let composite = plate.get("name_mode").and_then(Value::as_str) == Some("composite");
+                positive_ink(c, p, composite) && if composite { survival.composite_unmodified(p) } else { survival.unmodified(p) }
+            });
             report.record(&format!("observed/plate/{key}/presence"),if surviving{Status::Pass}else if required && objects.is_empty(){Status::Fail}else{Status::Incomplete},
                 if objects.is_empty(){"Required output absence fails; conditional output absence needs source applicability"}else{"Presence requires positive decoded ink and filled area; unsupported colour conversion or later knockout, zero-tint or process paint remains unresolved"},
                 json!({"required":required,"name":plate.get("name"),"destination":plate.get("destination"),"contributing_layers":objects.iter().map(|p|p.layer.as_str()).collect::<BTreeSet<_>>(),"objects":objects.len(),"routed_objects":routed_count,"unmodified_nonempty_paint":surviving}),evidence(r))?;
@@ -397,6 +412,15 @@ fn anchor<'a>(r: &Request, c: &'a Census, survival: &Survival, key: &str) -> Res
     }
     Ok(objects)
 }
+/// Distance to a fixed closed boundary is 1-Lipschitz. Every nondegenerate
+/// round spread/choke boundary is at its prescribed distance from the source
+/// boundary, so a gap discrepancy gives a lower bound on target deviation.
+/// Matching unsigned distances cannot establish side, topology or completeness.
+fn gap_witness(gap: &crate::geometry::GapRange, distance: f64, tolerance: Option<f64>) -> (f64, Status) {
+    let lower = (distance - gap.minimum_mm[1]).max(gap.maximum_mm[0] - distance).max(0.0);
+    let status = if tolerance.is_some_and(|t| lower > t) { Status::Fail } else { Status::Incomplete };
+    (lower, status)
+}
 fn relationships(r: &Request, c: &Census, survival: &Survival, report: &mut Report) -> Result<(), String> {
     let tolerance =
         r.acceptance.get("geometry_tolerance_mm").filter(|f| f.evidenced()).and_then(|f| f.value.as_f64()).filter(|n| n.is_finite() && *n >= 0.0);
@@ -477,6 +501,10 @@ fn relationships(r: &Request, c: &Census, survival: &Survival, report: &mut Repo
                     vectorcraft_pathops::BoolOp::Difference,
                 )
                 .map_err(|e| e.to_string())?;
+                let (gap_lower, gap_status) = gap_witness(&gap, distance, tolerance);
+                if gap_status == Status::Fail {
+                    status = Status::Fail;
+                }
                 let measured = crate::geometry::compare(&expected, &b, 0.0, 0.0001);
                 let (deviation, nominal_disproved, limitation) = match measured {
                     Ok(mut m) => {
@@ -506,17 +534,16 @@ fn relationships(r: &Request, c: &Census, survival: &Survival, report: &mut Repo
                         if status != Status::Fail {
                             status = Status::Incomplete;
                         }
-                        // A choke boundary must be at its nominal inward distance. A
-                        // gap discrepancy is a witness; matching distances alone never
-                        // prove that every required component survives the construction.
-                        let disproved = rule.operation == "choke" && (gap.minimum_mm[1] < distance || gap.maximum_mm[0] > distance);
-                        (Value::Null, disproved, json!(format!("Nominal offset topology unresolved: {why}")))
+                        // The independent gap witness survives a nominal topology
+                        // limitation. It can disprove a bound tolerance but never Pass
+                        // full morphology, even when all observed gaps match.
+                        (Value::Null, gap_lower > 0.0, json!(format!("Nominal offset topology unresolved: {why}")))
                     }
                 };
                 uncertainty = uncertainty.max(gap.uncertainty_mm);
                 rows.push(json!({"page":page,"nominal_operation":rule.operation,"nominal_distance_mm":distance,"source_rule":source_key,
                     "target_deviation_mm":deviation,"nominal_relation_disproved":nominal_disproved,"nominal_comparison_limitation":limitation,
-                    "target_boundary_to_source_gap":gap,
+                    "target_boundary_to_source_gap":gap,"target_deviation_lower_from_gap_mm":gap_lower,
                     "target_outside_source_area_mm2":outside.to_bezpath().area().abs(),
                     "source_objects":source.iter().filter(|p|p.page==Some(page)).map(|p|p.id).collect::<Vec<_>>(),"target_objects":target.iter().filter(|p|p.page==Some(page)).map(|p|p.id).collect::<Vec<_>>() }));
             }
@@ -562,16 +589,19 @@ mod tests {
         pdf_stream_alt(name, layer, stream, "0 1 0 0")
     }
     fn pdf_stream_alt(name: &str, layer: &str, stream: &str, alternate: &str) -> Vec<u8> {
+        pdf_stream_options(name, layer, stream, alternate, "", 1)
+    }
+    fn pdf_stream_options(name: &str, layer: &str, stream: &str, alternate: &str, extra_space: &str, mode: u8) -> Vec<u8> {
         crate::pdf::tests::objects_pdf(&[
             "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [6 0 R] /D << /ON [6 0 R] >> >> >>".into(),
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
             format!(
-                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /Properties << /L 6 0 R >> /ColorSpace << /Ink [/Separation /{name} /DeviceCMYK 5 0 R] >> /ExtGState << /GS 7 0 R >> >> /Contents 4 0 R >>"
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /Properties << /L 6 0 R >> /ColorSpace << /Ink [/Separation /{name} /DeviceCMYK 5 0 R] {extra_space} >> /ExtGState << /GS 7 0 R >> >> /Contents 4 0 R >>"
             ),
             format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
             format!("<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [{alternate}] /N 1 >>"),
             format!("<< /Type /OCG /Name ({layer}) >>"),
-            "<< /Type /ExtGState /op true /OP true /OPM 1 >>".into(),
+            format!("<< /Type /ExtGState /op true /OP true /OPM {mode} >>"),
         ])
     }
     fn request(bytes: &[u8]) -> Request {
@@ -785,5 +815,153 @@ mod tests {
         assert_eq!(finding(&out, "observed/routing").status, Status::Pass);
         assert_eq!(finding(&out, "observed/file/output/paint").status, Status::Pass);
         assert_ne!(finding(&out, "global/colour").status, Status::Pass);
+    }
+    fn composite_request(bytes: &[u8]) -> Request {
+        let mut r = request(bytes);
+        r.recipe.file_links[0].name_mode = "source".into();
+        r.recipe.file_links[0].separation_name = None;
+        r.recipe.file_links[0].destination = "Indigo".into();
+        r.recipe.required_screens = Some(vec![]);
+        let f = r.recipe.foundation.as_mut().unwrap();
+        f["treatments"]["arbitrary"]["paint"] = json!({"mode":"source"});
+        for p in f["verification"]["plates"].as_array_mut().unwrap() {
+            p["name"] = Value::Null;
+            p["name_mode"] = json!("composite");
+            p["destination"] = json!("Indigo");
+            p["required"] = json!(false);
+        }
+        r.identity.recipe_sha256 = crate::digest(&r.recipe).unwrap();
+        r
+    }
+    #[test]
+    fn direct_process_separation_presence_uses_only_its_named_component() {
+        for (name, channel) in [("Cyan", "c"), ("Magenta", "m"), ("Yellow", "y"), ("Black", "k")] {
+            for tint in [0.0, 0.25, 1.0] {
+                // A paper-white alternate must not replace an available direct
+                // subtractive process colourant. The fixture is independently authored.
+                let bytes = pdf_stream_alt(name, "Layer", &format!("/OC /L BDC /GS gs /Ink cs {tint} scn 10 10 50 50 re f EMC"), "0 0 0 0");
+                let mut c = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+                crate::ordering::reconcile(&bytes, &mut c);
+                assert!(c.paint_order_verified, "{name}/{tint}: {:?}", c.unresolved);
+                assert_eq!(c.paints.len(), 1);
+                let p = &c.paints[0];
+                assert!(p.ink.is_none());
+                assert_eq!(p.paint["color"][channel], json!(tint));
+                assert_eq!(positive_ink(&c, p, true), tint > 0.0);
+                let out = crate::pdf::check(&composite_request(&bytes), &bytes).unwrap();
+                assert_eq!(finding(&out, "observed/plate/dark-output/presence").status, if tint > 0.0 { Status::Pass } else { Status::Incomplete });
+                let mut wrong = p.clone();
+                for key in ["c", "m", "y", "k"] {
+                    wrong.paint["color"][key] = json!(if key == channel { 0.0 } else { 1.0 });
+                }
+                assert!(!positive_ink(&c, &wrong, true), "An unnamed channel cannot prove {name}");
+                wrong.paint["color"][channel] = json!(2.0);
+                assert!(!positive_ink(&c, &wrong, true));
+                let index = p.source_space.unwrap();
+                let mut unknown = c.clone();
+                unknown.paint_sources[index].colorants = vec!["Unqualified".into()];
+                assert!(!positive_ink(&unknown, p, true));
+            }
+            let bytes = pdf_stream_alt(name, "Layer", "/OC /L BDC /GS gs /Ink cs 1 scn 10 10 50 50 re f 0 scn 0 0 100 100 re f EMC", "0 0 0 0");
+            let out = crate::pdf::check(&composite_request(&bytes), &bytes).unwrap();
+            assert_eq!(finding(&out, "observed/plate/dark-output/presence").status, Status::Incomplete, "Later zero process paint: {name}");
+        }
+    }
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn independent_direct_process_separation_planes_match_positive_and_zero_tints() {
+        let Ok(binary) = std::env::var("CHECK_GS_BINARY") else { return };
+        let binary_sha256 = crate::sha256(&std::fs::read(&binary).unwrap());
+        for name in ["Cyan", "Magenta", "Yellow", "Black"] {
+            for tint in [0.0, 0.5] {
+                for dpi in [72, 144] {
+                    for mode in [0, 1] {
+                        let bytes = pdf_stream_alt(name, "Layer", &format!("/OC /L BDC /GS gs /Ink cs {tint} scn 10 10 50 50 re f EMC"), "0 0 0 0");
+                        let bytes = if mode == 0 { String::from_utf8(bytes).unwrap().replace("/OPM 1", "/OPM 0").into_bytes() } else { bytes };
+                        let mut c = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+                        crate::ordering::reconcile(&bytes, &mut c);
+                        assert!(c.paint_order_verified);
+                        let output = std::env::temp_dir().join(format!(
+                            "vc-direct-process-{name}-{tint}-{dpi}-{mode}-{}",
+                            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+                        ));
+                        let config = crate::independent::Configuration {
+                            binary: binary.clone().into(),
+                            binary_sha256: binary_sha256.clone(),
+                            version: "10.07.1".into(),
+                            dpi,
+                            timeout_ms: 10_000,
+                            max_output_bytes: 16 * 1024 * 1024,
+                            qualification_sha256: None,
+                        };
+                        let render = crate::independent::render(&config, &bytes, &output).unwrap();
+                        let comparison = crate::raster::compare(&c, &render, Some(0.6)).unwrap();
+                        assert_eq!(comparison.status, Status::Pass, "{name}/{tint}/{dpi}/{mode}: {comparison:?}");
+                        assert_eq!(c.paints.iter().any(|p| positive_ink(&c, p, true)), tint > 0.0);
+                        assert!(!render.qualified);
+                        std::fs::remove_dir_all(output).unwrap();
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn certified_gap_witness_keeps_boundaries_and_cannot_pass_morphology() {
+        fn rect(x: f64, y: f64, w: f64, h: f64) -> vectorcraft_geom::PathData {
+            let mut p = vectorcraft_geom::BezPath::new();
+            p.move_to((x, y));
+            p.line_to((x + w, y));
+            p.line_to((x + w, y + h));
+            p.line_to((x, y + h));
+            p.close_path();
+            vectorcraft_geom::PathData::from_bezpath(&p)
+        }
+        let source = rect(0.0, 0.0, 10.0, 10.0);
+        // A 1 mm choke displaced 0.2 mm has gaps ranging from 0.8 to 1.2 mm.
+        let target = rect(1.2, 1.0, 8.0, 8.0);
+        let gap = crate::geometry::boundary_gap(&target, &source, 0.0001).unwrap();
+        assert!(gap.minimum_mm[0] <= 0.8 && gap.minimum_mm[1] >= 0.8);
+        assert!(gap.maximum_mm[0] <= 1.2 && gap.maximum_mm[1] >= 1.2);
+        let (lower, status) = gap_witness(&gap, 1.0, Some(0.19));
+        assert!((0.199..=0.2).contains(&lower));
+        assert_eq!(status, Status::Fail);
+        for tolerance in [None, Some(lower), Some(0.2), Some(0.21)] {
+            assert_eq!(gap_witness(&gap, 1.0, tolerance).1, Status::Incomplete);
+        }
+        assert_eq!(gap_witness(&gap, 1.0, Some(lower - 0.000001)).1, Status::Fail);
+        let exact = crate::geometry::boundary_gap(&rect(1.0, 1.0, 8.0, 8.0), &source, 0.0001).unwrap();
+        assert_eq!(gap_witness(&exact, 1.0, Some(0.01)), (0.0, Status::Incomplete));
+        // Distance-only evidence has no inward/outward orientation and must not
+        // Pass a purported spread merely because the inward choke gaps match.
+        assert_eq!(gap_witness(&exact, 1.0, Some(10.0)).1, Status::Incomplete);
+        let mut wide = gap;
+        wide.minimum_mm[1] = 1.0;
+        wide.maximum_mm[0] = 1.0;
+        assert_eq!(gap_witness(&wide, 1.0, Some(0.0)), (0.0, Status::Incomplete));
+    }
+    #[test]
+    fn later_process_zero_cannot_leave_composite_spot_alternate_presence_passing() {
+        for (after, mode, expected) in [
+            ("", 1, Status::Pass),
+            ("/Zero cs 0 scn 0 0 100 100 re f", 1, Status::Incomplete),
+            ("0 0 0 0 k 0 0 100 100 re f", 0, Status::Incomplete),
+            // Conservative when a later OPM1 zero might retain the earlier ink.
+            ("0 0 0 0 k 0 0 100 100 re f", 1, Status::Incomplete),
+            ("0 0 0 1 k 0 0 100 100 re f", 0, Status::Pass),
+        ] {
+            let bytes = pdf_stream_options(
+                "Exact#20ink",
+                "Layer",
+                &format!("/OC /L BDC /GS gs /Ink cs 1 scn 10 10 50 50 re f {after} EMC"),
+                "1 0 0 0",
+                "/Zero [/Separation /Cyan /DeviceCMYK 5 0 R]",
+                mode,
+            );
+            let out = crate::pdf::check(&composite_request(&bytes), &bytes).unwrap();
+            assert_eq!(finding(&out, "observed/plate/dark-output/presence").status, expected, "{after}/{mode}");
+            // Actual named technical ink remains independent of its CMYK alternate.
+            let out = crate::pdf::check(&request(&bytes), &bytes).unwrap();
+            assert_eq!(finding(&out, "observed/plate/dark-output/presence").status, Status::Pass, "Technical spot {after}/{mode}");
+        }
     }
 }

@@ -26,6 +26,7 @@ mod raster_images;
 pub mod raster_prepare;
 pub mod recipe;
 mod specification;
+mod tone;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

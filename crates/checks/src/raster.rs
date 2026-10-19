@@ -3,7 +3,6 @@
 //! source colour spaces, groups, images and masks remain explicit rather than RGB-flattened.
 use crate::{Status, geometry::Boundary, independent::Render, pdf::Census};
 use serde::Serialize;
-use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use vectorcraft_geom::{FillRule, Point};
 #[derive(Clone, Debug, Serialize)]
@@ -69,57 +68,7 @@ struct Paint {
     overprint: bool,
     skip_zero_process: bool,
 }
-fn tones(paint: &Value, ink: Option<&str>) -> Result<BTreeMap<String, f64>, String> {
-    let tint = paint.get("tint").and_then(Value::as_f64).unwrap_or(1.0);
-    if let Some(ink) = ink {
-        if ["All", "None", "Cyan", "Magenta", "Yellow", "Black"].contains(&ink) {
-            return Err("Special/process spot-name collision requires explicit PDF reconciliation".into());
-        }
-        return Ok(BTreeMap::from([(ink.into(), tint)]));
-    }
-    let color = paint.get("color").ok_or("Solid source colour missing")?;
-    let component = |key: &str| color.get(key).and_then(Value::as_f64).filter(|n| (0.0..=1.0).contains(n)).ok_or("Invalid source component");
-    let values = match color.get("model").and_then(Value::as_str) {
-        Some("cmyk") => [component("c")?, component("m")?, component("y")?, component("k")?],
-        Some("gray") => [0.0, 0.0, 0.0, component("k")?],
-        _ => return Err("Source colour/profile conversion needs a qualified prediction".into()),
-    };
-    Ok(["Cyan", "Magenta", "Yellow", "Black"].into_iter().zip(values).map(|(k, v)| (k.into(), v)).collect())
-}
-pub(crate) fn source_tones(paint: &crate::pdf::PaintedObject, source: &vectorcraft_pdf::PrintPaintSource) -> Result<BTreeMap<String, f64>, String> {
-    use vectorcraft_pdf::PrintColorSpace;
-    let mut values = tones(&paint.paint, paint.ink.as_deref())?;
-    let model = paint.paint.get("color").and_then(|c| c.get("model")).and_then(Value::as_str);
-    match source.color_space {
-        PrintColorSpace::DeviceCmyk if paint.ink.is_none() && model == Some("cmyk") => Ok(values),
-        PrintColorSpace::DeviceGray if paint.ink.is_none() && model == Some("gray") => Ok(values),
-        PrintColorSpace::Separation | PrintColorSpace::DeviceN => {
-            let names: BTreeSet<_> = source.colorants.iter().collect();
-            if names.is_empty()
-                || names.len() != source.colorants.len()
-                || (source.color_space == PrintColorSpace::Separation && names.len() != 1)
-                || source.colorants.iter().any(|n| ["All", "None"].contains(&n.as_str()))
-            {
-                return Err("Special, duplicate or unresolved named colourants require explicit PDF reconciliation".into());
-            }
-            if let Some(ink) = &paint.ink {
-                if source.colorants.len() != 1 || source.colorants.first() != Some(ink) {
-                    return Err("Decoded spot paint does not retain every original named colourant".into());
-                }
-            } else if model != Some("cmyk") || source.colorants.iter().any(|n| !["Cyan", "Magenta", "Yellow", "Black"].contains(&n.as_str())) {
-                return Err("Named colourants require retained component values".into());
-            }
-            // A process-named Separation/DeviceN paint writes only its named
-            // channels. OPM 1 does not suppress even a zero named component.
-            values.retain(|name, _| names.contains(name));
-            if values.len() != names.len() {
-                return Err("Named colourant components are incomplete".into());
-            }
-            Ok(values)
-        }
-        _ => Err("Original colour space/profile needs a qualified tonal prediction".into()),
-    }
-}
+pub(crate) use crate::tone::source_tones;
 pub fn compare(census: &Census, render: &Render, tolerance_mm: Option<f64>) -> Result<Comparison, String> {
     let uncertainty_mm = render.pixel_pitch_mm * 2.0f64.sqrt() + 0.000002 + census.paints.iter().map(|p| p.geometry_error_mm).fold(0.0, f64::max);
     let mut issues = census.unresolved.clone();
@@ -276,6 +225,7 @@ pub fn compare(census: &Census, render: &Render, tolerance_mm: Option<f64>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tone::tones;
     #[test]
     fn tones_keep_named_ink_tints_and_do_not_invent_rgb_conversion() {
         assert_eq!(tones(&serde_json::json!({"tint":0.25}), Some("Original white")).unwrap()["Original white"], 0.25);
