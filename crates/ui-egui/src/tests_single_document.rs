@@ -17,7 +17,13 @@ fn single() -> (VectorcraftApp, Inbox, HostInbox) {
 }
 
 fn hand(app: &mut VectorcraftApp, inbox: &HostInbox, name: &str, bytes: &[u8]) {
-    inbox.lock().unwrap().push(HostOpen { name: name.to_string(), bytes: bytes.to_vec(), print_production: false, separations: None });
+    inbox.lock().unwrap().push(HostOpen {
+        name: name.to_string(),
+        bytes: bytes.to_vec(),
+        print_production: false,
+        separations: None,
+        raster_effects_ppi: None,
+    });
     app.drain_inbox();
 }
 
@@ -119,6 +125,7 @@ fn production_context_is_validated_before_replacing_the_file_and_installed_befor
         bytes: CIRCLE.to_vec(),
         print_production: false,
         separations: Some(Context::default()),
+        raster_effects_ppi: None,
     });
     app.drain_inbox();
     assert_eq!(titles(&app), ["original.svg"]);
@@ -129,6 +136,7 @@ fn production_context_is_validated_before_replacing_the_file_and_installed_befor
         bytes: CIRCLE.to_vec(),
         print_production: false,
         separations: Some(context.clone()),
+        raster_effects_ppi: None,
     });
     app.drain_inbox();
     assert_eq!(titles(&app), ["configured.svg"]);
@@ -150,9 +158,38 @@ fn reopening_a_separation_keeps_its_docked_panel_in_place() {
         bytes: SQUARE.to_vec(),
         print_production: false,
         separations: Some(Context { label: "Reporter".into(), ..Default::default() }),
+        raster_effects_ppi: None,
     });
     app.drain_inbox();
     assert_eq!(app.ui.open_panel, None, "a docked panel must not also pop out over the artwork");
     assert_eq!(serde_json::to_value(&app.ui.docking).unwrap(), layout);
     assert_eq!(titles(&app), ["docked.svg"]);
+}
+
+#[test]
+fn the_page_sets_a_floor_for_the_raster_effects_resolution_without_marking_the_file_changed() {
+    let (mut app, _, host) = single();
+    let open = |host: &HostInbox, name: &str, bytes: Vec<u8>, ppi: Option<f64>| {
+        host.lock().unwrap().push(HostOpen {
+            name: name.into(),
+            bytes,
+            print_production: false,
+            separations: None,
+            raster_effects_ppi: ppi.map(|p: f64| p as u32),
+        });
+    };
+    open(&host, "job.svg", SQUARE.to_vec(), Some(300.0));
+    app.drain_inbox();
+    let st = app.session.active().unwrap();
+    assert_eq!(st.doc.raster_effects_ppi, 300.0, "a file at 72 ppi is raised to the page's 300");
+    assert!(!st.is_dirty(), "nothing to save: the file is as it arrived plus the page's floor");
+    // A file already finer keeps its own; without a floor nothing changes.
+    app.run("document.rasterEffectsSettings", json!({"resolution": 600})).unwrap();
+    let saved = vectorcraft_format::save_file(&app.session.active().unwrap().doc);
+    open(&host, "fine.vectorcraft", saved, Some(300.0));
+    app.drain_inbox();
+    assert_eq!(app.session.active().unwrap().doc.raster_effects_ppi, 600.0);
+    open(&host, "plain.svg", SQUARE.to_vec(), None);
+    app.drain_inbox();
+    assert_eq!(app.session.active().unwrap().doc.raster_effects_ppi, 72.0);
 }

@@ -202,6 +202,10 @@ pub struct HostOpen {
     pub bytes: Vec<u8>,
     pub print_production: bool,
     pub separations: Option<vectorcraft_engine::cmd::production_separations::Context>,
+    /// The least raster-effects resolution (ppi) the opened document keeps: a file read from a PDF
+    /// starts at 72, which writes its shadows and glows too coarse for print. Raised on open, not
+    /// an edit (the document stays unmodified).
+    pub raster_effects_ppi: Option<u32>,
 }
 pub type HostInbox = Arc<Mutex<Vec<HostOpen>>>;
 pub type HostOpenResult = Box<dyn Fn(Result<(), String>)>;
@@ -1029,7 +1033,7 @@ impl VectorcraftApp {
                 io::report_open_error(self, &name, &e);
             }
         }
-        for HostOpen { name, bytes, print_production, separations } in handed {
+        for HostOpen { name, bytes, print_production, separations, raster_effects_ppi } in handed {
             if let Some(c) = &separations
                 && let Err(e) = c.validate()
             {
@@ -1049,6 +1053,17 @@ impl VectorcraftApp {
                     let context = serde_json::to_value(c).map_err(|e| e.to_string())?;
                     self.run("production.separations.configure", serde_json::json!({"context":context}))?;
                     self.run("window.panel.activate", serde_json::json!({"panel":"productionSeparations"}))?;
+                }
+                if let Some(ppi) = raster_effects_ppi.filter(|p| (1..=2400).contains(p)).map(f64::from)
+                    && let Some(st) = self.session.active_mut()
+                    && st.doc.raster_effects_ppi < ppi
+                {
+                    // As the file arrived plus the page's floor: nothing to save, nothing to undo.
+                    let clean = !st.is_dirty();
+                    std::sync::Arc::make_mut(&mut st.doc).raster_effects_ppi = ppi;
+                    if clean {
+                        st.mark_saved();
+                    }
                 }
                 Ok(r)
             });

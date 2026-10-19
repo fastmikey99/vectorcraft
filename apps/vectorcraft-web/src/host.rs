@@ -15,6 +15,10 @@
 //!   `vectorcraft:failed` carrying it when nothing is open or the format can't be written.
 //!   With `selectedOnly`, only the selection: one selected image in a raster format comes as its
 //!   own pixels as embedded, and the `save` carries the selection's `bounds` in document points.
+//! - `vectorcraft:open` may carry `rasterEffectsResolution` (ppi): the opened document's
+//!   raster-effects resolution is raised to at least that, without marking it changed (a file read
+//!   from a PDF starts at 72 ppi; shadows and glows are written at it). `ready` says
+//!   `rasterEffectsResolution: true`.
 //! - `vectorcraft:selection` (to the parent): `{ image, copies, otherSizes }` whenever it changes:
 //!   whether exactly one image is selected, and how many other copies of it (same pixels) the
 //!   document holds at the same printed size and at other sizes. `ready` says `selection: true`.
@@ -123,6 +127,7 @@ impl Bridge {
             ("printProduction", true.into()),
             ("productionSeparations", true.into()),
             ("selection", true.into()),
+            ("rasterEffectsResolution", true.into()),
         ]);
     }
 
@@ -314,6 +319,18 @@ impl Bridge {
                         bridge.post_failed("vectorcraft:open: printProduction must be a boolean");
                         return;
                     }
+                    let ppi = js_sys::Reflect::get(&data, &JsValue::from_str("rasterEffectsResolution")).unwrap_or(JsValue::UNDEFINED);
+                    let raster_effects_ppi = if ppi.is_undefined() {
+                        None
+                    } else {
+                        match ppi.as_f64().filter(|p| p.is_finite() && (1.0..=2400.0).contains(p)) {
+                            Some(p) => Some(p.round() as u32),
+                            None => {
+                                bridge.post_failed("vectorcraft:open: rasterEffectsResolution must be a ppi from 1 to 2400");
+                                return;
+                            }
+                        }
+                    };
                     let value = js_sys::Reflect::get(&data, &JsValue::from_str("separations")).unwrap_or(JsValue::UNDEFINED);
                     let separations = if value.is_undefined() {
                         None
@@ -340,6 +357,7 @@ impl Bridge {
                         bytes: open.bytes,
                         print_production: flag.as_bool().unwrap_or(false),
                         separations,
+                        raster_effects_ppi,
                     });
                     wake();
                 }
