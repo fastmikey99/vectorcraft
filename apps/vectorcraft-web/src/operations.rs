@@ -59,11 +59,75 @@ pub fn write_export(app: &mut VectorcraftApp, export: &protocol::Export) -> Resu
     Ok((format!("{stem}.{}", export.extension), bytes, bounds, false))
 }
 
+/// An image's printed frame: its pixel width and height through its transform, in points.
+fn frame(im: &vectorcraft_doc::ImageObject) -> (f64, f64) {
+    let [a, b, c, d, _, _] = im.xf.as_coeffs();
+    (a.hypot(b) * f64::from(im.width), c.hypot(d) * f64::from(im.height))
+}
+
+/// The images in `doc` showing the same pixels as image `id` → (those at its printed size, itself
+/// included, in document order; how many at other sizes). Sizes within a hundredth of a point match.
+pub fn copies_of(doc: &vectorcraft_doc::Document, id: vectorcraft_doc::NodeId) -> (Vec<vectorcraft_doc::NodeId>, usize) {
+    let Some(vectorcraft_doc::NodeKind::Image(me)) = doc.node(id).map(|n| &n.kind) else { return (vec![], 0) };
+    let (w, h) = frame(me);
+    let (mut same, mut other) = (vec![], 0);
+    doc.walk(|n| {
+        if let vectorcraft_doc::NodeKind::Image(im) = &n.kind
+            && im.key == me.key
+            && (im.width, im.height) == (me.width, me.height)
+        {
+            let (iw, ih) = frame(im);
+            if (iw - w).abs() < 0.01 && (ih - h).abs() < 0.01 { same.push(n.id) } else { other += 1 }
+        }
+    });
+    (same, other)
+}
+
+/// What is selected in the active document, for `vectorcraft:selection`.
+pub fn selection(app: &VectorcraftApp) -> protocol::Selection {
+    let Some(st) = app.session.active() else { return protocol::Selection::default() };
+    match st.selection.objects.as_slice() {
+        [id] if matches!(st.doc.node(*id).map(|n| &n.kind), Some(vectorcraft_doc::NodeKind::Image(_))) => {
+            let (same, other_sizes) = copies_of(&st.doc, *id);
+            protocol::Selection { image: true, copies: same.len().saturating_sub(1), other_sizes }
+        }
+        _ => protocol::Selection::default(),
+    }
+}
+
 /// Place `place`'s file in place of the one selected object (with nothing selected, at `at`) →
-/// the ids of what was placed. One undo step (`file.place`).
+/// the ids of what was placed. One undo step (`file.place`; with `copies`, `command.batch`).
 pub fn place_file(app: &mut VectorcraftApp, place: &protocol::Place) -> Result<Vec<u64>, String> {
     let st = app.session.active().ok_or("vectorcraft:place: no document is open")?;
     let selected = st.selection.objects.clone();
+    if place.copies {
+        let [id] = selected.as_slice() else { return Err("vectorcraft:place: select the one image whose copies to replace".to_string()) };
+        if !matches!(st.doc.node(*id).map(|n| &n.kind), Some(vectorcraft_doc::NodeKind::Image(_))) {
+            return Err("vectorcraft:place: `copies` replaces an image: select one image".to_string());
+        }
+        let (ids, _) = copies_of(&st.doc, *id);
+        let data = vectorcraft_format::base64_encode(&place.bytes);
+        let commands: Vec<serde_json::Value> = ids
+            .iter()
+            .flat_map(|id| {
+                [
+                    serde_json::json!({ "command": "select.set", "params": { "ids": [id.0] } }),
+                    serde_json::json!({ "command": "file.place", "params": { "name": place.name, "dataBase64": data, "replace": true, "crop": "crop", "fitReplaced": true } }),
+                ]
+            })
+            .collect();
+        let r = app.run("command.batch", serde_json::json!({ "label": "Place", "commands": commands }))?;
+        let placed: Vec<u64> = r
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            // Every other result is a place's (the select.set steps between answer with ids too).
+            .map(|results| {
+                results.iter().skip(1).step_by(2).filter_map(|r| r.get("ids")?.as_array()).flatten().filter_map(serde_json::Value::as_u64).collect()
+            })
+            .unwrap_or_default();
+        app.run("select.set", serde_json::json!({ "ids": placed }))?;
+        return Ok(placed);
+    }
     let replace = match selected.as_slice() {
         [] => false,
         [_] => true,
@@ -177,5 +241,54 @@ mod tests {
         assert_eq!(ids.len(), 1);
         app.run("edit.undo", json!({})).unwrap();
         assert_eq!(app.session.active().unwrap().doc, before);
+    }
+
+    const PNG_A: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 6, 0, 0, 0, 114, 182, 13, 36, 0, 0, 0, 17, 73, 68,
+        65, 84, 120, 156, 99, 56, 33, 39, 215, 0, 194, 12, 48, 6, 0, 56, 82, 6, 17, 216, 232, 162, 145, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+    const PNG_B: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 6, 0, 0, 0, 114, 182, 13, 36, 0, 0, 0, 17, 73, 68,
+        65, 84, 120, 156, 99, 144, 147, 59, 241, 31, 132, 25, 96, 12, 0, 65, 228, 8, 13, 149, 140, 250, 4, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96,
+        130,
+    ];
+
+    /// Image A placed at `rect` with nothing selected → its id.
+    fn put(app: &mut VectorcraftApp, rect: [f64; 4]) -> u64 {
+        app.run("select.set", json!({"ids": []})).unwrap();
+        place_file(app, &protocol::place(Some("a.png".into()), Some(PNG_A.to_vec()), Some(rect.to_vec())).unwrap()).unwrap()[0]
+    }
+
+    #[test]
+    fn selection_counts_copies_of_one_image_by_printed_size_and_copies_replace_them_in_one_undo_step() {
+        let mut app = app();
+        assert_eq!(selection(&app), protocol::Selection::default());
+        let (a, b) = (put(&mut app, [0.0, 0.0, 20.0, 20.0]), put(&mut app, [40.0, 0.0, 20.0, 20.0]));
+        let _bigger = put(&mut app, [0.0, 40.0, 40.0, 40.0]);
+        app.run("select.set", json!({"ids": [a]})).unwrap();
+        assert_eq!(selection(&app), protocol::Selection { image: true, copies: 1, other_sizes: 1 });
+        // A path is not an image; two images are not one.
+        app.run("select.set", json!({"ids": [a, b]})).unwrap();
+        assert_eq!(selection(&app), protocol::Selection::default());
+        app.run("select.set", json!({"ids": [a]})).unwrap();
+        let before = app.session.active().unwrap().doc.clone();
+        let undo = app.session.active().unwrap().history.undo.len();
+        let place = protocol::place_copies(Some("b.png".into()), Some(PNG_B.to_vec()), None, Some(true)).unwrap();
+        let placed = place_file(&mut app, &place).unwrap();
+        assert_eq!(placed.len(), 2, "the selected image and its one same-size copy");
+        let st = app.session.active().unwrap();
+        assert_eq!(st.history.undo.len(), undo + 1, "one undo step");
+        assert_eq!(st.selection.objects.len(), 2, "what was placed is selected");
+        // The bigger copy was left alone, and is now the only image showing A.
+        let mut keys = vec![];
+        st.doc.walk(|n| {
+            if let vectorcraft_doc::NodeKind::Image(im) = &n.kind {
+                keys.push(im.key.clone())
+            }
+        });
+        assert_eq!(keys.len(), 3);
+        app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(app.session.active().unwrap().doc, before);
+        assert!(protocol::place_copies(Some("b.png".into()), Some(PNG_B.to_vec()), Some(vec![0.0, 0.0, 1.0, 1.0]), Some(true)).is_err());
     }
 }
