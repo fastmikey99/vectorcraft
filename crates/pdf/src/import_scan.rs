@@ -20,7 +20,7 @@ use craft_pdf::interpret::CacheKey;
 use craft_pdf::syntax::Pdf;
 use craft_pdf::syntax::content::TypedIter;
 use craft_pdf::syntax::content::ops::TypedInstruction;
-use craft_pdf::syntax::object::{Array, Dict, FromBytes, MaybeRef, Name, Object, ObjectIdentifier, dict_or_stream};
+use craft_pdf::syntax::object::{Array, Dict, FromBytes, MaybeRef, Name, Number, Object, ObjectIdentifier, dict_or_stream};
 use craft_pdf::syntax::page::{Page, Resources};
 
 use crate::import_color::ink_names;
@@ -529,6 +529,13 @@ impl Walker<'_, '_> {
             order.issues.insert(issue.into());
         }
     }
+    fn unresolved_graphics_state(&mut self, reason: &str) {
+        self.order_issue(reason);
+        if let Some(s) = self.states.last_mut() {
+            s.image_compositing_unresolved = true;
+            s.source_effects_unresolved = true;
+        }
+    }
     fn image_mark(&mut self, stream: &craft_pdf::syntax::object::Stream<'_>, res: &Resources<'_>, inline: bool) {
         if self.out.print_order.is_none() || !self.is_visible() {
             return;
@@ -908,7 +915,25 @@ impl Walker<'_, '_> {
                 TypedInstruction::SaveState(_) => self.save(),
                 TypedInstruction::RestoreState(_) => self.restore(),
                 TypedInstruction::SetGraphicsState(gs) => {
-                    if let Some(d) = res.get_ext_g_state(gs.0)
+                    let dictionary = res.get_ext_g_state(gs.0);
+                    if let Some(d) = &dictionary {
+                        let invalid_flag = [b"OP".as_slice(), b"op"].iter().any(|key| d.contains_key(key) && d.get::<bool>(key).is_none());
+                        // Integer conversion truncates real PDF numbers. Compare the typed
+                        // number variants so a fractional (or real-valued) OPM is not
+                        // silently normalized into one of the two integer modes.
+                        let invalid_mode = d.contains_key(b"OPM") && d.get::<Number>(b"OPM").is_none_or(|n| n != Number::ZERO && n != Number::ONE);
+                        if invalid_flag || invalid_mode {
+                            self.unresolved_graphics_state("Malformed graphics-state overprint parameters require reconciliation");
+                        }
+                    } else {
+                        self.unresolved_graphics_state("Missing or malformed extended graphics-state resource requires reconciliation");
+                        if let Some(s) = self.states.last_mut() {
+                            // The missing dictionary could also have changed RI. An
+                            // image override can resolve RI, never the rest of the state.
+                            s.rendering_intent = crate::PrintRenderingIntent::Unresolved;
+                        }
+                    }
+                    if let Some(d) = dictionary
                         && let Some(s) = self.states.last_mut()
                     {
                         if d.contains_key(b"RI") {
@@ -921,7 +946,8 @@ impl Walker<'_, '_> {
                         s.stroke = stroke.unwrap_or(s.stroke);
                         // Without `/op`, `/OP` sets both.
                         s.fill = d.get::<bool>(b"op").or(stroke).unwrap_or(s.fill);
-                        s.nonzero = d.get::<u8>(b"OPM").map_or(s.nonzero, |m| m != 0);
+                        s.nonzero =
+                            d.get::<Number>(b"OPM").filter(|n| *n == Number::ZERO || *n == Number::ONE).map_or(s.nonzero, |n| n == Number::ONE);
                         // ISO 32000-1 Table 58: Default restores the page-start
                         // device state. It adds no effect to the predictor's existing
                         // initial-device assumption; runtime qualification is separate.

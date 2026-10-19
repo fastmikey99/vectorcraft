@@ -1005,6 +1005,7 @@ mod tests {
             _ => "/OC /L BDC /GS gs /Ink cs 1 scn 10 10 50 50 re f EMC",
         };
         let stream = match mode {
+            "missing-state" => format!("/Missing gs {image} {vector}"),
             "after" => format!("{vector} {image}"),
             "balanced-form-owned" => format!(
                 "{image} /OC /W BDC /Fm Do EMC /OC /L BDC /KO gs /Ink cs 0 scn 10 10 50 50 re f EMC /OC /W BDC /Fm Do EMC /OC /L BDC /Fa Do /Fa Do EMC"
@@ -1172,6 +1173,7 @@ mod tests {
     #[test]
     fn image_prelude_refuses_later_images_unknown_context_and_technical_ink() {
         for mode in [
+            "missing-state",
             "intent-relative",
             "intent-absolute",
             "intent-perceptual",

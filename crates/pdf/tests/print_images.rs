@@ -637,3 +637,60 @@ fn implicit_intent_metadata_keeps_existing_preparation_serialization() {
     assert_eq!(serialized["rendering_intent_explicit"], true);
     assert_eq!(serialized["compositing_unresolved"], true);
 }
+
+#[test]
+fn unresolved_extgstate_is_not_silently_treated_as_the_previous_state() {
+    for entry in ["", "/Bad 42", "/Bad []", "/Bad (wrong)", "/Bad 99 0 R"] {
+        let bytes =
+            pdf("/Bad gs /Im Do 0 0 1 1 re f", &format!("/XObject << /Im 5 0 R >> /ExtGState << {entry} >>"), &[image("/ColorSpace /DeviceGray")]);
+        let raw = print_order(&bytes).unwrap();
+        assert!(raw.issues.iter().any(|i| i.contains("Missing or malformed extended graphics-state")), "{entry}");
+        let use_ = &raw.images[0][0];
+        assert!(use_.samples.is_some() && use_.compositing_unresolved);
+        assert_eq!(use_.effective_rendering_intent, vectorcraft_pdf::PrintRenderingIntent::Unresolved);
+        assert!(raw.issues.iter().any(|i| i.contains("Paint transfer")));
+    }
+}
+
+#[test]
+fn malformed_overprint_types_and_modes_remain_unresolved() {
+    for entries in ["/OP 1", "/op /Wrong", "/OP null", "/op []", "/OPM 2", "/OPM -1", "/OPM 0.5", "/OPM 0.0", "/OPM 1.0", "/OPM /Wrong", "/OPM true"]
+    {
+        let raw = print_order(&pdf(
+            "/Bad gs /Im Do 0 0 1 1 re B",
+            &format!("/XObject << /Im 5 0 R >> /ExtGState << /Bad << {entries} >> >>"),
+            &[image("/ColorSpace /DeviceGray")],
+        ))
+        .unwrap();
+        assert!(raw.issues.iter().any(|i| i.contains("Malformed graphics-state overprint")), "{entries}");
+        assert!(raw.images[0][0].compositing_unresolved && raw.images[0][0].samples.is_some());
+        assert!(raw.issues.iter().any(|i| i.contains("Paint transfer")));
+    }
+    for (entries, fill, mode) in
+        [("", false, 0), ("/OP true", true, 0), ("/OP true /op false /OPM 1", false, 1), ("/OP false /op true /OPM 0", true, 0)]
+    {
+        let raw = print_order(&pdf(
+            "/Good gs /Im Do",
+            &format!("/XObject << /Im 5 0 R >> /ExtGState << /Good << {entries} >> >>"),
+            &[image("/ColorSpace /DeviceGray")],
+        ))
+        .unwrap();
+        let use_ = &raw.images[0][0];
+        assert!(!use_.compositing_unresolved, "{entries}");
+        assert_eq!((use_.overprint, use_.overprint_mode), (fill, mode));
+        assert_eq!(raw.issues.len(), 1); // Only the ordinary independent-image reconciliation note.
+    }
+}
+
+#[test]
+fn unresolved_extgstate_restores_locally_but_retains_the_document_issue() {
+    let form = stream("/Subtype /Form /BBox [0 0 1 1] /Resources << /XObject << /Im 5 0 R >> /ExtGState << /Bad 42 >> >>", "/Bad gs /Im Do");
+    let raw = print_order(&pdf(
+        "q /Missing gs /Im Do Q /Im Do /Form Do /Im Do",
+        "/XObject << /Im 5 0 R /Form 6 0 R >>",
+        &[image("/ColorSpace /DeviceGray"), form],
+    ))
+    .unwrap();
+    assert_eq!(raw.images[0].iter().map(|i| i.compositing_unresolved).collect::<Vec<_>>(), [true, false, true, false]);
+    assert!(raw.issues.iter().any(|i| i.contains("extended graphics-state")));
+}

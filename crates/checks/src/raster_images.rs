@@ -1040,6 +1040,16 @@ mod tests {
         }
     }
     #[test]
+    fn missing_graphics_state_cannot_enter_physical_prediction() {
+        for state in ["/Missing gs", "q /Missing gs"] {
+            let bytes = pdf(0, 1.0, false, state);
+            let raw = vectorcraft_pdf::print_order(&bytes).unwrap();
+            let info = vectorcraft_pdf::production_info(&bytes).unwrap();
+            assert!(raw.images[0][0].samples.is_some());
+            assert!(paints(&info.pages[0], &raw.images[0], 0.0001).is_err());
+        }
+    }
+    #[test]
     fn raw_image_device_defaults_and_identity_keep_the_state_explicit() {
         for gs in ["Defaults", "Identity"] {
             let bytes = mixed_pdf(&format!("/{gs} gs {IMAGE}"), 0, 1.0, false, false);

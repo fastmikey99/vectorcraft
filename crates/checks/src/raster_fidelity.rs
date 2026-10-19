@@ -286,14 +286,27 @@ mod tests {
         image_with_mask_intent(samples, alpha, matrix, layer, extra, model, "")
     }
     fn image_with_mask_intent(samples: &str, alpha: &str, matrix: &str, layer: &str, extra: &str, model: &str, mask_intent: &str) -> Vec<u8> {
+        image_with_context(samples, alpha, matrix, layer, extra, model, (mask_intent, ""))
+    }
+    fn image_with_context(samples: &str, alpha: &str, matrix: &str, layer: &str, extra: &str, model: &str, context: (&str, &str)) -> Vec<u8> {
+        let (mask_intent, state) = context;
+        let resources = if state.is_empty() { String::new() } else { format!(" /ExtGState << {state} >>") };
         let content = format!("/OC /Layer BDC q {matrix} cm /Im Do Q {extra} EMC");
         crate::pdf::tests::objects_pdf(&[
             "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [7 0 R] /D << /Order [7 0 R] /ON [7 0 R] >> >> >>".into(),
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 144 144] /Resources << /Properties << /Layer 7 0 R >> /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>".into(),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 144 144] /Resources << /Properties << /Layer 7 0 R >> /XObject << /Im 5 0 R >>{resources} >> /Contents 4 0 R >>"
+            ),
             format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
-            format!("<< /Type /XObject /Subtype /Image /Width 3 /Height 3 /BitsPerComponent 8 /ColorSpace /{model} /SMask 6 0 R /Filter /ASCIIHexDecode /Length {} >>\nstream\n{samples}>\nendstream",samples.len()+1),
-            format!("<< /Type /XObject /Subtype /Image /Width 3 /Height 3 /BitsPerComponent 8 /ColorSpace /DeviceGray {mask_intent} /Filter /ASCIIHexDecode /Length {} >>\nstream\n{alpha}>\nendstream",alpha.len()+1),
+            format!(
+                "<< /Type /XObject /Subtype /Image /Width 3 /Height 3 /BitsPerComponent 8 /ColorSpace /{model} /SMask 6 0 R /Filter /ASCIIHexDecode /Length {} >>\nstream\n{samples}>\nendstream",
+                samples.len() + 1
+            ),
+            format!(
+                "<< /Type /XObject /Subtype /Image /Width 3 /Height 3 /BitsPerComponent 8 /ColorSpace /DeviceGray {mask_intent} /Filter /ASCIIHexDecode /Length {} >>\nstream\n{alpha}>\nendstream",
+                alpha.len() + 1
+            ),
             format!("<< /Type /OCG /Name ({layer}) >>"),
         ])
     }
@@ -389,6 +402,30 @@ mod tests {
             assert!(draft.raster_sources.is_empty() && !draft.diagnostics.is_empty());
             let r = request(&bytes, &[]);
             check(&format!("mask-intent-{intent}"), &r, &bytes, Status::Incomplete);
+        }
+    }
+    #[test]
+    fn unresolved_graphics_state_cannot_pass_raster_continuity() {
+        for (name, dictionary, expected) in [
+            ("missing", "", Status::Incomplete),
+            ("malformed", "/State 42", Status::Incomplete),
+            ("bad-stroke-flag", "/State << /OP 42 >>", Status::Incomplete),
+            ("bad-fill-flag", "/State << /op /Wrong >>", Status::Incomplete),
+            ("bad-mode", "/State << /OPM 2 >>", Status::Incomplete),
+            ("fractional-mode", "/State << /OPM 0.5 >>", Status::Incomplete),
+            ("valid-mode-zero", "/State << /OPM 0 >>", Status::Pass),
+            ("valid-mode-one", "/State << /OPM 1 >>", Status::Pass),
+        ] {
+            let bytes = image_with_context(SAMPLES, ALPHA, &format!("/State gs {MATRIX}"), "TECH Output", "", "DeviceGray", ("", dictionary));
+            let raw = vectorcraft_pdf::print_order(&bytes).unwrap();
+            assert_eq!(raw.images[0][0].compositing_unresolved, expected == Status::Incomplete, "{name}");
+            let draft = crate::prepare::capture(&bytes, "synthetic".into(), "job".into()).unwrap();
+            if expected == Status::Incomplete {
+                assert!(draft.raster_sources.is_empty());
+                assert!(draft.diagnostics.iter().any(|d| d.contains("graphics context")), "{name}: {:?}", draft.diagnostics);
+            }
+            let r = request(&bytes, &[]);
+            check(&format!("graphics-state-{name}"), &r, &bytes, expected);
         }
     }
     #[test]
