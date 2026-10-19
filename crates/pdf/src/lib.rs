@@ -69,6 +69,7 @@ mod preserve;
 mod presets;
 mod print;
 mod print_clip;
+mod print_clip_interval;
 mod print_color;
 mod print_image;
 mod print_order;

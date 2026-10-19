@@ -112,3 +112,36 @@ fn form_containment_matches_independent_samples_and_rejects_changed_planes() {
         }
     }
 }
+
+#[test]
+fn decimal_containment_keeps_full_source_and_defect_obligations() {
+    let source = original();
+    for (name, bbox, prefix, samples, matrix, expected) in [
+        ("decimal-form-contained", ".25 .25 71.75 71.75", "", SAMPLES, MATRIX, Status::Pass),
+        ("decimal-form-cancelled", ".25 .25 71.75 71.75", ".5 0 0 .5 0 0 cm 2 0 0 2 0 0 cm", SAMPLES, MATRIX, Status::Pass),
+        ("decimal-form-tone-defect", ".25 .25 71.75 71.75", "", "1120406080a0c0e0ff", MATRIX, Status::Fail),
+        ("decimal-form-shift-defect", ".25 .25 71.75 71.75", "", SAMPLES, "36 0 0 36 18.25 18.25", Status::Fail),
+        ("decimal-form-cropped", "18.25 18.25 40.25 54.25", "", SAMPLES, MATRIX, Status::Incomplete),
+        ("decimal-form-near-edge", "17.99 17.99 54.01 54.01", "", SAMPLES, MATRIX, Status::Incomplete),
+        ("decimal-form-path", ".25 .25 71.75 71.75", "0 0 72 72 re W n", SAMPLES, MATRIX, Status::Incomplete),
+        ("decimal-form-precision", ".25 .25 71.750000000000000001 71.75", "", SAMPLES, MATRIX, Status::Incomplete),
+    ] {
+        let bytes = form(samples, bbox, prefix, matrix);
+        let request = request_for_original(&source, &bytes, &[]);
+        check_source(name, &request, &bytes, &source, expected);
+        let report = crate::pdf::check(&request, &bytes).unwrap();
+        assert_eq!(report.validity, crate::Validity::Provisional);
+        assert_eq!(report.coverage.total, 35);
+        assert_ne!(report.status, Status::Pass);
+        assert_eq!(report.findings.iter().find(|f| f.obligation.key == "global/independent").unwrap().status, Status::Incomplete);
+    }
+    let source = form(SAMPLES, ".25 .25 71.75 71.75", "", "35.5 0 0 35.5 18.25 18.25");
+    for (name, matrix, expected) in [
+        ("decimal-original-unchanged", "35.5 0 0 35.5 18.25 18.25", Status::Pass),
+        ("decimal-original-shifted", "35.5 0 0 35.5 19.25 18.25", Status::Fail),
+    ] {
+        let bytes = form(SAMPLES, ".25 .25 71.75 71.75", "", matrix);
+        let request = request_for_original(&source, &bytes, &[]);
+        check_source(name, &request, &bytes, &source, expected);
+    }
+}

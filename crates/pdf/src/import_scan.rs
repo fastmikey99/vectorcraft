@@ -392,8 +392,10 @@ struct State {
     devicen_attributes: [bool; 2],
     matrix: Option<vectorcraft_geom::Affine>,
     exact_matrix: Option<[i64; 6]>,
+    interval_matrix: Option<crate::print_clip_interval::Matrix>,
     clip_context: bool,
     form_clip: Option<[i64; 4]>,
+    form_clip_interior: Option<[i64; 4]>,
     image_compositing_unresolved: bool,
     rendering_intent: crate::PrintRenderingIntent,
     rendering_intent_explicit: bool,
@@ -578,6 +580,7 @@ impl Walker<'_, '_> {
             if state.matrix.is_none() {
                 order.issues.insert("Image placement transform is unresolved".into());
             }
+            let containing_form_clip = state.form_clip.filter(|bounds| state.exact_matrix.is_some_and(|m| crate::print_clip::contains(*bounds, m)));
             order.images.push(crate::PrintImageUse {
                 samples,
                 sample_error,
@@ -593,23 +596,33 @@ impl Walker<'_, '_> {
                 inline,
                 matrix: state.matrix.map(|m| m.as_coeffs()),
                 clip_context: state.clip_context,
-                containing_form_clip: state.form_clip.filter(|bounds| state.exact_matrix.is_some_and(|m| crate::print_clip::contains(*bounds, m))),
+                containing_form_clip,
+                form_clip_interior: if containing_form_clip.is_some() {
+                    None
+                } else {
+                    state
+                        .form_clip_interior
+                        .filter(|bounds| state.interval_matrix.is_some_and(|m| crate::print_clip_interval::contains(*bounds, m) == Some(true)))
+                },
                 overprint: state.fill,
                 overprint_mode: u8::from(state.nonzero),
                 description,
             });
         }
     }
-    fn concat(&mut self, matrix: [f64; 6], exact: Option<[i64; 6]>) {
+    fn concat(&mut self, matrix: [f64; 6], exact: Option<[i64; 6]>, interval: Option<crate::print_clip_interval::Matrix>) {
         if self.out.print_order.is_none() {
             return;
         }
         if let Some(s) = self.states.last_mut() {
             s.exact_matrix = s.exact_matrix.zip(exact).and_then(|(a, b)| crate::print_clip::concat(a, b));
+            s.interval_matrix = s.interval_matrix.zip(interval).and_then(|(a, b)| crate::print_clip_interval::concat(a, b));
             s.matrix = s
                 .matrix
                 .map(|m| m * vectorcraft_geom::Affine::new(matrix))
                 .filter(|m| m.as_coeffs().iter().all(|v| v.is_finite() && v.abs() <= 1.0e12));
+            s.interval_matrix =
+                s.interval_matrix.filter(|m| s.matrix.is_some_and(|actual| crate::print_clip_interval::agrees(*m, actual.as_coeffs())));
         }
     }
     fn order_mark(&mut self, stroke: bool) {
@@ -1014,12 +1027,18 @@ impl Walker<'_, '_> {
                 TypedInstruction::Transform(m) => {
                     let numbers = [m.0, m.1, m.2, m.3, m.4, m.5];
                     let exact = crate::print_clip::content_matrix(data.get(start..iter.committed()).unwrap_or_default(), numbers);
-                    self.concat(numbers.map(|n| n.as_f64()), exact);
+                    let interval = self
+                        .out
+                        .print_order
+                        .as_ref()
+                        .and_then(|_| crate::print_clip_interval::content_matrix(data.get(start..iter.committed()).unwrap_or_default(), numbers));
+                    self.concat(numbers.map(|n| n.as_f64()), exact, interval);
                 }
                 TypedInstruction::ClipNonZero(_) | TypedInstruction::ClipEvenOdd(_) => {
                     if let Some(s) = self.states.last_mut() {
                         s.clip_context = true;
                         s.form_clip = None;
+                        s.form_clip_interior = None;
                     }
                 }
                 TypedInstruction::SaveState(_) => self.save(),
@@ -1207,10 +1226,12 @@ impl Walker<'_, '_> {
                         if d.contains_key(b"Matrix") {
                             if let Some(matrix) = d.get::<[f64; 6]>(b"Matrix") {
                                 let exact = crate::print_clip::array(d, b"Matrix").and_then(crate::print_clip::integers);
-                                self.concat(matrix, exact);
+                                let interval = self.out.print_order.as_ref().and_then(|_| crate::print_clip_interval::array(d, b"Matrix"));
+                                self.concat(matrix, exact, interval);
                             } else if let Some(state) = self.states.last_mut() {
                                 state.matrix = None;
                                 state.exact_matrix = None;
+                                state.interval_matrix = None;
                             }
                         }
                         if let Some(state) = self.states.last_mut() {
@@ -1219,6 +1240,14 @@ impl Walker<'_, '_> {
                                 state.form_clip.zip(bounds).and_then(|(a, b)| crate::print_clip::intersect(a, b))
                             } else {
                                 bounds
+                            };
+                            let interior = state
+                                .interval_matrix
+                                .and_then(|m| crate::print_clip_interval::interior(m, crate::print_clip_interval::array(d, b"BBox")?));
+                            state.form_clip_interior = if state.clip_context {
+                                state.form_clip_interior.zip(interior).and_then(|(a, b)| crate::print_clip::intersect(a, b))
+                            } else {
+                                interior
                             };
                             state.clip_context = true;
                         }
@@ -1424,6 +1453,7 @@ fn walk_page<'w, 'p>(
         states: vec![State {
             matrix: Some(vectorcraft_geom::Affine::IDENTITY),
             exact_matrix: Some(crate::print_clip::IDENTITY),
+            interval_matrix: Some(crate::print_clip_interval::IDENTITY),
             ..Default::default()
         }],
         graphics_floor: 1,

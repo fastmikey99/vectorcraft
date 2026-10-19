@@ -71,15 +71,19 @@ fn exact_form_clips_preserve_census_and_refuse_unknown_or_cropping_contexts() {
         assert_eq!(uses.len(), 1, "{name}");
         assert!(uses[0].clip_context, "{name}");
         assert_eq!(uses[0].containing_form_clip.is_some(), eligible, "{name}");
+        let bounded = matches!(name, "real-box" | "real-matrix" | "cancelled-real");
+        assert_eq!(uses[0].form_clip_interior.is_some(), bounded, "{name}");
+        let captured = eligible || bounded;
         let capture = crate::prepare::capture(&bytes, "form-clip-test".into(), "synthetic".into()).unwrap();
-        assert_eq!(capture.raster_sources.len(), usize::from(eligible), "{name}: {:?}", capture.diagnostics);
+        assert_eq!(capture.raster_sources.len(), usize::from(captured), "{name}: {:?}", capture.diagnostics);
         assert!(!capture.diagnostics.is_empty(), "a boundary decision remains required");
         if let Some(dir) = &directory {
             std::fs::write(dir.join(format!("{name}.pdf")), &bytes).unwrap();
             std::fs::write(dir.join(format!("{name}-raw.json")), serde_json::to_vec(&order).unwrap()).unwrap();
             std::fs::write(dir.join(format!("{name}-capture.json")), serde_json::to_vec(&capture).unwrap()).unwrap();
         }
-        manifest.push(json!({"name":name,"eligible":eligible,"pdf_sha256":crate::sha256(&bytes)}));
+        manifest
+            .push(json!({"name":name,"eligible":captured,"exact_eligible":eligible,"bounded_eligible":bounded,"pdf_sha256":crate::sha256(&bytes)}));
     }
     if let Some(dir) = &directory {
         std::fs::write(dir.join("cases.json"), serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
@@ -192,3 +196,6 @@ fn exact_form_transforms_and_nested_bounds_match_independent_direct_placements()
         }
     }
 }
+
+#[path = "raster_prepare_decimal.rs"]
+mod decimal;

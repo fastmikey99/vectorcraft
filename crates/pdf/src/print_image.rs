@@ -56,6 +56,13 @@ pub struct PrintImageUse {
     /// unknown inherited clips and boundary-touch never receive this evidence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub containing_form_clip: Option<[i64; 4]>,
+    /// Conservative default-page-space rectangle wholly inside every enclosing
+    /// Form BBox and strictly containing all bounded image-corner intervals.
+    /// Decimal lexical values and actual parser/arithmetic rounding are enclosed;
+    /// path clips, uncertain arithmetic and boundary touch never gain this proof.
+    /// Only emitted when the exact integral witness above is unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub form_clip_interior: Option<[i64; 4]>,
     pub overprint: bool,
     pub overprint_mode: u8,
     pub description: PrintImageDescription,

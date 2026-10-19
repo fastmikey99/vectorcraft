@@ -462,3 +462,9 @@ Two Codex reviews, all nine CI gates, explicit physical tests, native/WASI parit
 A plain exact-grid CMYK image/Gray mask pair exports with image-owned alpha under a narrow untagged, nonstandard, noninterpolated, lossless policy. Complex/enclosing compositing retains the existing path. Both Gray and CMYK browser fixtures now resolve scoped source continuity after save/reopen while full-file eligibility stays incomplete.
 
 Two Codex reviews, full CI, native/WASI/Reporter replay and actual prior/current exporter separation-plane comparisons support this bounded extension. Headline readiness estimates and broader PDF, numerical and production-qualification gaps remain unchanged.
+
+## HC41 — Conservative decimal Form containment (2026-10-20)
+
+A separate bounded interval witness now establishes non-cropping containment for a strict decimal subset. Exact integer proof identities remain unchanged; unknown clips, ambiguous arithmetic and insufficient margins stay unresolved. Source capture retains the new witness without adding a manufacturing tolerance.
+
+Codex review, full CI, native/WASI/Reporter replay and independent transformed direct/Form comparisons support this bounded extension. Broader PDF, numerical and production qualification gaps remain open; headline readiness estimates are unchanged.
