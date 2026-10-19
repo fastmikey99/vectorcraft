@@ -5196,3 +5196,10 @@ theme	Appearance	Външен вид
 	Unassigned	Неназначено
 @msg	Invalid separation context or too many entries	Невалиден контекст на цветоотделка или твърде много записи
 @msg	Invalid or duplicate separation name/component	Невалидно или дублирано име на цветоотделка или компонент
+
+# Line weight check and pattern images: original translations, not native-speaker reviewed.
+	Check Line Weight	Проверка на дебелината на линиите
+	Clear Line Weight Check	Изчистване на проверката на дебелината
+	Pattern Images	Изображения в шарки
+	Export Pattern Image	Експортиране на изображение от шарка
+	Replace Pattern Image	Замяна на изображение в шарка

@@ -39,6 +39,7 @@ mod intertwine;
 mod layer;
 mod layerpanel;
 pub mod library;
+pub mod lineweight;
 pub mod linkfiles;
 pub mod links;
 mod live;
@@ -56,6 +57,7 @@ pub mod params;
 mod path;
 mod pathops;
 mod patterncmds;
+mod patternimages;
 pub mod pdfcmds;
 pub mod perspgrid;
 pub(crate) mod place;
@@ -278,6 +280,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(newdoc::specs());
         v.extend(place::specs());
         v.extend(links::specs());
+        v.extend(patternimages::specs());
         v.extend(linkfiles::specs());
         v.extend(pdfcmds::specs());
         v.extend(fileio::dxf::specs());
@@ -297,6 +300,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(cut::specs());
         v.extend(halftone::specs());
         v.extend(perspgrid::specs());
+        v.extend(lineweight::specs());
         v.extend(shortcutset::specs());
         v.extend(importmatches::specs());
         v

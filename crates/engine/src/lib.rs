@@ -2211,6 +2211,8 @@ mod tests_legacy_ai;
 #[cfg(test)]
 mod tests_library;
 #[cfg(test)]
+mod tests_lineweight;
+#[cfg(test)]
 mod tests_link_paths;
 #[cfg(test)]
 mod tests_linked_stops;
@@ -2264,6 +2266,8 @@ mod tests_pathops;
 mod tests_pathtype;
 #[cfg(test)]
 mod tests_pattern;
+#[cfg(test)]
+mod tests_patternimages;
 #[cfg(test)]
 mod tests_pdffidelity;
 #[cfg(test)]

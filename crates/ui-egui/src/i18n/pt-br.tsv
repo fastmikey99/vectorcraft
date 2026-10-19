@@ -3992,6 +3992,15 @@ axis	Both	Ambos
 @msg	unknown parameter `{key}`; the command takes no parameters	parâmetro desconhecido `{key}`; o comando não tem parâmetros
 @msg	unknown parameter `{key}`; the command takes: {keys}	parâmetro desconhecido `{key}`; o comando aceita: {keys}
 	Load EPS into Clipboard	Carregar EPS na Área de Transferência
+# Corner Radius: a field per corner of a live rectangle.
+
+# Pattern image resource commands
+	Pattern Images	Imagens em padrões
+	Export Pattern Image	Exportar imagem do padrão
+	Replace Pattern Image	Substituir imagem do padrão
+@msg	Line weight check failed: {e}	Falha ao verificar a espessura das linhas: {e}
+	Check Line Weight	Verificar espessura das linhas
+	Clear Line Weight Check	Limpar verificação de espessura das linhas
 	Drawer menu	Menu da gaveta
 	Toolbar: Show Controls	Barra de ferramentas: Mostrar controles
 	Single Corner Radius	Raio de Canto Único

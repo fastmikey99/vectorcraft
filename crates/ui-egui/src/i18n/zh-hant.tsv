@@ -4731,6 +4731,10 @@ lighting	Light	光源
 @msg	unknown parameter `{key}`; the command takes: {keys}	未知的參數 `{key}`；此指令接受：{keys}
 	Load EPS into Clipboard	將 EPS 載入剪貼簿
 @msg	an image of {w} × {h} pixels is too large to draw	{w} × {h} 像素的影像過大，無法繪製
+
+@msg	Line weight check failed: {e}	線寬檢查失敗：{e}
+	Check Line Weight	檢查線寬
+	Clear Line Weight Check	清除線寬檢查
 	Basic	基本
 	Fill and Stroke Controls	填色和筆畫控制項
 	Coloring Controls	顏色控制項
@@ -4749,6 +4753,11 @@ lighting	Light	光源
 	Softness	柔和度
 	Ambient Light	環境光
 	Light behind the object	光源位於物件後方
+
+# Pattern image resource commands
+	Pattern Images	圖樣中的影像
+	Export Pattern Image	匯出圖樣影像
+	Replace Pattern Image	取代圖樣影像
 # 3D light management.
 	Lights	光源清單
 	Add Light	新增光源

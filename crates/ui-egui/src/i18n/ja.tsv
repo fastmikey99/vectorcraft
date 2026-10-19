@@ -4707,6 +4707,10 @@ lighting	Light	ライト
 @msg	unknown parameter `{key}`; the command takes: {keys}	`{key}` は不明なパラメーターです。このコマンドで使えるパラメーター: {keys}
 	Load EPS into Clipboard	EPS をクリップボードに読み込む
 @msg	an image of {w} × {h} pixels is too large to draw	{w} × {h} ピクセルの画像は大きすぎて描画できません
+
+@msg	Line weight check failed: {e}	線幅のチェックに失敗しました: {e}
+	Check Line Weight	線幅をチェック
+	Clear Line Weight Check	線幅チェックを消去
 @msg	the image can't be read as a texture	この画像はテクスチャとして読み込めません
 	Basic	基本
 	Fill and Stroke Controls	塗りと線のコントロール
@@ -4730,6 +4734,11 @@ lighting	Light	ライト
 	Softness	柔らかさ
 	Ambient Light	環境光
 	Light behind the object	オブジェクトの背後のライト
+
+# Pattern image resource commands
+	Pattern Images	パターン内の画像
+	Export Pattern Image	パターン内の画像を書き出し
+	Replace Pattern Image	パターン内の画像を置換
 # 3D light management.
 	Lights	ライト一覧
 	Add Light	ライトを追加

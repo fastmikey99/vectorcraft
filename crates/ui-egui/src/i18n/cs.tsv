@@ -5060,6 +5060,10 @@ mark-style	Japanese	Japonské
 @msg	unknown parameter `{key}`; the command takes: {keys}	neznámý parametr `{key}`; příkaz přijímá: {keys}
 	Load EPS into Clipboard	Načíst EPS do schránky
 @msg	an image of {w} × {h} pixels is too large to draw	obraz o velikosti {w} × {h} obrazových bodů je příliš velký na vykreslení
+
+@msg	Line weight check failed: {e}	Kontrola tloušťky čar selhala: {e}
+	Check Line Weight	Zkontrolovat tloušťku čar
+	Clear Line Weight Check	Vymazat kontrolu tloušťky čar
 @msg	the image can't be read as a texture	obraz nelze načíst jako texturu
 	Fill and Stroke Controls	Ovládací prvky výplně a tahu
 	Coloring Controls	Ovládací prvky barev
@@ -5082,6 +5086,11 @@ mark-style	Japanese	Japonské
 	Softness	Měkkost
 	Ambient Light	Okolní světlo
 	Light behind the object	Světlo za objektem
+
+# Pattern image resource commands
+	Pattern Images	Obrazy ve vzorcích
+	Export Pattern Image	Exportovat obraz ze vzorku
+	Replace Pattern Image	Nahradit obraz ve vzorku
 # 3D light management.
 	Lights	Světla
 	Add Light	Přidat světlo

@@ -4631,6 +4631,10 @@ lighting	Light	광원
 @msg	unknown parameter `{key}`; the command takes: {keys}	알 수 없는 매개변수 `{key}`: 이 명령이 받는 매개변수: {keys}
 	Load EPS into Clipboard	EPS를 클립보드로 불러오기
 @msg	an image of {w} × {h} pixels is too large to draw	{w} × {h}픽셀 이미지는 너무 커서 그릴 수 없습니다
+
+@msg	Line weight check failed: {e}	선 두께 검사 실패: {e}
+	Check Line Weight	선 두께 검사
+	Clear Line Weight Check	선 두께 검사 지우기
 @msg	the image can't be read as a texture	이미지를 텍스처로 읽을 수 없습니다
 	Basic	기본
 	Fill and Stroke Controls	칠 및 획 컨트롤
@@ -4654,6 +4658,11 @@ lighting	Light	광원
 	Softness	부드러움
 	Ambient Light	주변광
 	Light behind the object	개체 뒤의 조명
+
+# Pattern image resource commands
+	Pattern Images	패턴 이미지
+	Export Pattern Image	패턴 이미지 내보내기
+	Replace Pattern Image	패턴 이미지 바꾸기
 # 3D light management.
 	Lights	광원 목록
 	Add Light	광원 추가

@@ -5185,3 +5185,11 @@ effect	Points	Σημεία
 	Unassigned	Μη αντιστοιχισμένο
 @msg	Invalid separation context or too many entries	Μη έγκυρο πλαίσιο διαχωρισμού ή πάρα πολλές καταχωρίσεις
 @msg	Invalid or duplicate separation name/component	Μη έγκυρο ή διπλό όνομα διαχωρισμού ή στοιχείο
+
+# Line weight check and pattern images: original translations, not native-speaker reviewed.
+	Check Line Weight	Έλεγχος πάχους γραμμών
+	Clear Line Weight Check	Απαλοιφή ελέγχου πάχους γραμμών
+	Pattern Images	Εικόνες σε μοτίβα
+	Export Pattern Image	Εξαγωγή εικόνας μοτίβου
+	Replace Pattern Image	Αντικατάσταση εικόνας μοτίβου
+@msg	Line weight check failed: {e}	Ο έλεγχος πάχους γραμμών απέτυχε: {e}

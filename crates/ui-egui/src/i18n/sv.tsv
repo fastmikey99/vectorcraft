@@ -5189,3 +5189,11 @@ theme	Appearance	Utseende
 	Unassigned	Ej tilldelad
 @msg	Invalid separation context or too many entries	Ogiltig separationskontext eller för många poster
 @msg	Invalid or duplicate separation name/component	Ogiltigt eller dubblerat separationsnamn eller komponent
+
+# Line weight check and pattern images: original translations, not native-speaker reviewed.
+	Check Line Weight	Kontrollera linjetjocklek
+	Clear Line Weight Check	Rensa kontroll av linjetjocklek
+	Pattern Images	Mönsterbilder
+	Export Pattern Image	Exportera mönsterbild
+	Replace Pattern Image	Ersätt mönsterbild
+@msg	Line weight check failed: {e}	Kontrollen av linjetjocklek misslyckades: {e}
