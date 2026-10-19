@@ -6,6 +6,7 @@ pub mod attribution;
 mod contract;
 mod contribution;
 mod coverage;
+mod feature_clusters;
 mod feature_offset;
 pub mod features;
 pub mod geometry;

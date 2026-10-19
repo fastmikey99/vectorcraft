@@ -70,7 +70,7 @@ pub(crate) fn solid_with_budget(census: &Census, page: usize, ink: &str, budget:
         path = boolean(&path, shape, if tone == 1.0 { BoolOp::Union } else { BoolOp::Difference })?;
         // Retain input error and a Boolean construction allowance (not a certified enclosure); never use it as
         // a manufacturing tolerance or suppress a small component.
-        construction_allowance_mm += paint.geometry_error_mm + sweep;
+        construction_allowance_mm += paint.geometry_error_mm + 2.0 * sweep;
     }
     Ok(Coverage { path, construction_allowance_mm })
 }

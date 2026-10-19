@@ -5,7 +5,7 @@ use crate::geometry::Boundary;
 use vectorcraft_geom::{BezPath, FillRule, PathData, Point};
 use vectorcraft_pathops::BoolOp;
 
-/// Aggregate construction work across a report, in retained/generated vertices.
+/// Aggregate construction work across a report, in vertices and cluster-search steps.
 /// The external worker deadline remains necessary: the planar sweep itself has
 /// no cooperative iteration budget and these bounds are not a termination proof.
 pub(crate) struct WorkBudget {
@@ -34,6 +34,33 @@ pub(crate) fn offset(path: &PathData, delta: f64, precision: f64) -> Result<Offs
     offset_with_budget(path, delta, precision, &mut WorkBudget::new())
 }
 pub(crate) fn offset_with_budget(path: &PathData, delta: f64, precision: f64, budget: &mut WorkBudget) -> Result<Offset, String> {
+    if !delta.is_finite() || !precision.is_finite() || !(0.000001..=0.001).contains(&precision) || path.anchor_count() > 20_000 {
+        return Err("Invalid or over-budget distance-band input".into());
+    }
+    if path.is_empty() || delta == 0.0 || path.subpaths.len() == 1 {
+        return offset_single(path, delta, precision, budget);
+    }
+    let clusters = crate::feature_clusters::split(path, delta.abs(), precision, budget)?;
+    if clusters.len() <= 1 {
+        return offset_single(path, delta, precision, budget);
+    }
+    let mut outputs = vec![];
+    let mut allowance = 0.0f64;
+    let mut count = 0usize;
+    for cluster in clusters {
+        let result = offset_single(&cluster, delta, precision, budget)?;
+        count = count.saturating_add(result.path.anchor_count());
+        if count > 100_000 {
+            return Err("Distance-band aggregate result budget exceeded".into());
+        }
+        allowance = allowance.max(result.band_approximation_mm);
+        outputs.push(result.path);
+    }
+    crate::feature_clusters::ensure_disjoint(&outputs, budget)?;
+    budget.charge(count)?;
+    Ok(Offset { path: PathData::new(outputs.into_iter().flat_map(|p| p.subpaths).collect()), band_approximation_mm: allowance })
+}
+fn offset_single(path: &PathData, delta: f64, precision: f64, budget: &mut WorkBudget) -> Result<Offset, String> {
     budget.charge(path.anchor_count())?;
     if !delta.is_finite() || !precision.is_finite() || !(0.000001..=0.001).contains(&precision) || path.anchor_count() > 20_000 {
         return Err("Invalid or over-budget distance-band input".into());
@@ -106,6 +133,69 @@ pub(crate) fn offset_with_budget(path: &PathData, delta: f64, precision: f64, bu
     budget.charge(out.anchor_count())?;
     Ok(Offset {
         path: out,
-        band_approximation_mm: sweep + roundoff + boundary.linear_error_mm() + radius * (1.0 - (std::f64::consts::PI / sides as f64).cos()),
+        band_approximation_mm: 2.0 * sweep + roundoff + boundary.linear_error_mm() + radius * (1.0 - (std::f64::consts::PI / sides as f64).cos()),
     })
+}
+
+#[cfg(test)]
+mod cluster_tests {
+    use super::*;
+    use vectorcraft_geom::{Affine, Rect, Shape};
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> PathData {
+        PathData::from_bezpath(&Rect::new(x, y, x + w, y + h).to_path(0.000001))
+    }
+    fn joined(paths: impl IntoIterator<Item = PathData>) -> PathData {
+        PathData::new(paths.into_iter().flat_map(|p| p.subpaths).collect())
+    }
+    #[test]
+    fn separated_shapes_agree_with_the_existing_single_arrangement() {
+        let circle = PathData::from_bezpath(&vectorcraft_geom::kurbo::Circle::new((10.0, 0.0), 0.3).to_path(0.000001));
+        let mut ring = rect(0.0, 0.0, 3.0, 3.0);
+        let mut hole = rect(1.0, 1.0, 1.0, 1.0);
+        hole.reverse();
+        ring.subpaths.extend(hole.subpaths);
+        for input in [joined([rect(0.0, 0.0, 1.0, 1.0), rect(4.0, 0.0, 1.0, 1.0)]), joined([ring, circle])] {
+            for delta in [-0.1, 0.1] {
+                let actual = offset(&input, delta, 0.0001).unwrap();
+                let expected = offset_single(&input, delta, 0.0001, &mut WorkBudget::new()).unwrap();
+                let comparison = crate::geometry::compare(&expected.path, &actual.path, 0.002, 0.0001).unwrap();
+                assert_eq!(comparison.status, crate::Status::Pass, "{}", comparison.reason);
+            }
+        }
+    }
+    #[test]
+    fn single_cluster_is_unchanged_and_failed_clusters_never_return_partial_output() {
+        let p = rect(0.0, 0.0, 1.0, 1.0);
+        let a = offset(&p, 0.1, 0.0001).unwrap();
+        let b = offset_single(&p, 0.1, 0.0001, &mut WorkBudget::new()).unwrap();
+        assert_eq!(a.path, b.path);
+        assert_eq!(a.band_approximation_mm, b.band_approximation_mm);
+        let large = PathData::from_bezpath(&vectorcraft_geom::kurbo::Circle::new((10_000.0, 0.0), 1000.0).to_path(0.000001));
+        assert!(offset(&joined([p, large]), 0.1, 0.000001).is_err());
+        let p = joined([rect(0.0, 0.0, 0.1, 1.0), rect(4.0, 0.0, 1.0, 1.0)]);
+        let actual = offset(&p, -0.1, 0.0001).unwrap();
+        let expected = offset(&rect(4.0, 0.0, 1.0, 1.0), -0.1, 0.0001).unwrap();
+        assert_eq!(actual.path, expected.path);
+        assert!(actual.band_approximation_mm >= expected.band_approximation_mm);
+    }
+    #[test]
+    fn separated_curves_exceeding_one_arrangement_capacity_keep_every_component() {
+        let circle = PathData::from_bezpath(&vectorcraft_geom::kurbo::Circle::new((0.0, 0.0), 0.3).to_path(0.000001));
+        let input = joined((0..16).map(|i| circle.transformed(Affine::translate((f64::from(i) * 3.0, 0.0)))));
+        assert!(offset_single(&input, -0.1, 0.0001, &mut WorkBudget::new()).is_err());
+        let actual = offset(&input, -0.1, 0.0001).unwrap();
+        assert_eq!(actual.path.subpaths.len(), 16);
+        let observation = crate::features::observe(
+            &input,
+            &crate::features::Criterion {
+                operation: crate::features::Operation::PositiveOpening,
+                diameter_mm: 0.2,
+                maximum_boundary_change_mm: 0.05,
+            },
+            0.0001,
+        )
+        .unwrap();
+        assert_eq!(observation.measurement.observed_components, 16);
+        assert_eq!(observation.measurement.status, crate::Status::Incomplete);
+    }
 }

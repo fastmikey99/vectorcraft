@@ -396,6 +396,10 @@ mod oracle_fixtures {
         inner.reverse();
         counter.subpaths.extend(inner.subpaths);
         cases.push(("negative-round-counter".into(), counter, Operation::NegativeClosing));
+        let separated = PathData::new(
+            (0..16).flat_map(|i| circle(0.3).transformed(vectorcraft_geom::Affine::translate((f64::from(i) * 3.0, 0.0))).subpaths).collect(),
+        );
+        cases.push(("positive-clustered-circles".into(), separated, Operation::PositiveOpening));
         let mut evidence = vec![];
         for (name, input, operation) in cases {
             let criterion = Criterion { operation, diameter_mm: 0.2, maximum_boundary_change_mm: 0.05 };
@@ -420,6 +424,6 @@ mod oracle_fixtures {
             )
             .unwrap();
         }
-        assert_eq!(evidence.len(), 15);
+        assert_eq!(evidence.len(), 16);
     }
 }
