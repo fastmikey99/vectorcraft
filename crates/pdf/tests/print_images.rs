@@ -462,3 +462,178 @@ fn compressed_stream_cut_midway_never_yields_complete_samples() {
     assert!(audit.images[0][0].samples.is_none());
     assert!(audit.images[0][0].sample_error.is_some());
 }
+
+#[test]
+fn explicit_image_intents_retain_samples_without_qualifying_the_output() {
+    use vectorcraft_pdf::PrintRenderingIntent as Intent;
+    for (space, data, expected) in [
+        ("/DeviceGray", "00ff>", vec![1., 0.]),
+        ("/DeviceCMYK", "ff00000000ff0000>", vec![1., 0., 0., 0., 0., 1., 0., 0.]),
+        ("[/Indexed /DeviceCMYK 1 <ff00000000ff0000>]", "0001>", vec![1., 0., 0., 0., 0., 1., 0., 0.]),
+    ] {
+        let mut hashes = vec![];
+        for (entry, intent) in [
+            ("", Intent::RelativeColorimetric),
+            ("/Intent /RelativeColorimetric", Intent::RelativeColorimetric),
+            ("/Intent /AbsoluteColorimetric", Intent::AbsoluteColorimetric),
+            ("/Intent /Perceptual", Intent::Perceptual),
+            ("/Intent /Saturation", Intent::Saturation),
+        ] {
+            let bytes = pdf(
+                "/Im Do",
+                "/XObject << /Im 5 0 R >>",
+                &[stream(
+                    &format!("/Subtype /Image /Width 2 /Height 1 /BitsPerComponent 8 /ColorSpace {space} /Filter /ASCIIHexDecode {entry}"),
+                    data,
+                )],
+            );
+            let raw = print_order(&bytes).unwrap();
+            let use_ = &raw.images[0][0];
+            assert_eq!(use_.effective_rendering_intent, intent);
+            assert_eq!(use_.description.rendering_intent, (!entry.is_empty()).then_some(intent));
+            assert_eq!(use_.rendering_intent_explicit, !entry.is_empty());
+            assert_eq!(use_.compositing_unresolved, !entry.is_empty());
+            let samples = use_.samples.as_ref().unwrap();
+            assert_eq!(tones(samples), expected);
+            assert_eq!(alphas(samples), [1., 1.]);
+            hashes.push(samples.sample_sha256.clone());
+        }
+        assert!(hashes.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+}
+
+#[test]
+fn image_intent_overrides_inherited_state_and_q_restores_it() {
+    use vectorcraft_pdf::PrintRenderingIntent as I;
+    let bytes = pdf(
+        "/Im Do /Perceptual ri /Im Do q /GS gs /Im Do /Own Do Q /Im Do q /Bad gs /Im Do /Own Do Q /Im Do",
+        "/XObject << /Im 5 0 R /Own 6 0 R >> /ExtGState << /GS << /RI /Saturation /ca 0.5 >> /Bad << /RI 17 >> >>",
+        &[image("/ColorSpace /DeviceGray"), image("/ColorSpace /DeviceGray /Intent /AbsoluteColorimetric")],
+    );
+    let raw = print_order(&bytes).unwrap();
+    let uses = &raw.images[0];
+    assert_eq!(
+        uses.iter().map(|i| i.effective_rendering_intent).collect::<Vec<_>>(),
+        [
+            I::RelativeColorimetric,
+            I::Perceptual,
+            I::Saturation,
+            I::AbsoluteColorimetric,
+            I::Perceptual,
+            I::Unresolved,
+            I::AbsoluteColorimetric,
+            I::Perceptual
+        ]
+    );
+    assert!(!uses[0].compositing_unresolved && !uses[0].rendering_intent_explicit);
+    assert!(uses[1..].iter().all(|i| i.compositing_unresolved && i.rendering_intent_explicit && i.samples.is_some()));
+    assert!(uses.iter().filter(|i| i.description.rendering_intent.is_some()).all(|i| i.compositing_unresolved));
+    let restored = print_order(&pdf("q /Perceptual ri /Im Do Q /Im Do", "/XObject << /Im 5 0 R >>", &[image("/ColorSpace /DeviceGray")])).unwrap();
+    assert_eq!(restored.images[0][1].effective_rendering_intent, I::RelativeColorimetric);
+    assert!(!restored.images[0][1].compositing_unresolved && !restored.images[0][1].rendering_intent_explicit);
+}
+
+#[test]
+fn invalid_intent_and_alternate_sources_cannot_gain_decoded_evidence() {
+    use vectorcraft_pdf::PrintRenderingIntent as I;
+    for entry in [
+        "/Intent /Unknown",
+        "/Intent (Perceptual)",
+        "/Intent null",
+        "/Intent 42",
+        "/Intent /Perceptual /Alternates []",
+        "/Intent /Perceptual /OPI << >>",
+    ] {
+        let raw = print_order(&pdf("/Im Do", "/XObject << /Im 5 0 R >>", &[image(&format!("/ColorSpace /DeviceGray {entry}"))])).unwrap();
+        let use_ = &raw.images[0][0];
+        assert!(use_.samples.is_none() && use_.sample_error.is_some() && use_.compositing_unresolved, "{entry}");
+        if !entry.contains("/Perceptual /") {
+            assert_eq!(use_.description.rendering_intent, Some(I::Unresolved));
+        }
+    }
+    let raw = print_order(&pdf("/Unknown ri /Im Do", "/XObject << /Im 5 0 R >>", &[image("/ColorSpace /DeviceGray")])).unwrap();
+    assert_eq!(raw.images[0][0].effective_rendering_intent, I::Unresolved);
+    assert!(raw.images[0][0].compositing_unresolved);
+}
+
+#[test]
+fn mask_intent_samples_retain_a_separate_unqualified_declaration() {
+    for (key, mask_dict) in [("SMask", "/ColorSpace /DeviceGray /BitsPerComponent 8"), ("Mask", "/ImageMask true /BitsPerComponent 1")] {
+        for entry in [
+            "",
+            "/Intent /RelativeColorimetric",
+            "/Intent /AbsoluteColorimetric",
+            "/Intent /Perceptual",
+            "/Intent /Saturation",
+            "/Intent /Unknown",
+            "/Intent 42",
+        ] {
+            let raw = print_order(&pdf(
+                "/Im Do",
+                "/XObject << /Im 5 0 R >>",
+                &[
+                    image(&format!("/ColorSpace /DeviceGray /Intent /Perceptual /{key} 6 0 R")),
+                    stream(&format!("/Subtype /Image /Width 1 /Height 1 {mask_dict} {entry}"), "x"),
+                ],
+            ))
+            .unwrap();
+            let use_ = &raw.images[0][0];
+            assert_eq!(use_.samples.is_some(), !matches!(entry, "/Intent /Unknown" | "/Intent 42"), "{key} {entry}");
+            assert_eq!(use_.description.mask_rendering_intent.is_some(), !entry.is_empty());
+            assert!(use_.compositing_unresolved);
+        }
+    }
+    let raw = print_order(&pdf(
+        "/Im Do",
+        "/XObject << /Im 5 0 R >> /ColorSpace << /DefaultGray /DeviceRGB >>",
+        &[image("/ColorSpace /DeviceGray /Intent /Perceptual")],
+    ))
+    .unwrap();
+    assert!(raw.images[0][0].samples.is_none());
+    assert!(raw.images[0][0].description.issues.iter().any(|i| i.contains("default substitution")));
+}
+
+#[test]
+fn inline_and_form_intent_scopes_are_retained() {
+    use vectorcraft_pdf::PrintRenderingIntent as I;
+    let form = stream("/Subtype /Form /BBox [0 0 1 1]", "/Saturation ri /Im Do");
+    let raw = print_order(&pdf(
+        "/Perceptual ri /Form Do /Im Do BI /W 1 /H 1 /BPC 8 /CS /G /Intent /AbsoluteColorimetric ID x EI",
+        "/XObject << /Im 5 0 R /Form 6 0 R >>",
+        &[image("/ColorSpace /DeviceGray"), form],
+    ))
+    .unwrap();
+    assert_eq!(
+        raw.images[0].iter().map(|i| i.effective_rendering_intent).collect::<Vec<_>>(),
+        [I::Saturation, I::Perceptual, I::AbsoluteColorimetric]
+    );
+    assert!(raw.images[0].iter().all(|i| i.compositing_unresolved && i.samples.is_some()));
+}
+
+#[test]
+fn mask_intent_alone_keeps_sample_consumers_unqualified() {
+    let raw = print_order(&pdf(
+        "/Im Do",
+        "/XObject << /Im 5 0 R >>",
+        &[image("/ColorSpace /DeviceGray /SMask 6 0 R"), image("/ColorSpace /DeviceGray /Intent /Perceptual")],
+    ))
+    .unwrap();
+    let use_ = &raw.images[0][0];
+    assert!(use_.samples.is_some() && use_.compositing_unresolved);
+    assert!(use_.description.rendering_intent.is_none() && !use_.rendering_intent_explicit);
+    assert_eq!(use_.description.mask_rendering_intent, Some(vectorcraft_pdf::PrintRenderingIntent::Perceptual));
+}
+
+#[test]
+fn implicit_intent_metadata_keeps_existing_preparation_serialization() {
+    let raw = print_order(&pdf("/Im Do", "/XObject << /Im 5 0 R >>", &[image("/ColorSpace /DeviceGray")])).unwrap();
+    let serialized = serde_json::to_value(&raw.images[0][0]).unwrap();
+    assert!(serialized.get("effective_rendering_intent").is_none());
+    assert!(serialized.get("rendering_intent_explicit").is_none());
+    assert!(serialized["description"].get("rendering_intent").is_none());
+    assert!(serialized["description"].get("mask_rendering_intent").is_none());
+    let explicit = print_order(&pdf("/RelativeColorimetric ri /Im Do", "/XObject << /Im 5 0 R >>", &[image("/ColorSpace /DeviceGray")])).unwrap();
+    let serialized = serde_json::to_value(&explicit.images[0][0]).unwrap();
+    assert_eq!(serialized["rendering_intent_explicit"], true);
+    assert_eq!(serialized["compositing_unresolved"], true);
+}

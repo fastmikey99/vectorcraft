@@ -387,6 +387,8 @@ struct State {
     matrix: Option<vectorcraft_geom::Affine>,
     clip_context: bool,
     image_compositing_unresolved: bool,
+    rendering_intent: crate::PrintRenderingIntent,
+    rendering_intent_explicit: bool,
     source_effects_unresolved: bool,
 }
 
@@ -557,7 +559,13 @@ impl Walker<'_, '_> {
             order.images.push(crate::PrintImageUse {
                 samples,
                 sample_error,
-                compositing_unresolved: state.image_compositing_unresolved,
+                // Source sample extraction does not qualify intent-dependent output.
+                // An image override must never clear other unresolved graphics state.
+                compositing_unresolved: state.image_compositing_unresolved
+                    || description.rendering_intent.is_some()
+                    || description.mask_rendering_intent.is_some(),
+                effective_rendering_intent: description.rendering_intent.unwrap_or(state.rendering_intent),
+                rendering_intent_explicit: description.rendering_intent.is_some() || state.rendering_intent_explicit,
                 layer: self.layers.last().copied().flatten(),
                 before_path: order.layers.len(),
                 inline,
@@ -903,6 +911,12 @@ impl Walker<'_, '_> {
                     if let Some(d) = res.get_ext_g_state(gs.0)
                         && let Some(s) = self.states.last_mut()
                     {
+                        if d.contains_key(b"RI") {
+                            s.rendering_intent = d
+                                .get::<Name<'_>>(b"RI")
+                                .map_or(crate::PrintRenderingIntent::Unresolved, |n| crate::PrintRenderingIntent::from_name(n.as_ref()));
+                            s.rendering_intent_explicit = true;
+                        }
                         let stroke = d.get::<bool>(b"OP");
                         s.stroke = stroke.unwrap_or(s.stroke);
                         // Without `/op`, `/OP` sets both.
@@ -926,10 +940,12 @@ impl Walker<'_, '_> {
                                 .any(|key| d.contains_key(key) && !unchanged_device_state(key));
                     }
                 }
-                TypedInstruction::RenderingIntent(_) => {
+                TypedInstruction::RenderingIntent(intent) => {
                     if let Some(s) = self.states.last_mut() {
                         s.image_compositing_unresolved = true;
                         s.source_effects_unresolved = true;
+                        s.rendering_intent = crate::PrintRenderingIntent::from_name(intent.0.as_ref());
+                        s.rendering_intent_explicit = true;
                     }
                 }
                 TypedInstruction::FillPathEvenOdd(_) | TypedInstruction::FillPathNonZero(_) | TypedInstruction::FillPathNonZeroCompatibility(_) => {

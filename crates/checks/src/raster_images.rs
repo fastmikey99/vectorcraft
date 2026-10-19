@@ -465,6 +465,9 @@ pub(crate) fn compare(bytes: &[u8], render: &Render, tolerance: Option<f64>) -> 
 mod tests {
     use super::*;
     fn pdf(rotate: u16, unit: f64, mask: bool, state: &str) -> Vec<u8> {
+        pdf_with_intent(rotate, unit, mask, state, "")
+    }
+    fn pdf_with_intent(rotate: u16, unit: f64, mask: bool, state: &str, intent: &str) -> Vec<u8> {
         let content = format!("{state} q 72 0 0 72 0 0 cm /Im Do Q");
         let mask_entry = if mask { "/SMask 6 0 R" } else { "" };
         let objects=[
@@ -472,7 +475,7 @@ mod tests {
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
             format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Rotate {rotate} /UserUnit {unit} /Resources << /XObject << /Im 5 0 R >> /ExtGState << /GS << /ca 0.5 >> >> >> /Contents 4 0 R >>"),
             format!("<< /Length {} >>\nstream\n{content}\nendstream",content.len()),
-            format!("<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 /ColorSpace /DeviceCMYK {mask_entry} /Filter /ASCIIHexDecode /Length 33 >>\nstream\nff00000000ff00000000ff00000000ff>\nendstream"),
+            format!("<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 /ColorSpace /DeviceCMYK {mask_entry} {intent} /Filter /ASCIIHexDecode /Length 33 >>\nstream\nff00000000ff00000000ff00000000ff>\nendstream"),
             "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /ASCIIHexDecode /Length 9 >>\nstream\n00ff80ff>\nendstream".into(),
         ];
         objects_pdf(&objects)
@@ -1023,6 +1026,18 @@ mod tests {
         changed = context.clone();
         changed.clip_mm = None;
         assert!(reconcile_image_clip(image, &changed, origin, &mut paints[0]).is_err());
+    }
+    #[test]
+    fn explicit_intent_samples_cannot_enter_physical_prediction() {
+        for intent in ["RelativeColorimetric", "AbsoluteColorimetric", "Perceptual", "Saturation"] {
+            for state in ["", "/GS gs", "/Perceptual ri"] {
+                let bytes = pdf_with_intent(0, 1.0, false, state, &format!("/Intent /{intent}"));
+                let raw = vectorcraft_pdf::print_order(&bytes).unwrap();
+                let info = vectorcraft_pdf::production_info(&bytes).unwrap();
+                assert!(raw.images[0][0].samples.is_some());
+                assert!(paints(&info.pages[0], &raw.images[0], 0.0001).is_err());
+            }
+        }
     }
     #[test]
     fn raw_image_device_defaults_and_identity_keep_the_state_explicit() {

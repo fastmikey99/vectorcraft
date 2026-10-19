@@ -283,6 +283,9 @@ mod tests {
         }
     }
     fn image(samples: &str, alpha: &str, matrix: &str, layer: &str, extra: &str, model: &str) -> Vec<u8> {
+        image_with_mask_intent(samples, alpha, matrix, layer, extra, model, "")
+    }
+    fn image_with_mask_intent(samples: &str, alpha: &str, matrix: &str, layer: &str, extra: &str, model: &str, mask_intent: &str) -> Vec<u8> {
         let content = format!("/OC /Layer BDC q {matrix} cm /Im Do Q {extra} EMC");
         crate::pdf::tests::objects_pdf(&[
             "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [7 0 R] /D << /Order [7 0 R] /ON [7 0 R] >> >> >>".into(),
@@ -290,7 +293,7 @@ mod tests {
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 144 144] /Resources << /Properties << /Layer 7 0 R >> /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>".into(),
             format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
             format!("<< /Type /XObject /Subtype /Image /Width 3 /Height 3 /BitsPerComponent 8 /ColorSpace /{model} /SMask 6 0 R /Filter /ASCIIHexDecode /Length {} >>\nstream\n{samples}>\nendstream",samples.len()+1),
-            format!("<< /Type /XObject /Subtype /Image /Width 3 /Height 3 /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /ASCIIHexDecode /Length {} >>\nstream\n{alpha}>\nendstream",alpha.len()+1),
+            format!("<< /Type /XObject /Subtype /Image /Width 3 /Height 3 /BitsPerComponent 8 /ColorSpace /DeviceGray {mask_intent} /Filter /ASCIIHexDecode /Length {} >>\nstream\n{alpha}>\nendstream",alpha.len()+1),
             format!("<< /Type /OCG /Name ({layer}) >>"),
         ])
     }
@@ -361,6 +364,31 @@ mod tests {
             std::fs::write(dir.join(format!("{name}.json")), serde_json::to_vec_pretty(r).unwrap()).unwrap();
             std::fs::write(dir.join(format!("{name}-expected.json")), serde_json::to_vec(&json!({"global/raster":expected})).unwrap()).unwrap();
             std::fs::write(dir.join(format!("{name}-original.pdf")), original).unwrap();
+        }
+    }
+    #[test]
+    fn explicit_intent_samples_do_not_qualify_preparation_or_continuity() {
+        for intent in ["RelativeColorimetric", "AbsoluteColorimetric", "Perceptual", "Saturation"] {
+            let bytes = image(SAMPLES, ALPHA, MATRIX, "TECH Output", "", &format!("DeviceGray /Intent /{intent}"));
+            let raw = vectorcraft_pdf::print_order(&bytes).unwrap();
+            assert!(raw.images[0][0].samples.is_some() && raw.images[0][0].compositing_unresolved);
+            let draft = crate::prepare::capture(&bytes, "synthetic".into(), "job".into()).unwrap();
+            assert!(draft.raster_sources.is_empty() && !draft.diagnostics.is_empty());
+            let r = request(&bytes, &[]);
+            check(&format!("explicit-intent-{intent}"), &r, &bytes, Status::Incomplete);
+        }
+    }
+    #[test]
+    fn mask_intent_alone_does_not_qualify_preparation_or_continuity() {
+        for intent in ["RelativeColorimetric", "AbsoluteColorimetric", "Perceptual", "Saturation"] {
+            let bytes = image_with_mask_intent(SAMPLES, ALPHA, MATRIX, "TECH Output", "", "DeviceGray", &format!("/Intent /{intent}"));
+            let raw = vectorcraft_pdf::print_order(&bytes).unwrap();
+            assert!(raw.images[0][0].samples.is_some() && raw.images[0][0].description.rendering_intent.is_none());
+            assert!(raw.images[0][0].description.mask_rendering_intent.is_some() && raw.images[0][0].compositing_unresolved);
+            let draft = crate::prepare::capture(&bytes, "synthetic".into(), "job".into()).unwrap();
+            assert!(draft.raster_sources.is_empty() && !draft.diagnostics.is_empty());
+            let r = request(&bytes, &[]);
+            check(&format!("mask-intent-{intent}"), &r, &bytes, Status::Incomplete);
         }
     }
     #[test]

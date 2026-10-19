@@ -1022,6 +1022,10 @@ mod tests {
             _ => "",
         };
         let image_extras = match mode {
+            "intent-relative" => "/Intent /RelativeColorimetric",
+            "intent-absolute" => "/Intent /AbsoluteColorimetric",
+            "intent-perceptual" => "/Intent /Perceptual",
+            "intent-saturation" => "/Intent /Saturation",
             "interpolate" => "/Interpolate true",
             "alpha-zero" | "alpha-positive" => "/SMask 10 0 R",
             _ => "",
@@ -1168,6 +1172,10 @@ mod tests {
     #[test]
     fn image_prelude_refuses_later_images_unknown_context_and_technical_ink() {
         for mode in [
+            "intent-relative",
+            "intent-absolute",
+            "intent-perceptual",
+            "intent-saturation",
             "after",
             "group",
             "interpolate",

@@ -4,6 +4,30 @@ use craft_pdf::syntax::object::{Array, Dict, Name, Object, Stream};
 use craft_pdf::syntax::page::Resources;
 use serde::Serialize;
 
+/// Source interpretation metadata, never proof of a device conversion.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub enum PrintRenderingIntent {
+    AbsoluteColorimetric,
+    #[default]
+    RelativeColorimetric,
+    Perceptual,
+    Saturation,
+    Unresolved,
+}
+impl PrintRenderingIntent {
+    fn is_default(&self) -> bool {
+        *self == Self::RelativeColorimetric
+    }
+    pub(crate) fn from_name(name: &[u8]) -> Self {
+        match name {
+            b"AbsoluteColorimetric" => Self::AbsoluteColorimetric,
+            b"RelativeColorimetric" => Self::RelativeColorimetric,
+            b"Perceptual" => Self::Perceptual,
+            b"Saturation" => Self::Saturation,
+            _ => Self::Unresolved,
+        }
+    }
+}
 pub(crate) const MAX_IMAGES: usize = 4096;
 #[derive(Clone, Debug, Serialize)]
 pub struct PrintImageUse {
@@ -11,6 +35,13 @@ pub struct PrintImageUse {
     pub samples: Option<crate::PrintImageSamples>,
     pub sample_error: Option<String>,
     pub compositing_unresolved: bool,
+    /// Image override, otherwise inherited graphics state, otherwise the PDF default.
+    // Omit initial values to preserve existing raw-image preparation identities.
+    #[serde(skip_serializing_if = "PrintRenderingIntent::is_default")]
+    pub effective_rendering_intent: PrintRenderingIntent,
+    /// False only for the initial implicit intent. Explicit intent remains unqualified.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rendering_intent_explicit: bool,
     pub layer: Option<usize>,
     /// Number of preceding path-paint events on this page; image order is the list order.
     pub before_path: usize,
@@ -25,6 +56,13 @@ pub struct PrintImageUse {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct PrintImageDescription {
+    /// The image dictionary's override; None means inherit, not RelativeColorimetric.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rendering_intent: Option<PrintRenderingIntent>,
+    /// Intent on the selected soft mask or explicit stencil mask, if declared.
+    /// Retained separately: alpha samples do not qualify a rendering conversion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mask_rendering_intent: Option<PrintRenderingIntent>,
     pub dimensions: Option<[u32; 2]>,
     pub bits_per_component: Option<u8>,
     pub stencil: bool,
@@ -131,6 +169,14 @@ fn space(o: Option<Object<'_>>, res: &Resources<'_>, depth: u8, out: &mut PrintI
 pub(crate) fn describe(stream: &Stream<'_>, res: &Resources<'_>, inline: bool) -> PrintImageDescription {
     let d = stream.dict();
     let mut out = PrintImageDescription {
+        rendering_intent: d
+            .contains_key(b"Intent")
+            .then(|| d.get::<Name<'_>>(b"Intent").map_or(PrintRenderingIntent::Unresolved, |n| PrintRenderingIntent::from_name(n.as_ref()))),
+        mask_rendering_intent: d.get::<Stream<'_>>(b"SMask").or_else(|| d.get::<Stream<'_>>(b"Mask")).and_then(|mask| {
+            let md = mask.dict();
+            md.contains_key(b"Intent")
+                .then(|| md.get::<Name<'_>>(b"Intent").map_or(PrintRenderingIntent::Unresolved, |n| PrintRenderingIntent::from_name(n.as_ref())))
+        }),
         dimensions: None,
         bits_per_component: None,
         stencil: false,
@@ -145,6 +191,12 @@ pub(crate) fn describe(stream: &Stream<'_>, res: &Resources<'_>, inline: bool) -
         external_data: d.contains_key(b"F") && !inline,
         issues: vec![],
     };
+    if out.rendering_intent == Some(PrintRenderingIntent::Unresolved) {
+        out.issues.push("Unknown or malformed image rendering intent".into());
+    }
+    if out.mask_rendering_intent == Some(PrintRenderingIntent::Unresolved) {
+        out.issues.push("Unknown or malformed image mask rendering intent".into());
+    }
     if d.contains_key(b"SMaskInData") && d.get::<u8>(b"SMaskInData").is_none_or(|n| n > 2) {
         out.issues.push("Invalid image SMaskInData value".into());
     }

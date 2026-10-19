@@ -229,8 +229,8 @@ impl Raw {
 }
 fn read_raw(stream: &Stream<'_>, components: usize, inline: bool, budget: &mut usize, indexed: bool) -> Result<Raw, String> {
     let d = stream.dict();
-    if [b"Intent".as_slice(), b"Alternates", b"OPI"].iter().any(|k| d.contains_key(k)) {
-        return Err("Image rendering intent or alternate print source requires qualification".into());
+    if [b"Alternates".as_slice(), b"OPI"].iter().any(|k| d.contains_key(k)) {
+        return Err("Image alternate print source requires qualification".into());
     }
     let width = d.get::<u32>(key(d, b"Width", b"W", inline)).filter(|n| *n > 0).ok_or("Invalid image width")?;
     let height = d.get::<u32>(key(d, b"Height", b"H", inline)).filter(|n| *n > 0).ok_or("Invalid image height")?;
