@@ -320,13 +320,13 @@ mod tests {
     const SAMPLES: &str = "0020406080a0c0e0ff";
     const ALPHA: &str = "ffffffff00ffffffff";
     const MATRIX: &str = "36 0 0 36 18 18";
-    fn original() -> Vec<u8> {
+    pub(super) fn original() -> Vec<u8> {
         image(SAMPLES, ALPHA, MATRIX, "Source", "", "DeviceGray")
     }
     fn request(bytes: &[u8], edits: &[Fact]) -> Request {
         request_for_original(&original(), bytes, edits)
     }
-    fn request_for_original(original: &[u8], bytes: &[u8], edits: &[Fact]) -> Request {
+    pub(super) fn request_for_original(original: &[u8], bytes: &[u8], edits: &[Fact]) -> Request {
         let mut r = crate::attribution::tests::request();
         let draft = crate::prepare::capture(original, "synthetic".into(), r.identity.job_revision.clone()).unwrap();
         let (id, source) = draft.raster_sources.first_key_value().unwrap();
@@ -372,7 +372,7 @@ mod tests {
     fn check(name: &str, r: &Request, bytes: &[u8], expected: Status) {
         check_source(name, r, bytes, &original(), expected);
     }
-    fn check_source(name: &str, r: &Request, bytes: &[u8], original: &[u8], expected: Status) {
+    pub(super) fn check_source(name: &str, r: &Request, bytes: &[u8], original: &[u8], expected: Status) {
         assert!(crate::prepare::verify_original(r, original).unwrap().is_empty());
         let report = crate::pdf::check(r, bytes).unwrap();
         let finding = report.findings.iter().find(|f| f.obligation.key == "global/raster").unwrap();
@@ -668,3 +668,7 @@ mod tests {
         check_source("padding-tone-defect", &request_for_original(&source, &wrong, &[]), &wrong, &source, Status::Fail);
     }
 }
+
+#[cfg(test)]
+#[path = "raster_fidelity_clip.rs"]
+mod clip_tests;

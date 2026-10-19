@@ -68,6 +68,7 @@ mod post;
 mod preserve;
 mod presets;
 mod print;
+mod print_clip;
 mod print_color;
 mod print_image;
 mod print_order;

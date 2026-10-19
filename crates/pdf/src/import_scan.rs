@@ -391,7 +391,9 @@ struct State {
     colour_values: [Option<u32>; 2],
     devicen_attributes: [bool; 2],
     matrix: Option<vectorcraft_geom::Affine>,
+    exact_matrix: Option<[i64; 6]>,
     clip_context: bool,
+    form_clip: Option<[i64; 4]>,
     image_compositing_unresolved: bool,
     rendering_intent: crate::PrintRenderingIntent,
     rendering_intent_explicit: bool,
@@ -474,6 +476,8 @@ struct Walker<'w, 'p> {
     /// The saved graphics states' overprint parameters and inks, the current one last, pushed and
     /// popped as the interpreter does its states.
     states: Vec<State>,
+    /// Explicit Q must not escape the implicit page/form save.
+    graphics_floor: usize,
     /// The text shown since the last painted path.
     text: TextOverprint,
     /// The inks of the text shown since the last painted path: of its fills, of its strokes.
@@ -589,17 +593,19 @@ impl Walker<'_, '_> {
                 inline,
                 matrix: state.matrix.map(|m| m.as_coeffs()),
                 clip_context: state.clip_context,
+                containing_form_clip: state.form_clip.filter(|bounds| state.exact_matrix.is_some_and(|m| crate::print_clip::contains(*bounds, m))),
                 overprint: state.fill,
                 overprint_mode: u8::from(state.nonzero),
                 description,
             });
         }
     }
-    fn concat(&mut self, matrix: [f64; 6]) {
+    fn concat(&mut self, matrix: [f64; 6], exact: Option<[i64; 6]>) {
         if self.out.print_order.is_none() {
             return;
         }
         if let Some(s) = self.states.last_mut() {
+            s.exact_matrix = s.exact_matrix.zip(exact).and_then(|(a, b)| crate::print_clip::concat(a, b));
             s.matrix = s
                 .matrix
                 .map(|m| m * vectorcraft_geom::Affine::new(matrix))
@@ -674,6 +680,10 @@ impl Walker<'_, '_> {
 
     /// The interpreter never pops its first state.
     fn restore(&mut self) {
+        if self.out.print_order.is_some() && self.states.len() <= self.graphics_floor {
+            self.order_issue("Unmatched graphics-state restore prevents source accounting");
+            return;
+        }
         if self.states.len() > 1 {
             self.states.pop();
         }
@@ -870,6 +880,8 @@ impl Walker<'_, '_> {
         // left saved when it ends.
         let saved = self.states.len();
         self.save();
+        let graphics_floor = self.graphics_floor;
+        self.graphics_floor = self.states.len();
         let marked = self.layers.len();
         let outer = self.out.print_order.is_some().then(|| (self.visible.clone(), self.layers.clone()));
         let floor = self.marked_floor;
@@ -883,6 +895,10 @@ impl Walker<'_, '_> {
             }
         }
         self.marked_floor = floor;
+        if self.out.print_order.is_some() && self.states.len() != self.graphics_floor {
+            self.order_issue("Unbalanced form graphics state prevents source accounting");
+        }
+        self.graphics_floor = graphics_floor;
         self.out.cut |= !blank_tail(data.get(iter.committed()..).unwrap_or_default());
         self.states.truncate(saved);
     }
@@ -897,6 +913,8 @@ impl Walker<'_, '_> {
         self.note_fonts(resources);
         let saved = self.states.len();
         self.save();
+        let graphics_floor = self.graphics_floor;
+        self.graphics_floor = self.states.len();
         let mut content = page.content_reader();
         let mut window = Vec::new();
         let limit = max_window();
@@ -935,6 +953,10 @@ impl Walker<'_, '_> {
             }
         }
         self.out.cut |= content.truncated();
+        if self.out.print_order.is_some() && self.states.len() != self.graphics_floor {
+            self.order_issue("Unbalanced page graphics state prevents source accounting");
+        }
+        self.graphics_floor = graphics_floor;
         self.states.truncate(saved);
     }
 
@@ -989,10 +1011,15 @@ impl Walker<'_, '_> {
                     self.visible.pop();
                     self.layers.pop();
                 }
-                TypedInstruction::Transform(m) => self.concat([m.0.as_f64(), m.1.as_f64(), m.2.as_f64(), m.3.as_f64(), m.4.as_f64(), m.5.as_f64()]),
+                TypedInstruction::Transform(m) => {
+                    let numbers = [m.0, m.1, m.2, m.3, m.4, m.5];
+                    let exact = crate::print_clip::content_matrix(data.get(start..iter.committed()).unwrap_or_default(), numbers);
+                    self.concat(numbers.map(|n| n.as_f64()), exact);
+                }
                 TypedInstruction::ClipNonZero(_) | TypedInstruction::ClipEvenOdd(_) => {
                     if let Some(s) = self.states.last_mut() {
                         s.clip_context = true;
+                        s.form_clip = None;
                     }
                 }
                 TypedInstruction::SaveState(_) => self.save(),
@@ -1179,12 +1206,20 @@ impl Walker<'_, '_> {
                         self.save();
                         if d.contains_key(b"Matrix") {
                             if let Some(matrix) = d.get::<[f64; 6]>(b"Matrix") {
-                                self.concat(matrix);
+                                let exact = crate::print_clip::array(d, b"Matrix").and_then(crate::print_clip::integers);
+                                self.concat(matrix, exact);
                             } else if let Some(state) = self.states.last_mut() {
                                 state.matrix = None;
+                                state.exact_matrix = None;
                             }
                         }
                         if let Some(state) = self.states.last_mut() {
+                            let bounds = state.exact_matrix.and_then(|m| crate::print_clip::bbox(m, crate::print_clip::array(d, b"BBox")?));
+                            state.form_clip = if state.clip_context {
+                                state.form_clip.zip(bounds).and_then(|(a, b)| crate::print_clip::intersect(a, b))
+                            } else {
+                                bounds
+                            };
                             state.clip_context = true;
                         }
                         self.walk(data.as_ref(), &inner, depth + 1);
@@ -1386,7 +1421,12 @@ fn walk_page<'w, 'p>(
             ..Default::default()
         },
         hidden_form: false,
-        states: vec![State { matrix: Some(vectorcraft_geom::Affine::IDENTITY), ..Default::default() }],
+        states: vec![State {
+            matrix: Some(vectorcraft_geom::Affine::IDENTITY),
+            exact_matrix: Some(crate::print_clip::IDENTITY),
+            ..Default::default()
+        }],
+        graphics_floor: 1,
         text: TextOverprint::None,
         text_inks: [RunInk::None; 2],
         ink_index: HashMap::new(),

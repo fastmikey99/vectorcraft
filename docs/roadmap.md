@@ -474,3 +474,9 @@ All nine CI gates, 232 checker tests, 345 PDF tests and 678 native/WASI cases pa
 Fresh browser qualification exposed Indexed DeviceGray being saved as RGB, with different independent print planes. Explicit device-Gray images now retain Gray/GrayAlpha working samples, guarded against resource substitutions and cache reuse across incompatible scopes. Before/after saved-PDF comparisons at two resolutions verify the fix; calibrated/named/RGB sources are not inferred to be DeviceGray.
 
 All nine CI gates, 349 PDF tests and 232 checker tests pass. Current core native/WASI and the full frozen 1,910-case recipe catalogue are replayed. Codex found no material issues; additional cache/source-exclusion tests close its principal verification gap. Source preparation identity changes require fresh original replay. Broader clip/opacity-group and full production qualification remain open; headline readiness/parity estimates are unchanged.
+
+## HC39 — Account for provably non-cropping Form images (2026-10-20)
+
+Raw image audit retains exact FormBBox containment and rejects unknown/inherited path clips, crops, touching boundaries and unproved arithmetic. Graphics-state restore guards prevent escaping Form context. The saved Gray browser fixture now resolves scoped source continuity while full-file eligibility remains incomplete; CMYK opacity-group reconciliation remains open.
+
+Two Codex reviews, all nine CI gates, explicit physical tests, native/WASI parity and current catalogue/Reporter replay support this bounded extension. Headline readiness/parity estimates are unchanged. Broader clipping, compositing and full production qualification remain unfinished.

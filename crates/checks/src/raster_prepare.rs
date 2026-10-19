@@ -22,7 +22,7 @@ fn diagnostic(id: &str) -> String {
     format!("{id}: explicit exact-binary-alpha boundary decision required")
 }
 /// Return false without altering the ordinary draft if this bounded path cannot account for it.
-/// In particular a raw clip flag must not be ignored even when its rectangle encloses the image.
+/// A raw clip flag needs retained exact containment evidence; it is never dropped.
 pub fn capture(bytes: &[u8], draft: &mut Draft, native_images: usize, import_issues: &[String]) -> Result<bool, String> {
     const PAGE_METADATA_NOTE: &str = "original PDF page boxes are not retained for a rotated, scaled-unit or artwork-bounds import";
     if native_images > 1000 {
@@ -68,7 +68,7 @@ pub fn capture(bytes: &[u8], draft: &mut Draft, native_images: usize, import_iss
         let size = if matches!(metadata.rotation, 90 | 270) { [y1 - y0, x1 - x0] } else { [x1 - x0, y1 - y0] };
         let page_bounds = Rect::new(0.0, 0.0, size[0], size[1]);
         for (index, image) in images.iter().enumerate() {
-            if image.clip_context {
+            if image.clip_context && image.containing_form_clip.is_none() {
                 return Err("Clipped raster preparation requires a retained and reviewed mask/clip boundary".into());
             }
             if image.overprint || image.compositing_unresolved || image.description.optional_content || image.description.interpolate {
@@ -379,3 +379,7 @@ mod tests {
         std::fs::write(directory.join("manifest.json"), serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "raster_prepare_clip.rs"]
+mod clip_tests;

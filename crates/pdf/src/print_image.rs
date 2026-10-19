@@ -51,6 +51,11 @@ pub struct PrintImageUse {
     /// This is placement, never a painted-coverage boundary.
     pub matrix: Option<[f64; 6]>,
     pub clip_context: bool,
+    /// Exact default-page-space intersection of Form BBoxes strictly containing
+    /// every image corner. Only bounded integer transforms qualify; path clips,
+    /// unknown inherited clips and boundary-touch never receive this evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub containing_form_clip: Option<[i64; 4]>,
     pub overprint: bool,
     pub overprint_mode: u8,
     pub description: PrintImageDescription,
