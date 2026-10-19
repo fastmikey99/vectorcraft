@@ -34,6 +34,18 @@ pub struct PrintImageSamples {
     mask: Mask,
 }
 impl PrintImageSamples {
+    /// Actual decoded device-process base, including Indexed palettes. Named
+    /// colourants never acquire a process model merely by using process names.
+    pub fn process_base(&self) -> Option<&'static str> {
+        if self.space.gray {
+            Some("DeviceGray")
+        } else if self.space.process_cmyk {
+            Some("DeviceCMYK")
+        } else {
+            None
+        }
+    }
+
     /// DeviceGray and Indexed Gray use process CMYK on the pinned separation
     /// device; a Separation named Black is deliberately not classified as Gray.
     pub fn uses_gray_process(&self) -> bool {
@@ -124,6 +136,7 @@ struct Space {
     names: Vec<String>,
     gray: bool,
     direct_cmyk: bool,
+    process_cmyk: bool,
     devicen_attributes: bool,
     palette: Option<Box<[f64]>>,
 }
@@ -142,7 +155,14 @@ fn space<'a>(value: Object<'a>, res: &Resources<'a>, depth: u8) -> Result<Space,
             if Name::new(default).and_then(|n| res.get_color_space(&n)).is_some() {
                 return Err("Image default colour-space substitution is unresolved".into());
             }
-            Ok(Space { names: names.into_iter().map(String::from).collect(), gray, direct_cmyk: direct, devicen_attributes: false, palette: None })
+            Ok(Space {
+                names: names.into_iter().map(String::from).collect(),
+                gray,
+                direct_cmyk: direct,
+                process_cmyk: direct,
+                devicen_attributes: false,
+                palette: None,
+            })
         }
         Object::Array(a) => {
             let mut items = a.flex_iter();
@@ -210,6 +230,7 @@ fn space<'a>(value: Object<'a>, res: &Resources<'a>, depth: u8) -> Result<Space,
                     names,
                     gray: false,
                     direct_cmyk: false,
+                    process_cmyk: false,
                     devicen_attributes: crate::print_color::has_devicen_attributes(&a),
                     palette: None,
                 })

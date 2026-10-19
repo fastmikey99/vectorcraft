@@ -13,9 +13,16 @@ fn same_coverage(a: &PathData, b: &PathData) -> Result<bool, String> {
         .map(|p| p.is_empty())
         .map_err(|e| e.to_string())
 }
+pub(crate) fn process_model(paint: &Value) -> Option<&str> {
+    match paint.pointer("/description/colour_space").and_then(Value::as_str)? {
+        "DeviceGray" => Some("DeviceGray"),
+        "DeviceCMYK" => Some("DeviceCMYK"),
+        "Indexed" => paint.get("indexed_process_base").and_then(Value::as_str).filter(|model| matches!(*model, "DeviceGray" | "DeviceCMYK")),
+        _ => None,
+    }
+}
 fn supported(paint: &Value) -> bool {
-    matches!(paint.pointer("/description/colour_space").and_then(Value::as_str), Some("DeviceGray" | "DeviceCMYK"))
-        && paint.get("sample_sha256").and_then(Value::as_str).is_some_and(|s| s.len() == 64)
+    process_model(paint).is_some() && paint.get("sample_sha256").and_then(Value::as_str).is_some_and(|s| s.len() == 64)
 }
 struct Grid {
     width: u32,
@@ -197,8 +204,7 @@ fn evaluate(request: &Request, plan: &Plan, bytes: &[u8]) -> Result<(Status, Val
         .and_then(|f| f.value.as_f64())
         .filter(|n| n.is_finite() && *n >= 0.0);
     let samples = image.samples.as_ref().ok_or("Observed normalized raster samples missing")?;
-    let model_agrees = geometry.paint["colourants"] == actual.paint["colourants"]
-        && geometry.paint.pointer("/description/colour_space") == actual.paint.pointer("/description/colour_space");
+    let model_agrees = geometry.paint["colourants"] == actual.paint["colourants"] && process_model(&geometry.paint) == process_model(&actual.paint);
     let mut matched = vec![];
     if model_agrees {
         for grid in grids {
@@ -290,6 +296,7 @@ mod tests {
     }
     fn image_with_context(samples: &str, alpha: &str, matrix: &str, layer: &str, extra: &str, model: &str, context: (&str, &str)) -> Vec<u8> {
         let (mask_intent, state) = context;
+        let space = if model.starts_with('[') { model.to_owned() } else { format!("/{model}") };
         let resources = if state.is_empty() { String::new() } else { format!(" /ExtGState << {state} >>") };
         let content = format!("/OC /Layer BDC q {matrix} cm /Im Do Q {extra} EMC");
         crate::pdf::tests::objects_pdf(&[
@@ -300,7 +307,7 @@ mod tests {
             ),
             format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
             format!(
-                "<< /Type /XObject /Subtype /Image /Width 3 /Height 3 /BitsPerComponent 8 /ColorSpace /{model} /SMask 6 0 R /Filter /ASCIIHexDecode /Length {} >>\nstream\n{samples}>\nendstream",
+                "<< /Type /XObject /Subtype /Image /Width 3 /Height 3 /BitsPerComponent 8 /ColorSpace {space} /SMask 6 0 R /Filter /ASCIIHexDecode /Length {} >>\nstream\n{samples}>\nendstream",
                 samples.len() + 1
             ),
             format!(
@@ -378,6 +385,136 @@ mod tests {
             std::fs::write(dir.join(format!("{name}-expected.json")), serde_json::to_vec(&json!({"global/raster":expected})).unwrap()).unwrap();
             std::fs::write(dir.join(format!("{name}-original.pdf")), original).unwrap();
         }
+    }
+    #[test]
+    fn indexed_process_samples_preserve_visible_content_across_lossless_encodings() {
+        for (label, base, colours) in [("gray", "DeviceGray", ["00", "40", "ff"]), ("cmyk", "DeviceCMYK", ["ff000000", "00ff0000", "0000ff00"])] {
+            let palette = colours.concat();
+            let indexed = format!("[/Indexed /{base} 2 <{palette}>]");
+            let indices = "000102000102000102";
+            let original = image(indices, ALPHA, MATRIX, "Source", "", &indexed);
+            let reordered = format!("[/Indexed /{base} 2 <{}{}{}>]", colours[1], colours[2], colours[0]);
+            let direct = colours.repeat(3).concat();
+            let extra = if base == "DeviceGray" { "7f" } else { "7f7f7f7f" };
+            let expanded = format!("[/Indexed /{base} 3 <{palette}{extra}>]");
+            let changed = format!("[/Indexed /{base} 2 <{extra}{}{}>]", colours[1], colours[2]);
+            for (case, samples, alpha, matrix, layer, space, expected) in [
+                ("identical", indices, ALPHA, MATRIX, "TECH Output", indexed.as_str(), Status::Pass),
+                ("reordered-palette", "020001020001020001", ALPHA, MATRIX, "TECH Output", reordered.as_str(), Status::Pass),
+                ("direct-equivalent", direct.as_str(), ALPHA, MATRIX, "TECH Output", base, Status::Pass),
+                ("unused-entry", indices, ALPHA, MATRIX, "TECH Output", expanded.as_str(), Status::Pass),
+                ("hidden-index", "000102000302000102", ALPHA, MATRIX, "TECH Output", expanded.as_str(), Status::Pass),
+                ("visible-palette", indices, ALPHA, MATRIX, "TECH Output", changed.as_str(), Status::Fail),
+                ("visible-index", "010102000102000102", ALPHA, MATRIX, "TECH Output", indexed.as_str(), Status::Fail),
+                ("changed-alpha", indices, "ffffffffffffffff00", MATRIX, "TECH Output", indexed.as_str(), Status::Fail),
+                ("changed-layer", indices, ALPHA, MATRIX, "Wrong output", indexed.as_str(), Status::Fail),
+                ("translated", indices, ALPHA, "36 0 0 36 19 18", "TECH Output", indexed.as_str(), Status::Fail),
+                ("fractional-alpha", indices, "ffffffff80ffffffff", MATRIX, "TECH Output", indexed.as_str(), Status::Incomplete),
+            ] {
+                let bytes = image(samples, alpha, matrix, layer, "", space);
+                let request = request_for_original(&original, &bytes, &[]);
+                check_source(&format!("indexed-{label}-{case}"), &request, &bytes, &original, expected);
+            }
+            let direct_original = image(&direct, ALPHA, MATRIX, "Source", "", base);
+            let indexed_output = image(indices, ALPHA, MATRIX, "TECH Output", "", &indexed);
+            let request = request_for_original(&direct_original, &indexed_output, &[]);
+            check_source(&format!("indexed-{label}-from-direct"), &request, &indexed_output, &direct_original, Status::Pass);
+        }
+    }
+    #[test]
+    fn indexed_and_direct_process_encodings_match_independent_planes_and_detect_defects() {
+        let Ok(binary) = std::env::var("CHECK_GS_BINARY") else { return };
+        let base = std::env::var_os("CHECK_FEATURE_EVIDENCE_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        for (label, model, colours, channel) in
+            [("gray", "DeviceGray", ["00", "40", "ff"], "Black"), ("cmyk", "DeviceCMYK", ["ff000000", "00ff0000", "0000ff00"], "Cyan")]
+        {
+            let indexed = format!("[/Indexed /{model} 2 <{}>]", colours.concat());
+            let reordered = format!("[/Indexed /{model} 2 <{}{}{}>]", colours[1], colours[2], colours[0]);
+            let direct = colours.repeat(3).concat();
+            for dpi in [72, 144] {
+                let mut canonical = None;
+                for (variant, samples, space) in [
+                    ("indexed", "000102000102000102", indexed.as_str()),
+                    ("reordered", "020001020001020001", reordered.as_str()),
+                    ("direct", direct.as_str(), model),
+                ] {
+                    let bytes = image(samples, ALPHA, MATRIX, "TECH Output", "", space);
+                    let output = base.join(format!("indexed-continuity-{stamp}-{label}-{variant}-{dpi}"));
+                    let config = crate::independent::Configuration {
+                        binary: binary.clone().into(),
+                        binary_sha256: crate::sha256(&std::fs::read(&binary).unwrap()),
+                        version: "10.07.1".into(),
+                        dpi,
+                        timeout_ms: 10000,
+                        max_output_bytes: 16 * 1024 * 1024,
+                        qualification_sha256: None,
+                    };
+                    let mut render = crate::independent::render(&config, &bytes, &output).unwrap();
+                    let positive = crate::raster_images::compare(&bytes, &render, Some(0.6)).unwrap();
+                    assert_eq!(positive.status, Status::Pass, "{label}/{variant}/{dpi}: {positive:?}");
+                    let signatures: std::collections::BTreeMap<_, _> = render
+                        .planes
+                        .iter()
+                        .map(|p| {
+                            let pixels = image::open(&p.path).unwrap().to_luma8();
+                            ((p.page, p.name.clone()), (p.width, p.height, crate::sha256(pixels.as_raw())))
+                        })
+                        .collect();
+                    if let Some(previous) = &canonical {
+                        assert_eq!(&signatures, previous);
+                    } else {
+                        canonical = Some(signatures.clone());
+                    }
+                    let original_render = serde_json::to_value(&render).unwrap();
+                    let plane = render.planes.iter_mut().find(|p| p.name == channel).unwrap();
+                    let mut pixels = image::open(&plane.path).unwrap().to_luma8();
+                    assert_eq!(pixels.get_pixel(1, 1).0[0], 255);
+                    pixels.put_pixel(1, 1, image::Luma([0]));
+                    plane.path = output.join(format!("defect-{channel}.tif"));
+                    pixels.save(&plane.path).unwrap();
+                    plane.sha256 = crate::sha256(&std::fs::read(&plane.path).unwrap());
+                    plane.minimum = 0;
+                    let negative = crate::raster_images::compare(&bytes, &render, Some(0.6)).unwrap();
+                    assert_eq!(negative.status, Status::Fail, "{label}/{variant}/{dpi}: {negative:?}");
+                    std::fs::write(output.join("qualification.json"), serde_json::to_vec_pretty(&json!({
+                        "engine":crate::ENGINE_VERSION, "pdf_sha256":crate::sha256(&bytes), "dpi":dpi,
+                        "positive":positive, "negative":negative, "render":original_render, "defect_render":render, "configuration":config,
+                        "unmodified_pixel_signatures":signatures.iter().map(|((page,name),value)| json!({"page":page,"name":name,"value":value})).collect::<Vec<_>>(),
+                        "note":"Original planes and intentionally changed defect plane are retained separately."
+                    })).unwrap()).unwrap();
+                }
+            }
+        }
+    }
+    #[test]
+    fn indexed_base_identity_is_not_inferred_from_process_colourant_names() {
+        for (space, expected) in [
+            ("[/Indexed /DeviceGray 2 <0040ff>]", Some("DeviceGray")),
+            ("[/Indexed /DeviceCMYK 2 <ff00000000ff00000000ff00>]", Some("DeviceCMYK")),
+            ("[/Indexed [/Separation /Black /DeviceGray << /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >>] 2 <0040ff>]", None),
+        ] {
+            let bytes = image("000102000102000102", ALPHA, MATRIX, "Source", "", space);
+            let order = vectorcraft_pdf::print_order(&bytes).unwrap();
+            let samples = order.images[0][0].samples.as_ref().unwrap();
+            assert_eq!(samples.process_base(), expected);
+            assert!(!samples.direct_cmyk, "Indexed base identity must not change OPM zero handling");
+            let mut capture = crate::prepare::capture(&bytes, "synthetic".into(), "job".into()).unwrap();
+            if let Some((id, source)) = capture.raster_sources.first_key_value() {
+                assert_eq!(process_model(&source.paint), expected);
+                assert_eq!(source.paint["visible_sample"].is_null(), expected.is_none());
+                let (id, hash) = (id.clone(), source.mask.source_sha256.clone());
+                crate::raster_prepare::apply(&mut capture, &id, &hash, "exact_binary_alpha").unwrap();
+                let paint = capture.baseline.regions[0].facts.get("paint").and_then(|fact| fact.value.as_str());
+                assert_eq!(paint, expected.map(|model| if model == "DeviceGray" { "gray" } else { "cmyk" }));
+            } else {
+                assert!(expected.is_none(), "{:?}", capture.diagnostics);
+            }
+        }
+        let forged = json!({"description":{"colour_space":"Separation"},"indexed_process_base":"DeviceGray"});
+        assert!(process_model(&forged).is_none());
+        let unknown = json!({"description":{"colour_space":"Indexed"},"colourants":["Black"]});
+        assert!(process_model(&unknown).is_none());
     }
     #[test]
     fn explicit_intent_samples_do_not_qualify_preparation_or_continuity() {
