@@ -13,11 +13,12 @@ use krilla::geom::{Path, PathBuilder, Size, Transform};
 use krilla::image::Image;
 use krilla::num::NormalizedF32;
 use krilla::page::PageSettings;
-use krilla::paint::{Fill, LinearGradient, RadialGradient, SpreadMethod, Stop, Stroke, StrokeDash};
+use krilla::paint::{Fill, LinearGradient, MeshGradient, MeshPatch, RadialGradient, SpreadMethod, Stop, Stroke, StrokeDash};
 use krilla::surface::Surface;
 use krilla::text::{Glyph, GlyphId, KrillaGlyph};
 use kurbo::{PathEl, Shape, Vec2};
 use vectorcraft_color::{BlendMode, Color, GradientKind, Paint};
+use vectorcraft_doc::live::GradientMesh;
 use vectorcraft_doc::{AppearanceItem, Document, LineCap, LineJoin, Node, NodeKind, StrokeAlign, StrokeLayer, SymbolBoxes, TextObject};
 use vectorcraft_effects::stroke::{self, WrittenShape};
 use vectorcraft_geom::{Affine, BezPath, FillRule, Rect};
@@ -716,6 +717,32 @@ fn to_path(s: &Surface, bp: &BezPath) -> Option<Path> {
     pb.finish()
 }
 
+/// The meshes of `children` when every one is a plain gradient mesh — visible, opaque, normal
+/// blending, no mask, effects or appearance of its own — that is, art a single shading draws the
+/// same; else none.
+fn plain_meshes(children: &[Arc<Node>]) -> Vec<&GradientMesh> {
+    fn plain(n: &Node) -> Option<&GradientMesh> {
+        match &n.kind {
+            NodeKind::Mesh(m)
+                if n.visible
+                    && n.opacity >= 1.0
+                    && n.blend == BlendMode::Normal
+                    && n.extras().mask.is_none()
+                    && n.appearance.items.iter().all(|i| match i {
+                        AppearanceItem::Fill(f) => f.paint.is_none(),
+                        AppearanceItem::Stroke(st) => st.paint.is_none(),
+                    })
+                    && n.appearance.effects.is_empty() =>
+            {
+                Some(m)
+            }
+            _ => None,
+        }
+    }
+    let meshes: Vec<&GradientMesh> = children.iter().filter_map(|c| plain(c)).collect();
+    if meshes.len() == children.len() { meshes } else { Vec::new() }
+}
+
 fn norm(v: f32) -> NormalizedF32 {
     NormalizedF32::new(if v.is_finite() { v.clamp(0.0, 1.0) } else { 1.0 }).unwrap_or(NormalizedF32::ONE)
 }
@@ -800,6 +827,11 @@ impl Exporter<'_> {
     /// conversion, RGB and Lab colours of CMYK documents are separated into CMYK through the
     /// document's colour spaces, so the file carries press values.
     fn col(&mut self, c: &Color) -> krilla::color::Color {
+        color(&self.col_out(c))
+    }
+
+    /// The colour [`Self::col`] writes, before it becomes the PDF writer's.
+    fn col_out(&mut self, c: &Color) -> Color {
         let cmyk_doc = self.doc.color_mode == vectorcraft_doc::ColorMode::Cmyk;
         if let (true, true, Color::Rgb { r, g, b }) = (cmyk_doc, self.convert, c) {
             self.rgb_in_cmyk.colours.insert([r.to_bits(), g.to_bits(), b.to_bits()]);
@@ -809,7 +841,7 @@ impl Exporter<'_> {
             let note = note.clone();
             self.warn(note);
         }
-        color(&c)
+        c
     }
 
     /// The Separation colour space of spot swatch `name` (its CMYK equivalent is the alternate
@@ -1151,6 +1183,8 @@ impl Exporter<'_> {
             pushes += 1;
         }
         match &n.kind {
+            // A group of nothing but plain gradient meshes (as a PDF's mesh shadings import): one shading.
+            NodeKind::Group { children, clip: false } if children.len() > 1 && self.meshes(s, &plain_meshes(children)) => {}
             NodeKind::Layer { children, clip: false, .. } | NodeKind::Group { children, clip: false } => self.children(s, children, page),
             NodeKind::Group { children, clip: true } | NodeKind::Layer { children, clip: true, .. } => {
                 // The region every output clips to; nothing to clip by hides the clipped art. The
@@ -1193,6 +1227,7 @@ impl Exporter<'_> {
                     self.node(s, &art, page, true);
                 }
             }
+            NodeKind::Mesh(m) if self.meshes(s, &[m]) => {}
             // Live blends/envelopes/meshes export their evaluated (expanded) form.
             NodeKind::Blend { .. }
             | NodeKind::Envelope { .. }
@@ -1210,6 +1245,86 @@ impl Exporter<'_> {
         for _ in 0..pushes {
             s.pop();
         }
+    }
+
+    /// Gradient meshes drawn as one PDF mesh shading (Type 6: a Coons patch per mesh cell, each
+    /// blending its corner colours across its curved shape), filled over their bounds: a shading
+    /// paints only where its patches lie. The viewer or RIP blends at its own resolution, so the
+    /// file stays small and the blend smooth; the corner colours are the Output settings' colours
+    /// ([`Self::col`]), and corner opacities a soft mask. False when there is nothing to write
+    /// this way (no meshes, colours that don't share a colour space, coordinates out of range):
+    /// the meshes are then expanded into flat-colour pieces as before.
+    fn meshes(&mut self, s: &mut Surface, meshes: &[&GradientMesh]) -> bool {
+        let valid: Vec<&GradientMesh> = meshes.iter().copied().filter(|m| m.is_valid()).collect();
+        if valid.is_empty() || valid.len() != meshes.len() {
+            return false;
+        }
+        // One colour space for every corner, as for gradient stops: mixed models go through RGB,
+        // or stay CMYK in a CMYK document, where `col` separates the rest.
+        let corners = || valid.iter().flat_map(|m| m.points.iter().map(|p| p.color));
+        let first = corners().next().map(|c| c.model());
+        let mixed = corners().any(|c| Some(c.model()) != first);
+        let cmyk_doc = self.doc.color_mode == vectorcraft_doc::ColorMode::Cmyk;
+        let one = |c: Color| match c {
+            Color::Cmyk { .. } if cmyk_doc => c,
+            _ if mixed => c.in_model(vectorcraft_color::cms::Model::Rgb),
+            _ => c,
+        };
+        let mut patches = Vec::new();
+        let mut bounds: Option<Rect> = None;
+        let mut space = None;
+        for m in valid {
+            let out: Vec<Color> = m.points.iter().map(|p| self.col_out(&one(p.color))).collect();
+            // The PDF writer needs one colour space for the whole shading.
+            if out.iter().any(|c| c.model() != out[0].model()) || space.is_some_and(|m| m != out[0].model()) {
+                return false;
+            }
+            space = Some(out[0].model());
+            let colors: Vec<krilla::color::Color> = out.iter().map(color).collect();
+            for r in 0..m.rows as usize {
+                for c in 0..m.cols as usize {
+                    let (a, b, cc, d) = (m.idx(r, c), m.idx(r, c + 1), m.idx(r + 1, c), m.idx(r + 1, c + 1));
+                    let (p00, p01, p10, p11) = (&m.points[a], &m.points[b], &m.points[cc], &m.points[d]);
+                    use vectorcraft_doc::live::{H_DOWN, H_LEFT, H_RIGHT, H_UP};
+                    // The inverse of `GradientMesh::coons`: v runs cp0 → cp3, u runs cp0 → cp9.
+                    let cp = [
+                        p00.p,
+                        p00.p + p00.handles[H_DOWN],
+                        p10.p + p10.handles[H_UP],
+                        p10.p,
+                        p10.p + p10.handles[H_RIGHT],
+                        p11.p + p11.handles[H_LEFT],
+                        p11.p,
+                        p11.p + p11.handles[H_UP],
+                        p01.p + p01.handles[H_DOWN],
+                        p01.p,
+                        p01.p + p01.handles[H_LEFT],
+                        p00.p + p00.handles[H_RIGHT],
+                    ];
+                    if !in_range(&cp.iter().flat_map(|p| [p.x, p.y]).collect::<Vec<_>>()) {
+                        return false;
+                    }
+                    for p in cp {
+                        bounds = Some(bounds.map_or(Rect::from_points(p, p), |b| b.union_pt(p)));
+                    }
+                    patches.push(MeshPatch {
+                        points: cp.map(|p| (p.x as f32, p.y as f32)),
+                        colors: [colors[a].clone(), colors[cc].clone(), colors[d].clone(), colors[b].clone()],
+                        opacities: [p00.opacity, p10.opacity, p11.opacity, p01.opacity].map(norm),
+                    });
+                }
+            }
+        }
+        let Some(b) = bounds else { return false };
+        let Some(path) = to_path(s, &b.inflate(1.0, 1.0).to_path(0.1)) else { return false };
+        s.set_stroke(None);
+        s.set_fill(Some(Fill {
+            paint: MeshGradient { patches, transform: Transform::default(), anti_alias: false }.into(),
+            opacity: NormalizedF32::ONE,
+            rule: krilla::paint::FillRule::NonZero,
+        }));
+        s.draw_path(&path);
+        true
     }
 
     fn shape(&mut self, s: &mut Surface, n: &Node, bp: &BezPath, r: FillRule, page: Rect) {

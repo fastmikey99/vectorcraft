@@ -128,4 +128,4 @@ codegen-units = 1
 hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "ca50d63b773c99f96e75c77ce5a1d21e7c9cda0d" }
 hayro-interpret = { git = "https://github.com/storytold/craft-libs", rev = "ca50d63b773c99f96e75c77ce5a1d21e7c9cda0d" }
 hayro-jbig2 = { git = "https://github.com/storytold/craft-libs", rev = "ca50d63b773c99f96e75c77ce5a1d21e7c9cda0d" }
-krilla = { git = "https://github.com/storytold/craft-libs", rev = "ca50d63b773c99f96e75c77ce5a1d21e7c9cda0d" }
+krilla = { git = "https://github.com/fastmikey99/craft-libs", rev = "ee70fcdc6758acfd5c02b4bf990f44b5de681aea" }
