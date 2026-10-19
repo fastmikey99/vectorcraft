@@ -10,6 +10,7 @@ pub mod geometry;
 pub mod independent;
 mod measure;
 mod observed;
+mod observed_images;
 pub mod ordering;
 mod paint_fidelity;
 pub mod pdf;

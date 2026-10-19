@@ -169,7 +169,24 @@ fn reason(report: &mut Report, r: &Request, why: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn check(r: &Request, c: &Census, report: &mut Report) -> Result<(), String> {
+pub(crate) fn check_pdf(
+    r: &Request,
+    bytes: &[u8],
+    doc: &vectorcraft_doc::Document,
+    warnings: &[String],
+    c: &Census,
+    report: &mut Report,
+) -> Result<(), String> {
+    if c.image_objects > 0 {
+        match crate::observed_images::Prelude::new(r, bytes, doc, warnings, c) {
+            Ok(proof) => check(r, proof.census(), Some(&proof), report),
+            Err(why) => reason(report, r, &format!("Technical-vector isolation from process images is unresolved: {why}")),
+        }
+    } else {
+        check(r, c, None, report)
+    }
+}
+fn check(r: &Request, c: &Census, prelude: Option<&crate::observed_images::Prelude>, report: &mut Report) -> Result<(), String> {
     reason(report, r, "This final-output observation has not yet established its specific prerequisites")?;
     if !crate::contract::issues(&r.recipe).is_empty() || crate::digest(&r.recipe)? != r.identity.recipe_sha256 {
         return reason(report, r, "Executable recipe contract/identity must be valid before interpreting final-output requirements");
@@ -181,7 +198,7 @@ pub(crate) fn check(r: &Request, c: &Census, report: &mut Report) -> Result<(), 
     }
     if !c.paint_order_verified
         || c.raw_audit_error.is_some()
-        || c.raw_audit.as_ref().is_none_or(|a| a.issue_count != 0 || a.image_use_count != 0)
+        || (prelude.is_none() && c.raw_audit.as_ref().is_none_or(|a| a.issue_count != 0 || a.image_use_count != 0))
         || c.budget_exhausted
         || !c.unresolved.is_empty()
         || !c.unaccounted_objects.is_empty()
@@ -224,11 +241,12 @@ pub(crate) fn check(r: &Request, c: &Census, report: &mut Report) -> Result<(), 
     }
 
     let wrong: Vec<_> = paints.iter().filter(|p| !links.iter().any(|l| matches(l, p))).collect();
-    report.record("observed/routing",if !wrong.is_empty(){Status::Fail}else if ambiguous_count>0{Status::Incomplete}else{Status::Pass},
+    report.record("observed/routing",if !wrong.is_empty(){Status::Fail}else if ambiguous_count>0 || prelude.is_some(){Status::Incomplete}else{Status::Pass},
         "Observed nonempty paint checked against declared exact-ink or retained-source layer routes; source colour fidelity remains separate",
-        json!({"paint_count":paints.len(),"ambiguous_retained_source_count":ambiguous_count,"wrong_count":wrong.len(),"wrong_sample":wrong.iter().take(64).map(|p|sample(p)).collect::<Vec<_>>(),"observed_inks":paints.iter().filter_map(|p|p.ink.as_ref()).collect::<BTreeSet<_>>() }),evidence(r))?;
+        json!({"image_prelude":prelude.map(|p|p.summary()),"paint_count":paints.len(),"ambiguous_retained_source_count":ambiguous_count,"wrong_count":wrong.len(),"wrong_sample":wrong.iter().take(64).map(|p|sample(p)).collect::<Vec<_>>(),"observed_inks":paints.iter().filter_map(|p|p.ink.as_ref()).collect::<BTreeSet<_>>() }),evidence(r))?;
     let mut order_work = 0usize;
     for link in &links {
+        let image_affected = prelude.is_some_and(|p| p.affects(&link.key));
         let objects: Vec<_> = paints.iter().filter(|p| p.layer == link.pdf_layer).copied().collect();
         let incompatible: Vec<_> = objects.iter().filter(|p| !links.iter().any(|l| l.pdf_layer == link.pdf_layer && matches(l, p))).collect();
         let matched: Vec<_> = objects.iter().filter(|p| matches(link, p)).copied().collect();
@@ -247,15 +265,15 @@ pub(crate) fn check(r: &Request, c: &Census, report: &mut Report) -> Result<(), 
             .iter()
             .filter(|p| p.overprint != link.overprint && !links.iter().any(|other| other.overprint != link.overprint && matches(other, p)))
             .collect();
-        let status = if !incompatible.is_empty() || !wrong_flags.is_empty() || (required && matched.iter().all(|p| !live(p))) {
+        let status = if !incompatible.is_empty() || !wrong_flags.is_empty() || (required && !image_affected && matched.iter().all(|p| !live(p))) {
             Status::Fail
-        } else if matched.is_empty() || flags_ambiguous {
+        } else if image_affected || matched.is_empty() || flags_ambiguous {
             Status::Incomplete
         } else {
             Status::Pass
         };
         report.record(&format!("observed/file/{}/paint",link.key),status,
-            if required && matched.iter().all(|p|!live(p)){"Unconditionally required contribution has no nonzero paint"}else if flags_ambiguous{"Shared source/exact route prevents contributor-specific overprint attribution"}else if matched.is_empty() && incompatible.is_empty(){"No matching nonempty paint observed; conditional contribution applicability requires source evidence"}else{"Observed route and overprint flags; shared-plate contributors are not individually attributed"},
+            if image_affected{"Image contribution remains unresolved; vector defects are independent witnesses"}else if required && matched.iter().all(|p|!live(p)){"Unconditionally required contribution has no nonzero paint"}else if flags_ambiguous{"Shared source/exact route prevents contributor-specific overprint attribution"}else if matched.is_empty() && incompatible.is_empty(){"No matching nonempty paint observed; conditional contribution applicability requires source evidence"}else{"Observed route and overprint flags; shared-plate contributors are not individually attributed"},
             json!({"expected_layer":link.pdf_layer,"expected_ink":link.separation_name,"expected_overprint":link.overprint,"matched_count":matched.len(),"incompatible_count":incompatible.len(),"wrong_overprint_count":wrong_flags.len(),"sample":objects.iter().take(64).map(|p|sample(p)).collect::<Vec<_>>()}),evidence(r))?;
         let mut comparisons = vec![];
         let mut bad = 0;
@@ -285,12 +303,12 @@ pub(crate) fn check(r: &Request, c: &Census, report: &mut Report) -> Result<(), 
             &format!("observed/file/{}/order", link.key),
             if bad > 0 {
                 Status::Fail
-            } else if matched.is_empty() || flags_ambiguous || order_limited {
+            } else if prelude.is_some() || matched.is_empty() || flags_ambiguous || order_limited {
                 Status::Incomplete
             } else {
                 Status::Pass
             },
-            "Actual order between observed outputs on each page; absent conditional outputs are not waived",
+            "Actual vector order between observed outputs on each page; image order and absent conditional outputs remain unresolved",
             json!({"comparisons":comparisons,"comparisons_checked":checked,"wrong_count":bad,"budget_exhausted":order_limited}),
             evidence(r),
         )?;
@@ -314,12 +332,13 @@ pub(crate) fn check(r: &Request, c: &Census, report: &mut Report) -> Result<(), 
                 })
                 .collect();
             let routed_count = objects.iter().filter(|p| links.iter().any(|l| members.contains(l.key.as_str()) && matches(l, p))).count();
+            let image_affected = prelude.is_some_and(|p| members.iter().any(|key| p.affects(key)));
             let required = plate.get("required").and_then(Value::as_bool) == Some(true);
             let surviving = objects.iter().any(|p| {
                 let composite = plate.get("name_mode").and_then(Value::as_str) == Some("composite");
                 positive_ink(c, p, composite) && if composite { survival.composite_unmodified(p) } else { survival.unmodified(p) }
             });
-            report.record(&format!("observed/plate/{key}/presence"),if surviving{Status::Pass}else if required && objects.is_empty(){Status::Fail}else{Status::Incomplete},
+            report.record(&format!("observed/plate/{key}/presence"),if surviving{Status::Pass}else if required && !image_affected && objects.is_empty(){Status::Fail}else{Status::Incomplete},
                 if objects.is_empty(){"Required output absence fails; conditional output absence needs source applicability"}else{"Presence requires positive decoded ink and filled area; unsupported colour conversion or later knockout, zero-tint or process paint remains unresolved"},
                 json!({"required":required,"name":plate.get("name"),"destination":plate.get("destination"),"contributing_layers":objects.iter().map(|p|p.layer.as_str()).collect::<BTreeSet<_>>(),"objects":objects.len(),"routed_objects":routed_count,"unmodified_nonempty_paint":surviving}),evidence(r))?;
         }
@@ -328,16 +347,25 @@ pub(crate) fn check(r: &Request, c: &Census, report: &mut Report) -> Result<(), 
     let absent: Vec<_> = report.findings.iter().filter(|f| f.status == Status::NotApplicable).map(|f| f.obligation.key.clone()).collect();
     for key in absent {
         let targets = if let Some(link_key) = key.strip_prefix("file/").and_then(|k| k.strip_suffix("/contribution")) {
-            if links.iter().find(|l| l.key == link_key).is_some_and(|l| paints.iter().any(|p| matches(l, p))) {
+            if prelude.is_some_and(|p| p.affects(link_key))
+                || links.iter().find(|l| l.key == link_key).is_some_and(|l| paints.iter().any(|p| matches(l, p)))
+            {
                 continue;
             }
             vec![format!("observed/file/{link_key}/paint"), format!("observed/file/{link_key}/order")]
         } else if let Some(rule_key) = key.strip_prefix("rule/").and_then(|k| k.strip_suffix("/applicability")) {
-            if links.iter().filter(|l| l.source_rule == rule_key).any(|l| paints.iter().any(|p| matches(l, p))) {
+            if links
+                .iter()
+                .filter(|l| l.source_rule == rule_key)
+                .any(|l| prelude.is_some_and(|p| p.affects(&l.key)) || paints.iter().any(|p| matches(l, p)))
+            {
                 continue;
             }
             vec![format!("observed/rule/{rule_key}/relationship")]
         } else if let Some(plate_key) = key.strip_prefix("plate/") {
+            if prelude.is_some() {
+                continue;
+            }
             vec![format!("observed/plate/{plate_key}/presence")]
         } else {
             continue;
@@ -963,5 +991,211 @@ mod tests {
             let out = crate::pdf::check(&request(&bytes), &bytes).unwrap();
             assert_eq!(finding(&out, "observed/plate/dark-output/presence").status, Status::Pass, "Technical spot {after}/{mode}");
         }
+    } // Original public-syntax image + technical-vector fixtures. No customer data.
+    fn prelude_pdf(mode: &str) -> Vec<u8> {
+        let image = if mode == "clipped" {
+            "/OC /S BDC q 0 0 1 1 re W n 10 0 0 10 30 30 cm /Im Do Q EMC"
+        } else {
+            "/OC /S BDC q 10 0 0 10 30 30 cm /Im Do Q EMC"
+        };
+        let vector = match mode {
+            "wrong-route" => "/OC /W BDC /GS gs /Ink cs 1 scn 10 10 50 50 re f EMC",
+            "wrong-flag" => "/OC /L BDC /Ink cs 1 scn 10 10 50 50 re f EMC",
+            "no-vector" => "",
+            _ => "/OC /L BDC /GS gs /Ink cs 1 scn 10 10 50 50 re f EMC",
+        };
+        let stream = if mode == "after" { format!("{vector} {image}") } else { format!("{image} {vector}") };
+        let extras = match mode {
+            "group" => "/Group << /S /Transparency /CS /DeviceCMYK >>",
+            _ => "",
+        };
+        let image_extras = match mode {
+            "interpolate" => "/Interpolate true",
+            "alpha-zero" | "alpha-positive" => "/SMask 10 0 R",
+            _ => "",
+        };
+        let space = if mode == "technical-image" { "[/Separation /Exact#20ink /DeviceCMYK 5 0 R]" } else { "/DeviceGray" };
+        let layer = if mode == "duplicate" { "Layer" } else { "Source" };
+        let alpha = if mode == "alpha-zero" { "00>" } else { "FF>" };
+        crate::pdf::tests::objects_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [6 0 R 9 0 R 11 0 R] /D << /ON [6 0 R 9 0 R 11 0 R] >> >> >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] {extras} /Resources << /Properties << /L 6 0 R /S 9 0 R /W 11 0 R >> /XObject << /Im 8 0 R >> /ColorSpace << /Ink [/Separation /Exact#20ink /DeviceCMYK 5 0 R] >> /ExtGState << /GS 7 0 R >> >> /Contents 4 0 R >>"
+            ),
+            format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
+            "<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 1 0 0] /N 1 >>".into(),
+            "<< /Type /OCG /Name (Layer) >>".into(),
+            "<< /Type /ExtGState /op true /OP true /OPM 1 >>".into(),
+            format!(
+                "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace {space} {image_extras} /Filter /ASCIIHexDecode /Length 3 >>\nstream\n80>\nendstream"
+            ),
+            format!("<< /Type /OCG /Name ({layer}) >>"),
+            format!(
+                "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /ASCIIHexDecode /Length 3 >>\nstream\n{alpha}\nendstream"
+            ),
+            "<< /Type /OCG /Name (Unrouted) >>".into(),
+        ])
+    }
+    fn prelude_request(bytes: &[u8]) -> Request {
+        let mut r = request(bytes);
+        let mut rule = r.recipe.rules[0].clone();
+        rule.rule_key = "image-source".into();
+        r.recipe.rules.push(rule);
+        let mut link = r.recipe.file_links[0].clone();
+        link.key = "image-output".into();
+        link.source_rule = "image-source".into();
+        link.name_mode = "source".into();
+        link.separation_name = None;
+        link.pdf_layer = "Source".into();
+        link.destination = "Indigo".into();
+        link.layer_order = 0;
+        r.recipe.file_links[0].layer_order = 1;
+        r.recipe.file_links.push(link);
+        let f = r.recipe.foundation.as_mut().unwrap();
+        f["treatments"]["image-source"] = f["treatments"]["arbitrary"].clone();
+        f["treatments"]["image-source"]["paint"] = json!({"mode":"source"});
+        f["outputs"]["image-output"] = f["outputs"]["output"].clone();
+        f["verification"]["contributions"]["image-output"] = json!({"emptiness":"required"});
+        for garment in ["dark", "light"] {
+            f["verification"]["plates"].as_array_mut().unwrap().push(json!({"key":format!("{garment}-image"),"garment":garment,"name":null,"name_mode":"composite","destination":"Indigo","required":false,"links":["image-output"],"evidence":"synthetic specification"}));
+        }
+        r.identity.recipe_sha256 = crate::digest(&r.recipe).unwrap();
+        assert!(crate::contract::issues(&r.recipe).is_empty(), "{:?}", crate::contract::issues(&r.recipe));
+        r
+    }
+    #[test]
+    fn process_image_prelude_isolates_technical_vectors_without_claiming_image_paint() {
+        for mode in ["plain", "alpha-zero", "alpha-positive", "clipped"] {
+            let bytes = prelude_pdf(mode);
+            let r = prelude_request(&bytes);
+            let out = crate::pdf::check(&r, &bytes).unwrap();
+            assert_eq!(
+                finding(&out, "observed/plate/dark-output/presence").status,
+                Status::Pass,
+                "{mode}: {:?}",
+                finding(&out, "observed/plate/dark-output/presence")
+            );
+            assert_eq!(finding(&out, "observed/file/output/paint").status, Status::Pass);
+            for key in [
+                "observed/routing",
+                "observed/file/output/order",
+                "observed/file/image-output/order",
+                "observed/file/image-output/paint",
+                "observed/plate/dark-image/presence",
+                "global/integrity",
+            ] {
+                assert_eq!(finding(&out, key).status, Status::Incomplete, "{mode}/{key}");
+            }
+            assert_eq!(finding(&out, "global/integrity").observed["raw_paint_audit"]["image_use_count"], json!(1));
+            assert_eq!(out.findings.len(), crate::enumerate(&r).unwrap().len());
+        }
+    }
+    #[test]
+    fn technical_vector_defects_and_absence_remain_decidable_after_process_image() {
+        for (mode, key) in
+            [("wrong-flag", "observed/file/output/paint"), ("wrong-route", "observed/routing"), ("no-vector", "observed/plate/dark-output/presence")]
+        {
+            let bytes = prelude_pdf(mode);
+            let r = prelude_request(&bytes);
+            let out = crate::pdf::check(&r, &bytes).unwrap();
+            assert_eq!(finding(&out, key).status, Status::Fail, "{mode}: {:?}", finding(&out, key));
+            assert_eq!(finding(&out, "observed/file/image-output/paint").status, Status::Incomplete);
+        }
+    }
+    #[test]
+    fn image_prelude_refuses_later_images_unknown_context_and_technical_ink() {
+        for mode in ["after", "group", "interpolate", "technical-image", "duplicate"] {
+            let bytes = prelude_pdf(mode);
+            let r = prelude_request(&bytes);
+            let out = crate::pdf::check(&r, &bytes).unwrap();
+            assert!(out.findings.iter().filter(|f| f.obligation.key.starts_with("observed/")).all(|f| f.status == Status::Incomplete), "{mode}");
+        }
+        let bytes = prelude_pdf("plain");
+        let mut r = prelude_request(&bytes);
+
+        // Exercise the proof directly: even exact process names must not be
+        // considered absent merely because they are carried by an image.
+        let imported = vectorcraft_pdf::import_with_report(&bytes, &Default::default()).unwrap();
+        let mut c = crate::pdf::census(&imported.document);
+        let _ = crate::ordering::try_reconcile(&bytes, &mut c);
+        for name in ["Cyan", "Magenta", "Yellow", "Black", "All", "None"] {
+            r.recipe.file_links[0].separation_name = Some(name.into());
+            assert!(crate::observed_images::Prelude::new(&r, &bytes, &imported.document, &imported.warnings, &c).is_err(), "{name}");
+        }
+    }
+    #[test]
+    fn image_isolation_rejects_mismatched_inventories_frames_routes_and_import_loss() {
+        let bytes = prelude_pdf("plain");
+        let r = prelude_request(&bytes);
+        let imported = vectorcraft_pdf::import_with_report(&bytes, &Default::default()).unwrap();
+        let mut general = crate::pdf::census(&imported.document);
+        let _ = crate::ordering::try_reconcile(&bytes, &mut general);
+        assert!(crate::observed_images::Prelude::new(&r, &bytes, &imported.document, &imported.warnings, &general).is_ok());
+        general.raw_audit.as_mut().unwrap().image_use_count += 1;
+        assert!(crate::observed_images::Prelude::new(&r, &bytes, &imported.document, &imported.warnings, &general).is_err());
+        general.raw_audit.as_mut().unwrap().image_use_count -= 1;
+        assert!(crate::observed_images::Prelude::new(&r, &bytes, &imported.document, &["Unknown import loss".into()], &general).is_err());
+        let mut changed = imported.document.clone();
+        changed.artboards[0].rect.x1 += 1.0;
+        assert!(crate::observed_images::Prelude::new(&r, &bytes, &changed, &imported.warnings, &general).is_err());
+        let mut changed = r.clone();
+        changed.recipe.file_links[1].pdf_layer = "Unknown route".into();
+        assert!(crate::observed_images::Prelude::new(&changed, &bytes, &imported.document, &imported.warnings, &general).is_err());
+        changed = r.clone();
+        changed.recipe.file_links.push(changed.recipe.file_links[1].clone());
+        assert!(crate::observed_images::Prelude::new(&changed, &bytes, &imported.document, &imported.warnings, &general).is_err());
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn image_prelude_exported_cases_have_independent_expected_statuses() {
+        let Ok(dir) = std::env::var("CHECK_OBSERVED_IMAGE_EVIDENCE_DIR") else { return };
+        let dir = std::path::Path::new(&dir);
+        std::fs::create_dir_all(dir).unwrap();
+        let mut cases = vec![];
+        for mode in [
+            "plain",
+            "alpha-zero",
+            "alpha-positive",
+            "clipped",
+            "wrong-flag",
+            "wrong-route",
+            "no-vector",
+            "after",
+            "group",
+            "interpolate",
+            "technical-image",
+            "duplicate",
+        ] {
+            let bytes = prelude_pdf(mode);
+            let r = prelude_request(&bytes);
+            let out = crate::pdf::check(&r, &bytes).unwrap();
+            let mut expected = serde_json::Map::new();
+            let refused = ["after", "group", "interpolate", "technical-image", "duplicate"].contains(&mode);
+            expected.insert("observed/file/image-output/paint".into(), json!("incomplete"));
+            expected.insert("observed/file/output/order".into(), json!("incomplete"));
+            expected.insert("observed/plate/dark-image/presence".into(), json!("incomplete"));
+            expected.insert(
+                "observed/plate/dark-output/presence".into(),
+                json!(if refused {
+                    "incomplete"
+                } else if mode == "no-vector" {
+                    "fail"
+                } else {
+                    "pass"
+                }),
+            );
+            expected.insert("observed/routing".into(), json!(if mode == "wrong-route" { "fail" } else { "incomplete" }));
+            if !refused && mode != "wrong-route" && mode != "no-vector" {
+                expected.insert("observed/file/output/paint".into(), json!(if mode == "wrong-flag" { "fail" } else { "pass" }));
+            }
+            for (key, status) in &expected {
+                assert_eq!(serde_json::to_value(finding(&out, key).status).unwrap(), *status, "{mode}/{key}");
+            }
+            std::fs::write(dir.join(format!("{mode}.pdf")), bytes).unwrap();
+            std::fs::write(dir.join(format!("{mode}.json")), serde_json::to_vec(&r).unwrap()).unwrap();
+            cases.push(json!({"name":mode,"args":[format!("/case/{mode}.json"),format!("/case/{mode}.pdf")],"expected":expected,"expected_image_audit_count":1}));
+        }
+        std::fs::write(dir.join("parity-cases.json"), serde_json::to_vec_pretty(&cases).unwrap()).unwrap();
     }
 }

@@ -36,7 +36,6 @@ pub struct RawPaintAudit {
     pub issue_count: usize,
     pub issues_sample: Vec<String>,
 }
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug)]
 pub(crate) struct PredictionImage {
     pub layer: String,
@@ -47,13 +46,10 @@ pub(crate) struct PredictionImage {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Census {
-    #[cfg(not(target_arch = "wasm32"))]
     #[serde(skip)]
     pub(crate) prediction_images: Vec<PredictionImage>,
-    #[cfg(not(target_arch = "wasm32"))]
     #[serde(skip)]
     pub(crate) image_clip_elements: usize,
-    #[cfg(not(target_arch = "wasm32"))]
     #[serde(skip)]
     pub(crate) page_origins_mm: Vec<[f64; 2]>,
     pub paint_order_verified: bool,
@@ -185,11 +181,10 @@ fn walk(doc: &Document, symbols: &SymbolBoxes, node: &Node, layer: &str, state: 
     if matches!(node.kind, NodeKind::Image(_)) {
         census.image_objects += 1;
     }
-    // This mode is private to independent mixed-content prediction. Every image
+    // This mode retains context for narrowly scoped raw reconciliation. Every image
     // still has to match the raw image-use census and pass raw sample/context
     // checks before it can enter the ordered predictor. Ordinary census retains
     // all image gaps, and no production obligation is resolved by this shortcut.
-    #[cfg(not(target_arch = "wasm32"))]
     if raw_images && let NodeKind::Image(image) = &node.kind {
         // Exact image-owned masks come from the raw decoder. Ancestor/GS
         // masks and blending remain separately unresolved.
@@ -372,17 +367,13 @@ pub fn census(doc: &Document) -> Census {
     census_mode(doc, false)
 }
 /// Image contexts and paths for raw reconciliation only; not a complete census.
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn census_for_raw_image_prediction(doc: &Document) -> Census {
     census_mode(doc, true)
 }
 fn census_mode(doc: &Document, raw_images: bool) -> Census {
     let mut c = Census {
-        #[cfg(not(target_arch = "wasm32"))]
         prediction_images: vec![],
-        #[cfg(not(target_arch = "wasm32"))]
         image_clip_elements: 0,
-        #[cfg(not(target_arch = "wasm32"))]
         page_origins_mm: doc.artboards.iter().map(|a| [a.rect.x0 * 25.4 / 72.0, a.rect.y0 * 25.4 / 72.0]).collect(),
         paint_order_verified: false,
         raw_audit: None,
@@ -454,7 +445,7 @@ pub fn check(request: &Request, bytes: &[u8]) -> Result<Report, String> {
     let mut c = census(&imported.document);
     let (warnings, notices) = import_messages(imported.warnings);
     let import_complete = warnings.is_empty();
-    c.unresolved.extend(warnings);
+    c.unresolved.extend(warnings.iter().cloned());
     // Ordering is required for overlapping paint, but an ordering gap does not
     // erase independently measurable geometry or the existing diagnostics.
     let _ = crate::ordering::try_reconcile(bytes, &mut c);
@@ -534,7 +525,7 @@ pub fn check(request: &Request, bytes: &[u8]) -> Result<Report, String> {
     }
     crate::ordering::check(request, bytes, &c, &mut report)?;
     crate::specification::check(request, bytes, &mut report)?;
-    crate::observed::check(request, &c, &mut report)?;
+    crate::observed::check_pdf(request, bytes, &imported.document, &warnings, &c, &mut report)?;
     Ok(report)
 }
 

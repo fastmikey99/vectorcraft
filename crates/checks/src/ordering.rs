@@ -52,7 +52,6 @@ fn indices_mode(order: &vectorcraft_pdf::PrintOrder, census: &crate::pdf::Census
 }
 /// Match every path while raw images are independently decoded. This does not
 /// mark the general census or any production obligation complete.
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn reconcile_paths_for_images(order: &vectorcraft_pdf::PrintOrder, census: &mut crate::pdf::Census) -> Result<(), String> {
     if order.images.iter().map(Vec::len).sum::<usize>() != census.image_objects {
         return Err("Raw and editable image-use counts differ in mixed prediction".into());

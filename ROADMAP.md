@@ -289,3 +289,6 @@ Verification callers retain explicit enclosing/page-wide clips and Form BBoxes t
 
 
 - **HC20 — direct process presence and bounded gap defects:** final-output observations recognize a direct process-named Separation through its retained named CMYK component, with positive-area and later-paint guards. Gap intervals can disprove an explicitly bound acceptance tolerance even when nominal-offset topology is unresolved; matching unsigned gaps never establish full morphology. Original-dependent questions and unapproved manufacturing criteria remain unresolved. See [production checks](docs/production-checks.md).
+
+
+2026-10-19 — HC21: bounded technical-vector observations after a validated process-only image prelude. Real image counts and general diagnostics remain; source-image coverage, mixed order and broader PDF semantics stay unresolved. All nine CI gates, 136 checker tests and 403 exact-and-expected native/WASI comparisons pass; two Fable reviews closed with no remaining blocker; no parity score or production-readiness claim.
