@@ -46,6 +46,7 @@ mod encrypt;
 mod export;
 mod file_info;
 mod forms;
+mod image_contract;
 mod image_samples;
 mod images;
 mod import;

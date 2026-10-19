@@ -39,7 +39,8 @@ pub struct PrintImageUse {
     // Omit initial values to preserve existing raw-image preparation identities.
     #[serde(skip_serializing_if = "PrintRenderingIntent::is_default")]
     pub effective_rendering_intent: PrintRenderingIntent,
-    /// False only for the initial implicit intent. Explicit intent remains unqualified.
+    /// Whether an explicit intent declaration was observed. A missing resource can
+    /// leave effective intent Unresolved without establishing a declaration.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub rendering_intent_explicit: bool,
     pub layer: Option<usize>,
@@ -202,7 +203,12 @@ pub(crate) fn describe(stream: &Stream<'_>, res: &Resources<'_>, inline: bool) -
     }
     let w = key(d, b"Width", b"W", inline, &mut out.issues);
     let h = key(d, b"Height", b"H", inline, &mut out.issues);
-    out.dimensions = d.get::<u32>(w).zip(d.get::<u32>(h)).filter(|(w, h)| *w > 0 && *h > 0).map(|(w, h)| [w, h]);
+    out.dimensions = d
+        .get::<Object<'_>>(w)
+        .and_then(crate::image_contract::integer)
+        .zip(d.get::<Object<'_>>(h).and_then(crate::image_contract::integer))
+        .filter(|(w, h)| *w > 0 && *h > 0)
+        .map(|(w, h)| [w, h]);
     if out.dimensions.is_none() {
         out.issues.push("Invalid or missing image dimensions".into());
     }
@@ -211,7 +217,11 @@ pub(crate) fn describe(stream: &Stream<'_>, res: &Resources<'_>, inline: bool) -
     let interpolate = key(d, b"Interpolate", b"I", inline, &mut out.issues);
     out.interpolate = flag(d, interpolate, &mut out.issues);
     let bpc = key(d, b"BitsPerComponent", b"BPC", inline, &mut out.issues);
-    out.bits_per_component = d.get::<u8>(bpc).or_else(|| (out.stencil && !d.contains_key(bpc)).then_some(1));
+    out.bits_per_component = d
+        .get::<Object<'_>>(bpc)
+        .and_then(crate::image_contract::integer)
+        .and_then(|n| u8::try_from(n).ok())
+        .or_else(|| (out.stencil && !d.contains_key(bpc)).then_some(1));
     if out.bits_per_component.is_none_or(|n| ![1, 2, 4, 8, 16].contains(&n) || (out.stencil && n != 1)) {
         out.issues.push("Image sample depth requires explicit decoding".into());
     }

@@ -2,7 +2,6 @@
 //! ink prediction. These samples do not by themselves resolve clipping, blending,
 //! optional content, interpolation or a manufacturing hard-edge requirement.
 use craft_pdf::syntax::{
-    Filter,
     object::{Array, Dict, Name, Object, Stream},
     page::Resources,
 };
@@ -139,8 +138,9 @@ fn space<'a>(value: Object<'a>, res: &Resources<'a>, depth: u8) -> Result<Space,
                 if base.palette.is_some() {
                     return Err("Nested Indexed image space is invalid".into());
                 }
-                let max = items.next::<u16>().filter(|n| *n <= 255).ok_or("Invalid Indexed high value")?;
-                let size = (usize::from(max) + 1) * base.names.len();
+                let max =
+                    items.next::<Object<'_>>().and_then(crate::image_contract::integer).filter(|n| *n <= 255).ok_or("Invalid Indexed high value")?;
+                let size = (max as usize + 1) * base.names.len();
                 let lookup = items.next::<Object<'_>>().ok_or("Indexed lookup missing")?;
                 let bytes = match lookup {
                     Object::String(s) => {
@@ -149,7 +149,10 @@ fn space<'a>(value: Object<'a>, res: &Resources<'a>, depth: u8) -> Result<Space,
                         }
                         s.as_bytes().to_vec()
                     }
-                    Object::Stream(s) => s.decoded_within(size + 1).map_err(|_| "Indexed table exceeds decode budget")?.into_owned(),
+                    Object::Stream(s) => {
+                        crate::image_contract::filters(&s, false, size + 1)?;
+                        s.decoded_within(size + 1).map_err(|_| "Indexed table exceeds decode budget")?.into_owned()
+                    }
                     _ => return Err("Indexed lookup is not a string or stream".into()),
                 };
                 if bytes.len() != size {
@@ -232,30 +235,30 @@ fn read_raw(stream: &Stream<'_>, components: usize, inline: bool, budget: &mut u
     if [b"Alternates".as_slice(), b"OPI"].iter().any(|k| d.contains_key(k)) {
         return Err("Image alternate print source requires qualification".into());
     }
-    let width = d.get::<u32>(key(d, b"Width", b"W", inline)).filter(|n| *n > 0).ok_or("Invalid image width")?;
-    let height = d.get::<u32>(key(d, b"Height", b"H", inline)).filter(|n| *n > 0).ok_or("Invalid image height")?;
-    let bits = d
-        .get::<u8>(key(d, b"BitsPerComponent", b"BPC", inline))
-        .or_else(|| d.get::<bool>(key(d, b"ImageMask", b"IM", inline)).filter(|v| *v).map(|_| 1))
-        .filter(|b| [1, 2, 4, 8, 16].contains(b))
-        .ok_or("Invalid image bit depth")?;
+    let width = crate::image_contract::integer_entry(d, key(d, b"Width", b"W", inline), None)?;
+    let height = crate::image_contract::integer_entry(d, key(d, b"Height", b"H", inline), None)?;
+    if width == 0 || height == 0 {
+        return Err("Invalid image dimensions".into());
+    }
+    let stencil = d.get::<bool>(key(d, b"ImageMask", b"IM", inline)) == Some(true);
+    let bits = crate::image_contract::integer_entry(d, key(d, b"BitsPerComponent", b"BPC", inline), stencil.then_some(1))?;
+    if !matches!(bits, 1 | 2 | 4 | 8 | 16) {
+        return Err("Invalid image bit depth".into());
+    }
+    let bits = bits as u8;
     if indexed && bits == 16 {
         return Err("16-bit Indexed samples require independent precision qualification".into());
-    }
-    // Lossy filters have separate decode/colour-transform semantics; do not pretend
-    // their post-filter bytes are source samples. Flate predictors are decoded by the reader.
-    if stream.filters().iter().any(|f| matches!(f, Filter::DctDecode | Filter::JpxDecode | Filter::Jbig2Decode | Filter::CcittFaxDecode)) {
-        return Err("Image compression requires qualified sample decoding".into());
     }
     let count =
         u64::from(width).checked_mul(u64::from(height)).and_then(|n| n.checked_mul(components as u64)).ok_or("Image sample count overflow")?;
     if count > *budget as u64 {
         return Err("Image decoded sample budget exceeded".into());
     }
-    *budget -= count as usize;
     let row_bits = u64::from(width) * components as u64 * u64::from(bits);
     let row_bytes = row_bits.div_ceil(8) as usize;
     let length = row_bytes.checked_mul(height as usize).ok_or("Image byte length overflow")?;
+    crate::image_contract::filters(stream, inline, length + 1)?;
+    *budget -= count as usize;
     let mut bytes = stream.decoded_within(length + 1).map_err(|_| "Image sample stream exceeds budget or is malformed")?;
     if inline && stream.filters().is_empty() {
         // The shared reader includes the white-space separator before EI in an

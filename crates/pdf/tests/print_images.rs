@@ -694,3 +694,159 @@ fn unresolved_extgstate_restores_locally_but_retains_the_document_issue() {
     assert_eq!(raw.images[0].iter().map(|i| i.compositing_unresolved).collect::<Vec<_>>(), [true, false, true, false]);
     assert!(raw.issues.iter().any(|i| i.contains("extended graphics-state")));
 }
+
+#[test]
+fn image_filter_declarations_cannot_disappear_during_decoding() {
+    for extra in [
+        "/Filter /UnknownCodec",
+        "/Filter 42",
+        "/Filter [/UnknownCodec]",
+        "/Filter [42]",
+        "/Filter [99 0 R]",
+        "/Filter 99 0 R",
+        "/DecodeParms 42",
+        "/Filter /ASCIIHexDecode /DecodeParms []",
+        "/Filter [/ASCIIHexDecode] /DecodeParms << >>",
+        "/Filter [/ASCIIHexDecode] /DecodeParms [null null]",
+        "/Filter [/ASCIIHexDecode] /DecodeParms [42]",
+        "/Filter [/ASCIIHexDecode] /DecodeParms [99 0 R]",
+        "/Filter /ASCIIHexDecode /DecodeParms 99 0 R",
+        "/Filter /ASCIIHexDecode /DP << /Predictor 1 >>",
+        "/Filter /Crypt",
+    ] {
+        let raw = print_order(&pdf("/Im Do", "/XObject << /Im 5 0 R >>", &[image(&format!("/ColorSpace /DeviceGray {extra}"))])).unwrap();
+        assert!(raw.images[0][0].samples.is_none(), "{extra}");
+        assert!(raw.images[0][0].sample_error.is_some(), "{extra}");
+    }
+    for (extra, data) in [
+        ("", "x"),
+        ("/Filter null /DecodeParms null", "x"),
+        ("/Filter [] /DecodeParms []", "x"),
+        ("/Filter /ASCIIHexDecode", "78>"),
+        ("/Filter [/ASCIIHexDecode] /DecodeParms [null]", "78>"),
+        ("/Filter [/ASCIIHexDecode /RunLengthDecode] /DecodeParms [null null]", "007880>"),
+    ] {
+        let im = stream(&format!("/Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray {extra}"), data);
+        let raw = print_order(&pdf("/Im Do", "/XObject << /Im 5 0 R >>", &[im])).unwrap();
+        let samples = raw.images[0][0].samples.as_ref().unwrap_or_else(|| panic!("{extra}: {:?}", raw.images[0][0].sample_error));
+        assert_eq!(samples.tone(0, 0).unwrap(), 1.0 - 120.0 / 255.0, "{extra}");
+    }
+}
+
+#[test]
+fn fractional_image_layout_is_not_truncated_into_valid_samples() {
+    for (width, height, bits) in [("1.5", "1", "8"), ("1", "1.5", "8"), ("1", "1", "8.5"), ("1.0", "1", "8"), ("1", "1.0", "8"), ("1", "1", "8.0")] {
+        let im = stream(&format!("/Subtype /Image /Width {width} /Height {height} /BitsPerComponent {bits} /ColorSpace /DeviceGray"), "x");
+        let raw = print_order(&pdf("/Im Do", "/XObject << /Im 5 0 R >>", &[im])).unwrap();
+        assert!(raw.images[0][0].samples.is_none(), "{width} {height} {bits}");
+        let d = &raw.images[0][0].description;
+        assert!(!d.issues.is_empty());
+        if width.contains('.') || height.contains('.') {
+            assert!(d.dimensions.is_none());
+        }
+        if bits.contains('.') {
+            assert!(d.bits_per_component.is_none());
+        }
+    }
+    for high in ["0.5", "0.0", "-1", "256"] {
+        let raw =
+            print_order(&pdf("/Im Do", "/XObject << /Im 5 0 R >>", &[image(&format!("/ColorSpace [/Indexed /DeviceGray {high} (x)]"))])).unwrap();
+        assert!(raw.images[0][0].samples.is_none(), "Indexed {high}");
+    }
+    let inline = print_order(&pdf("BI /W 1.5 /H 1 /BPC 8 /CS /G ID x EI", "", &[])).unwrap();
+    assert_eq!(inline.images[0].len(), 1);
+    assert!(inline.images[0][0].samples.is_none());
+}
+
+#[test]
+fn predictor_parameters_preserve_integer_types_and_array_alignment() {
+    use std::io::Write;
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    z.write_all(&[2, 10, 20, 30, 40]).unwrap();
+    let data = z.finish().unwrap().iter().map(|b| format!("{b:02x}")).collect::<String>() + ">";
+    let valid = "/Predictor 12 /Colors 4 /Columns 1 /BitsPerComponent 8";
+    for params in [
+        valid.to_owned(),
+        valid.replace("12", "12.5"),
+        valid.replace("12", "12.0"),
+        valid.replace("4", "4.5"),
+        valid.replace("Columns 1", "Columns 0"),
+        valid.replace("Columns 1", "Columns 1000000"),
+        valid.replace("BitsPerComponent 8", "BitsPerComponent 8.5"),
+    ] {
+        let im = stream(
+            &format!(
+                "/Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceCMYK /Filter [/ASCIIHexDecode /FlateDecode] /DecodeParms [null << {params} >>]"
+            ),
+            &data,
+        );
+        let raw = print_order(&pdf("/Im Do", "/XObject << /Im 5 0 R >>", &[im]));
+        if params == valid {
+            let raw = raw.unwrap();
+            let s = raw.images[0][0].samples.as_ref().unwrap();
+            assert_eq!((0..4).map(|i| s.tone(0, i).unwrap()).collect::<Vec<_>>(), [10., 20., 30., 40.].map(|x| x / 255.0));
+        } else {
+            assert!(raw.is_err() || raw.unwrap().images[0][0].samples.is_none(), "{params}");
+        }
+    }
+    // Original 9-bit LZW clear / one byte / end codes; both EarlyChange modes
+    // have identical code widths for this one-sample control.
+    let data = format!("{:08x}>", (256u32 << 23) | (120u32 << 14) | (257u32 << 5));
+    for early in ["0", "1", "0.5", "2", "99 0 R"] {
+        let im = stream(
+            &format!(
+                "/Subtype /Image /Width 1 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter [/ASCIIHexDecode /LZWDecode] /DecodeParms [null << /EarlyChange {early} >>]"
+            ),
+            &data,
+        );
+        let raw = print_order(&pdf("/Im Do", "/XObject << /Im 5 0 R >>", &[im])).unwrap();
+        if matches!(early, "0" | "1") {
+            assert_eq!(raw.images[0][0].samples.as_ref().unwrap().tone(0, 0).unwrap(), 1.0 - 120.0 / 255.0);
+        } else {
+            assert!(raw.images[0][0].sample_error.as_ref().unwrap().contains("declaration"), "{early}");
+        }
+    }
+}
+
+#[test]
+fn image_dependency_streams_cannot_bypass_declaration_validation() {
+    for extra in ["/Filter /UnknownCodec", "/Filter 42", "/DecodeParms 42", "/Filter /DCTDecode", "/Filter /JBIG2Decode"] {
+        let table = stream(extra, "x");
+        let im = image("/ColorSpace [/Indexed /DeviceGray 0 6 0 R]");
+        let raw = print_order(&pdf("/Im Do", "/XObject << /Im 5 0 R >>", &[im, table])).unwrap();
+        assert!(raw.images[0][0].samples.is_none(), "palette {extra}");
+        let mask = image(&format!("/ColorSpace /DeviceGray {extra}"));
+        let im = image("/ColorSpace /DeviceGray /SMask 6 0 R");
+        let raw = print_order(&pdf("/Im Do", "/XObject << /Im 5 0 R >>", &[im, mask])).unwrap();
+        assert!(raw.images[0][0].samples.is_none(), "mask {extra}");
+    }
+    let mask = stream("/Subtype /Image /Width 1.5 /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray", "x");
+    let raw = print_order(&pdf("/Im Do", "/XObject << /Im 5 0 R >>", &[image("/ColorSpace /DeviceGray /SMask 6 0 R"), mask])).unwrap();
+    assert!(raw.images[0][0].samples.is_none());
+}
+
+#[test]
+fn predictor_color_count_cannot_exceed_the_decoders_integer_capacity() {
+    use std::io::Write;
+    for (colors, predictor) in [(31, 2), (255, 1), (256, 2)] {
+        let width = colors * 2;
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        z.write_all(&vec![1; width]).unwrap();
+        let data = z.finish().unwrap().iter().map(|b| format!("{b:02x}")).collect::<String>() + ">";
+        let im = stream(
+            &format!(
+                "/Subtype /Image /Width {width} /Height 1 /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter [/ASCIIHexDecode /FlateDecode] /DecodeParms [null << /Predictor {predictor} /Colors {colors} /Columns 2 /BitsPerComponent 8 >>]"
+            ),
+            &data,
+        );
+        let raw = print_order(&pdf("/Im Do", "/XObject << /Im 5 0 R >>", &[im])).unwrap();
+        if colors <= 255 {
+            let samples = raw.images[0][0].samples.as_ref().unwrap();
+            assert_eq!(samples.tone(colors - 1, 0).unwrap(), 1.0 - 1.0 / 255.0);
+            assert_eq!(samples.tone(colors, 0).unwrap(), 1.0 - (if predictor == 2 { 2.0 } else { 1.0 }) / 255.0);
+        } else {
+            assert!(raw.images[0][0].samples.is_none());
+            assert!(raw.images[0][0].sample_error.as_ref().unwrap().contains("predictor declaration"));
+        }
+    }
+}

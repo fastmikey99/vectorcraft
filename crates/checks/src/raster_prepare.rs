@@ -313,6 +313,33 @@ mod tests {
         assert!(crate::prepare_edits::replay(capture, &[edit]).is_err());
     }
     #[test]
+    fn invalid_image_declarations_cannot_become_preparation_sources() {
+        for (layout, filter, data, eligible) in [
+            ("/Width 1 /Height 1 /BitsPerComponent 8", "", "x", true),
+            ("/Width 1 /Height 1 /BitsPerComponent 8", "/Filter /ASCIIHexDecode", "78>", true),
+            ("/Width 1 /Height 1 /BitsPerComponent 8", "/Filter /UnknownCodec", "x", false),
+            ("/Width 1 /Height 1 /BitsPerComponent 8", "/Filter 42", "x", false),
+            ("/Width 1 /Height 1 /BitsPerComponent 8", "/DecodeParms 42", "x", false),
+            ("/Width 1.5 /Height 1 /BitsPerComponent 8", "", "x", false),
+            ("/Width 1 /Height 1.5 /BitsPerComponent 8", "", "x", false),
+            ("/Width 1 /Height 1 /BitsPerComponent 8.5", "", "x", false),
+        ] {
+            let bytes = crate::pdf::tests::objects_pdf(&[
+                "<< /Type /Catalog /Pages 2 0 R >>".into(),
+                "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Resources << /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>".into(),
+                "<< /Length 6 >>\nstream\n/Im Do\nendstream".into(),
+                format!(
+                    "<< /Type /XObject /Subtype /Image {layout} /ColorSpace /DeviceGray {filter} /Length {} >>\nstream\n{data}\nendstream",
+                    data.len()
+                ),
+            ]);
+            let capture = crate::prepare::capture(&bytes, "capture".into(), "job".into()).unwrap();
+            assert_eq!(!capture.raster_sources.is_empty(), eligible, "{layout} {filter}");
+            assert!(!capture.diagnostics.is_empty());
+        }
+    }
+    #[test]
     fn original_synthetic_mask_preparation_cases_are_retained_for_cross_runtime_checks() {
         let Ok(directory) = std::env::var("CHECK_PREP_MASK_EVIDENCE_DIR") else {
             return;
