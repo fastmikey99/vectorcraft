@@ -135,6 +135,13 @@ impl ShapeTool {
     }
 }
 
+/// A line's measurement label: `D: …` (its length) over its angle, counterclockwise from the
+/// x axis with y up, 0° to 360° (as Illustrator's Line Segment tool and the Info panel give it).
+pub(crate) fn line_label(cx: &ToolContext, a: Point, b: Point) -> String {
+    let (d, ang, _, _) = crate::xform::measure(a, b);
+    format!("D: {}\n{:.1}°", cx.len(d), ang.rem_euclid(360.0))
+}
+
 /// Space held once a shape drag has begun moves the shape being drawn instead of sizing it: `start`
 /// moves as far as the pointer did since `last`, which becomes the pointer.
 pub(crate) fn space_moves(start: &mut Point, last: &mut Point, ev: &PointerEvent, began: bool) {
@@ -251,9 +258,17 @@ impl Tool for ShapeTool {
     fn overlays(&self, cx: &ToolContext) -> Vec<Overlay> {
         let mut o = self.snap.guides().to_vec();
         if let Some(s) = self.start.filter(|_| self.began && cx.measurement_labels) {
+            // A line: its length and angle, as drawn (the ends the line command gets), as the Measure
+            // tool gives them; the box around it would say nothing about how long it is.
+            if self.id == "lineSegment" {
+                let (_, v) = self.command(s, self.last, self.mods);
+                let end = |x: &str, y: &str| Point::new(v[x].as_f64().unwrap_or_default(), v[y].as_f64().unwrap_or_default());
+                o.push(Overlay::Measure { p: self.last, text: line_label(cx, end("x1", "y1"), end("x2", "y2")) });
+                return o;
+            }
             // A box's size as drawn (from its centre with Alt, square with Shift).
             let (w, h) = match self.id {
-                "polygon" | "star" | "lineSegment" => ((self.last - s).x.abs(), (self.last - s).y.abs()),
+                "polygon" | "star" => ((self.last - s).x.abs(), (self.last - s).y.abs()),
                 _ => {
                     let r = drag_rect(s, self.last, self.mods);
                     (r.width(), r.height())
@@ -416,6 +431,17 @@ mod tests {
         assert!(t.overlays(&cx).iter().any(|o| matches!(o, Overlay::Measure { text, .. } if text == &cx.size_label(200.0, 200.0))));
         t.pointer(&cx, &PointerEvent::new(PointerKind::Up, 198.0, 202.0));
         assert!(t.overlays(&cx).is_empty());
+        // A line is labelled with its length and angle, not the box around it.
+        let mut t = ShapeTool::new("lineSegment");
+        t.pointer(&cx, &PointerEvent::new(PointerKind::Down, 100.0, 100.0));
+        t.pointer(&cx, &PointerEvent::new(PointerKind::Drag, 130.0, 60.0));
+        let label =
+            |t: &ShapeTool| t.overlays(&cx).iter().find_map(|o| if let Overlay::Measure { text, .. } = o { Some(text.clone()) } else { None });
+        assert_eq!(label(&t), Some(format!("D: {}\n53.1°", cx.len(50.0))), "a 30 × 40 drag up and right is 50 long at 53.1°");
+        // Down and left (y grows downward): the angle goes on round, not negative.
+        t.pointer(&cx, &PointerEvent::new(PointerKind::Drag, 70.0, 140.0));
+        assert_eq!(label(&t), Some(format!("D: {}\n233.1°", cx.len(50.0))));
+        t.pointer(&cx, &PointerEvent::new(PointerKind::Up, 70.0, 140.0));
         // A line with Shift keeps to 45° steps, sliding into line with the rect's right side.
         let mut t = ShapeTool::new("lineSegment");
         t.pointer(&cx, &PointerEvent::new(PointerKind::Down, 300.0, 300.0));
