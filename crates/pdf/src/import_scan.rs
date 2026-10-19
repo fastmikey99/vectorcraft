@@ -468,7 +468,7 @@ struct Walker<'w, 'p> {
     ink_index: HashMap<Vec<String>, u32>,
     /// More inks or changes of ink than are kept: the page's inks are left out.
     inks_cut: bool,
-    print_sources: HashMap<(PrintColorSpace, Option<u32>), usize>,
+    print_sources: HashMap<(PrintColorSpace, Option<u32>, bool), usize>,
 }
 
 impl Walker<'_, '_> {
@@ -588,7 +588,7 @@ impl Walker<'_, '_> {
         let kind = state.spaces[usize::from(stroke)];
         let ink = state.inks[usize::from(stroke)].space;
         if let Some(order) = &mut self.out.print_order {
-            let source = if let Some(&i) = self.print_sources.get(&(kind, ink)) {
+            let source = if let Some(&i) = self.print_sources.get(&(kind, ink, stroke)) {
                 i
             } else {
                 let names = ink.and_then(|i| self.out.inks.get(i as usize)).map(Vec::as_slice).unwrap_or_default();
@@ -596,9 +596,12 @@ impl Walker<'_, '_> {
                     self.out.cut = true;
                     return;
                 }
+                if names.iter().any(|name| matches!(name.as_str(), "All" | "None")) {
+                    order.issues.insert("Reserved All/None colourant coverage requires print-semantic reconciliation".into());
+                }
                 let i = order.sources.len();
-                order.sources.push(PrintPaintSource { color_space: kind, colorants: names.to_vec() });
-                self.print_sources.insert((kind, ink), i);
+                order.sources.push(PrintPaintSource { stroke, color_space: kind, colorants: names.to_vec() });
+                self.print_sources.insert((kind, ink, stroke), i);
                 i
             };
             if order.layers.len() >= 50_000 {

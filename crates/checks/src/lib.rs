@@ -9,6 +9,7 @@ pub mod geometry;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod independent;
 mod measure;
+mod observed;
 pub mod ordering;
 mod paint_fidelity;
 pub mod pdf;
@@ -272,6 +273,7 @@ pub fn enumerate(request: &Request) -> Result<Vec<Obligation>, String> {
         })
         .collect();
     request.recipe.enumerate(request.garment, &mut obligations)?;
+    observed::enumerate(request, &mut obligations);
     let mut keys = BTreeSet::new();
     if obligations.iter().any(|o| !keys.insert(&o.key)) {
         return Err("Duplicate obligation identity".into());
@@ -406,7 +408,7 @@ mod tests {
     fn empty_sources_and_missing_output_do_not_shrink_denominator() {
         let r = request();
         let report = begin(&r).unwrap();
-        assert_eq!(report.coverage.total, GLOBALS.len() + 6 + 6 + 1);
+        assert_eq!(report.coverage.total, GLOBALS.len() + 6 + 6 + 1 + 4);
         assert_eq!(report.coverage.incomplete, report.coverage.total);
         assert_eq!(report.status, Status::Incomplete);
         validate_report(&r, &report).unwrap();

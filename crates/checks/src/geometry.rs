@@ -6,7 +6,7 @@ use crate::Status;
 use serde::{Deserialize, Serialize};
 use vectorcraft_geom::{PathData, Point, Rect};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Segment {
     a: Point,
     b: Point,
@@ -78,6 +78,69 @@ impl SegmentIndex {
                 let (a, b) = if a.lower_distance(p) <= b.lower_distance(p) { (a, b) } else { (b, a) };
                 a.distance(p, best, budget)?;
                 b.distance(p, best, budget)?;
+            }
+        }
+        Ok(())
+    }
+    fn nearest_segment(&self, p: Point, best: &mut (f64, Option<Segment>), budget: &mut usize) -> Result<(), String> {
+        *budget += 1;
+        if *budget > MAX_EVALUATIONS {
+            return Err("Boundary distance budget exceeded".into());
+        }
+        if self.lower_distance(p) > best.0 {
+            return Ok(());
+        }
+        match &self.kind {
+            IndexKind::Leaf(segments) => {
+                for segment in segments {
+                    *budget += 1;
+                    if *budget > MAX_EVALUATIONS {
+                        return Err("Boundary distance budget exceeded".into());
+                    }
+                    let distance = segment.distance(p);
+                    if distance < best.0 {
+                        *best = (distance, Some(*segment));
+                    }
+                }
+            }
+            IndexKind::Branch(a, b) => {
+                let (a, b) = if a.lower_distance(p) <= b.lower_distance(p) { (a, b) } else { (b, a) };
+                a.nearest_segment(p, best, budget)?;
+                b.nearest_segment(p, best, budget)?;
+            }
+        }
+        Ok(())
+    }
+    fn minimum_to_segment(&self, segment: Segment, best: &mut f64, budget: &mut usize) -> Result<(), String> {
+        *budget += 1;
+        if *budget > MAX_EVALUATIONS {
+            return Err("Boundary distance budget exceeded".into());
+        }
+        let a = Rect::from_points(segment.a, segment.b);
+        let b = self.bounds;
+        let dx = (a.x0 - b.x1).max(b.x0 - a.x1).max(0.0);
+        let dy = (a.y0 - b.y1).max(b.y0 - a.y1).max(0.0);
+        if dx.hypot(dy) > *best {
+            return Ok(());
+        }
+        match &self.kind {
+            IndexKind::Leaf(segments) => {
+                for other in segments {
+                    *budget += 1;
+                    if *budget > MAX_EVALUATIONS {
+                        return Err("Boundary distance budget exceeded".into());
+                    }
+                    let distance = if intersects(segment, *other, 0.0) {
+                        0.0
+                    } else {
+                        segment.distance(other.a).min(segment.distance(other.b)).min(other.distance(segment.a)).min(other.distance(segment.b))
+                    };
+                    *best = best.min(distance);
+                }
+            }
+            IndexKind::Branch(a, b) => {
+                a.minimum_to_segment(segment, best, budget)?;
+                b.minimum_to_segment(segment, best, budget)?;
             }
         }
         Ok(())
@@ -368,6 +431,12 @@ impl Boundary {
         let retained_segments = winding_segments.saturating_add(segments.len().saturating_mul(2));
         Ok(Self { retained_segments, index: SegmentIndex::new(segments.clone()), segments, winding_index, error, components, holes })
     }
+    fn indexed_nearest(&self, p: Point, budget: &mut usize) -> Result<(f64, Option<Segment>), String> {
+        let mut best = (f64::INFINITY, None);
+        self.index.nearest_segment(p, &mut best, budget)?;
+        Ok(best)
+    }
+    #[cfg(test)]
     fn nearest(&self, p: Point, budget: &mut usize) -> Result<(f64, usize), String> {
         let mut best = (f64::INFINITY, 0);
         for (i, s) in self.segments.iter().enumerate() {
@@ -419,12 +488,20 @@ fn directed(a: &Boundary, b: &Boundary, precision: f64, budget: &mut usize) -> R
     let mut upper = 0.0f64;
     let mut witness = None;
     for s in &a.segments {
-        let da = b.nearest(s.a, budget)?;
-        let db = b.nearest(s.b, budget)?;
+        let da = b.indexed_nearest(s.a, budget)?;
+        let db = b.indexed_nearest(s.b, budget)?;
         let mut pending = vec![(*s, da, db, 0u8)];
         while let Some((segment, da, db, depth)) = pending.pop() {
             let lo = da.0.max(db.0);
-            let hi = if da.1 == db.1 { lo } else { (da.0 + db.0 + segment.length()) * 0.5 };
+            let hi = if da.1 == db.1 {
+                lo
+            } else {
+                // Distance to any fixed target segment is convex along this line.
+                // Either endpoint witness therefore supplies a certified upper
+                // bound, often tighter than the general Lipschitz envelope.
+                let fixed = |s: Option<Segment>| s.map(|s| s.distance(segment.a).max(s.distance(segment.b))).unwrap_or(f64::INFINITY);
+                ((da.0 + db.0 + segment.length()) * 0.5).min(fixed(da.1)).min(fixed(db.1)).max(lo)
+            };
             if lo > lower {
                 lower = lo;
                 witness = Some(if da.0 >= db.0 { segment.a } else { segment.b });
@@ -437,12 +514,45 @@ fn directed(a: &Boundary, b: &Boundary, precision: f64, budget: &mut usize) -> R
                 return Err("Boundary maximum remains numerically unresolved".into());
             }
             let m = midpoint(segment.a, segment.b);
-            let dm = b.nearest(m, budget)?;
+            let dm = b.indexed_nearest(m, budget)?;
             pending.push((Segment { a: segment.a, b: m }, da, dm, depth + 1));
             pending.push((Segment { a: m, b: segment.b }, dm, db, depth + 1));
         }
     }
     Ok((lower, upper.max(lower), witness))
+}
+/// Observable one-way boundary gap. It does not prove complete morphological
+/// equivalence, source completeness or topology preservation.
+#[derive(Clone, Debug, Serialize)]
+pub struct GapRange {
+    pub minimum_mm: [f64; 2],
+    pub maximum_mm: [f64; 2],
+    pub uncertainty_mm: f64,
+    /// Local diagnostic only: traversal work can differ across floating-point targets.
+    #[serde(skip_serializing)]
+    pub evaluations: usize,
+}
+pub fn boundary_gap(from: &PathData, to: &PathData, precision: f64) -> Result<GapRange, String> {
+    let a = Boundary::new(from, vectorcraft_geom::FillRule::NonZero, precision)?;
+    let b = Boundary::new(to, vectorcraft_geom::FillRule::NonZero, precision)?;
+    if a.segments.is_empty() || b.segments.is_empty() {
+        return Err("Boundary gap requires two nonempty physical boundaries".into());
+    }
+    let mut budget = 0;
+    let max = directed(&a, &b, precision, &mut budget)?;
+    let mut minimum = f64::INFINITY;
+    for segment in &a.segments {
+        b.index.minimum_to_segment(*segment, &mut minimum, &mut budget)?;
+    }
+    let error = a.error + b.error;
+    let minimum = [(minimum - error).max(0.0), minimum + error];
+    let maximum = [(max.0 - error).max(0.0), max.1 + error];
+    Ok(GapRange {
+        minimum_mm: minimum,
+        maximum_mm: maximum,
+        uncertainty_mm: (minimum[1] - minimum[0]).max(maximum[1] - maximum[0]),
+        evaluations: budget,
+    })
 }
 /// Tolerance is an explicitly approved production criterion; precision is a numerical bound.
 /// An interval crossing the criterion is Incomplete, never rounded into Pass.
@@ -610,6 +720,20 @@ mod tests {
         PathData::from_bezpath(&p)
     }
     #[test]
+    fn measurement_reports_round_trip_and_gap_work_stays_local() {
+        let shape = rectangle(0.0, 0.0, 10.0, 10.0);
+        let measurement = compare(&shape, &shape, 0.01, 0.0001).unwrap();
+        let value = serde_json::to_value(&measurement).unwrap();
+        let restored: Measurement = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&restored).unwrap(), value);
+        let gap = boundary_gap(&rectangle(1.0, 1.0, 8.0, 8.0), &shape, 0.0001).unwrap();
+        assert!(gap.evaluations > 0);
+        let value = serde_json::to_value(&gap).unwrap();
+        assert!(value.get("evaluations").is_none());
+        assert!(value.get("minimum_mm").is_some());
+        assert!(value.get("maximum_mm").is_some());
+    }
+    #[test]
     fn spatial_search_matches_exhaustive_curved_boundary_and_keeps_tiny_holes() {
         use vectorcraft_geom::Shape;
         let mut path = PathData::from_bezpath(&vectorcraft_geom::kurbo::Circle::new((5.0, 5.0), 4.0).to_path(0.000001));
@@ -630,6 +754,38 @@ mod tests {
             }
         }
         assert!(indexed_cost < linear_cost / 2);
+    }
+    #[test]
+    fn directional_gap_measures_inner_boundary_and_detects_crossing_without_waiving_topology() {
+        let outer = rectangle(0.0, 0.0, 10.0, 10.0);
+        let inner = rectangle(0.2, 0.2, 9.6, 9.6);
+        let gap = boundary_gap(&inner, &outer, 0.0001).unwrap();
+        for range in [gap.minimum_mm, gap.maximum_mm] {
+            assert!(range[0] <= 0.2 && range[1] >= 0.2, "{range:?}");
+            assert!(range[1] - range[0] < 0.001);
+        }
+        let moved = inner.transformed(Affine::translate((1.0, 0.0)));
+        let changed = boundary_gap(&moved, &outer, 0.0001).unwrap();
+        assert!(changed.minimum_mm[0] <= 0.0001 && changed.minimum_mm[1] < 0.001);
+        assert!(changed.maximum_mm[0] > 0.79);
+        assert!(boundary_gap(&PathData::default(), &outer, 0.0001).is_err());
+        // A line is not a printable filled boundary and cannot become a zero-gap success.
+        let degenerate = rectangle(1.0, 1.0, 1.0, 0.0);
+        assert!(boundary_gap(&degenerate, &outer, 0.0001).is_err());
+    }
+    #[test]
+    fn indexed_nearest_matches_every_linear_witness() {
+        let p = rectangle(0.0, 0.0, 10.0, 10.0);
+        let boundary = Boundary::new(&p, vectorcraft_geom::FillRule::NonZero, 0.0001).unwrap();
+        for x in -2..13 {
+            for y in -2..13 {
+                let point = Point::new(f64::from(x), f64::from(y));
+                let a = boundary.nearest(point, &mut 0).unwrap();
+                let b = boundary.indexed_nearest(point, &mut 0).unwrap();
+                assert_eq!(a.0, b.0);
+                assert_eq!(b.1.unwrap().distance(point), a.0);
+            }
+        }
     }
     #[test]
     fn acceptance_interval_does_not_round_a_borderline_deviation_into_pass() {

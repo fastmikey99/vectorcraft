@@ -148,6 +148,27 @@ pub fn check(request: &Request, report: &mut Report) -> Result<Option<Plan>, Str
     let plan = match resolve(request) {
         Ok(p) => p,
         Err(reason) => {
+            let dependent: Vec<_> = report
+                .findings
+                .iter()
+                .filter(|f| {
+                    f.status == Status::Incomplete
+                        && (f.obligation.key.starts_with("rule/")
+                            || f.obligation.key.ends_with("/contribution")
+                            || f.obligation.key.ends_with("/coverage")
+                            || f.obligation.key.starts_with("plate/"))
+                })
+                .map(|f| f.obligation.key.clone())
+                .collect();
+            for key in dependent {
+                report.record(
+                    &key,
+                    Status::Incomplete,
+                    format!("Source-dependent conformity is unresolved: {reason}. Final-output observations are reported separately."),
+                    Value::Null,
+                    vec![],
+                )?;
+            }
             report.record("global/assignments", Status::Incomplete, reason, Value::Null, vec![])?;
             return Ok(None);
         }

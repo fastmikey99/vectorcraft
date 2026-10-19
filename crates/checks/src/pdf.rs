@@ -9,6 +9,7 @@ use vectorcraft_geom::{Affine, PathData, Shape};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct PaintedObject {
+    pub stroke: bool,
     pub id: u64,
     pub layer: String,
     pub ink: Option<String>,
@@ -302,6 +303,7 @@ fn walk(doc: &Document, symbols: &SymbolBoxes, node: &Node, layer: &str, state: 
             census.unresolved.push(format!("{}: printable geometry requires composited measurement", node.id));
         }
         census.paints.push(PaintedObject {
+            stroke: matches!(item, vectorcraft_doc::AppearanceItem::Stroke(_)),
             id: node.id.0,
             layer: layer.into(),
             ink,
@@ -532,6 +534,7 @@ pub fn check(request: &Request, bytes: &[u8]) -> Result<Report, String> {
     }
     crate::ordering::check(request, bytes, &c, &mut report)?;
     crate::specification::check(request, bytes, &mut report)?;
+    crate::observed::check(request, &c, &mut report)?;
     Ok(report)
 }
 

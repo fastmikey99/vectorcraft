@@ -22,6 +22,8 @@ pub enum PrintColorSpace {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct PrintPaintSource {
+    /// Raw operator kind, retained to detect interpreter fill/stroke substitutions.
+    pub stroke: bool,
     pub color_space: PrintColorSpace,
     /// Decoded names, unchanged. Empty for device/unsupported spaces.
     pub colorants: Vec<String>,

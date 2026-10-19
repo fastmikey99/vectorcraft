@@ -36,8 +36,12 @@ fn indices_mode(order: &vectorcraft_pdf::PrintOrder, census: &crate::pdf::Census
     }
     let mut indices = vec![];
     for (page, events) in order.pages.iter().enumerate() {
-        for layer in events {
+        for (event, layer) in events.iter().enumerate() {
             let i = groups.get_mut(&(page, *layer)).and_then(VecDeque::pop_front).ok_or("Raw PDF path-paint count differs from decoded coverage")?;
+            let source = order.source_indices.get(page).and_then(|v| v.get(event)).and_then(|n| order.sources.get(*n));
+            if source.is_none_or(|s| census.paints.get(i).is_none_or(|p| p.stroke != s.stroke)) {
+                return Err("Raw PDF fill/stroke kind differs from decoded coverage; interpreter substitution requires reconciliation".into());
+            }
             indices.push(i);
         }
     }
