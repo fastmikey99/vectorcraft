@@ -79,6 +79,8 @@ struct Group {
 #[derive(Serialize)]
 struct LayerResult {
     layer: String,
+    layer_labels: Vec<String>,
+    links: Vec<String>,
     status: Status,
     observed: Value,
     location: Option<Location>,
@@ -131,7 +133,10 @@ pub fn check(request: &Request, program: &Program, census: &Census, report: &mut
         return Ok(());
     }
     let links: Vec<_> = request.recipe.file_links.iter().filter(|l| request.garment.matches(&l.garment)).collect();
-    let layers: BTreeSet<_> = links.iter().map(|l| l.pdf_layer.as_str()).collect();
+    let mut groups: BTreeMap<_, Vec<_>> = BTreeMap::new();
+    for link in &links {
+        groups.entry(crate::routes::paint_group(link)).or_default().push(*link);
+    }
     let tolerance = request
         .acceptance
         .get("geometry_tolerance_mm")
@@ -153,18 +158,51 @@ pub fn check(request: &Request, program: &Program, census: &Census, report: &mut
         },
     ];
     let mut summaries = vec![];
-    let mut any_fail = false;
+    // A witnessed foreign ink remains a global colour failure even when input
+    // classification prevents observed routing. Do not blame every family link.
+    let stray: Vec<_> = census
+        .paints
+        .iter()
+        .filter(|paint| {
+            crate::routes::layer_is_hint(&paint.layer)
+                && links.iter().any(|l| crate::routes::layer_is_hint(&l.pdf_layer))
+                && paint.geometry_mm.as_ref().is_some_and(|g| !g.is_empty())
+                && !links.iter().any(|l| crate::routes::paint_matches(l, paint))
+                && paint
+                    .source_space
+                    .and_then(|i| census.paint_sources.get(i))
+                    .and_then(|source| crate::tone::source_tones(paint, source).ok())
+                    .is_some_and(|tones| crate::tone::positive_supported(&tones).is_ok() && tones.values().any(|v| *v > 0.0))
+        })
+        .collect();
+    let mut any_fail = !stray.is_empty();
     let mut rule_status: BTreeMap<String, Status> = BTreeMap::new();
-    for layer in layers {
-        let declared: Vec<_> = links.iter().filter(|l| l.pdf_layer == layer).collect();
+    for declared in groups.values() {
+        let layer = declared.first().ok_or("Empty paint comparison group")?.pdf_layer.as_str();
         let result = (|| -> Result<(Status, Value, Option<Location>), String> {
             if declared.iter().any(|l| !program.outputs.contains_key(&l.key)) {
                 return Err("Source construction or paint assignment remains unresolved".into());
             }
+            if crate::routes::layer_is_hint(layer)
+                && census.paints.iter().any(|paint| {
+                    crate::routes::layer_matches(layer, &paint.layer)
+                        && paint.geometry_mm.as_ref().is_some_and(|g| !g.is_empty())
+                        && (crate::routes::ambiguous(&links, paint) || !links.iter().any(|link| crate::routes::paint_matches(link, paint)))
+                })
+            {
+                return Err("Underprint paint has an unresolved output role; label numbering cannot establish paint fidelity".into());
+            }
             let expected: Vec<_> =
                 declared.iter().flat_map(|l| program.outputs.get(&l.key).into_iter().flatten()).filter(|p| !p.path.is_empty()).collect();
-            let observed: Vec<_> =
-                census.paints.iter().filter(|p| p.layer == layer && p.geometry_mm.as_ref().is_some_and(|g| !g.is_empty())).collect();
+            let observed: Vec<_> = census
+                .paints
+                .iter()
+                .filter(|p| {
+                    declared.iter().any(|link| {
+                        if crate::routes::layer_is_hint(&link.pdf_layer) { crate::routes::paint_matches(link, p) } else { p.layer == link.pdf_layer }
+                    }) && p.geometry_mm.as_ref().is_some_and(|g| !g.is_empty())
+                })
+                .collect();
             if observed.len() > 2500 {
                 return Err("Output paint-stack measurement budget exceeded".into());
             }
@@ -385,17 +423,24 @@ pub fn check(request: &Request, program: &Program, census: &Census, report: &mut
         for l in declared {
             rule_status.entry(l.source_rule.clone()).and_modify(|s| *s = combine_status(*s, attributed)).or_insert(attributed);
         }
-        summaries.push(LayerResult { layer: layer.into(), status, observed, location });
+        summaries.push(LayerResult {
+            layer: layer.into(),
+            layer_labels: declared.iter().map(|l| l.pdf_layer.clone()).collect::<BTreeSet<_>>().into_iter().collect(),
+            links: declared.iter().map(|l| l.key.clone()).collect(),
+            status,
+            observed,
+            location,
+        });
     }
     for (key, status) in rule_status {
         if report.findings.iter().any(|f| f.obligation.key == format!("rule/{key}/paint") && f.status == Status::NotApplicable) {
             continue;
         }
-        report.record(&format!("rule/{key}/paint"),status,"Decoded colour-bearing regions compared with authorised source/assignment paint",json!({"layers":summaries.iter().filter(|s|request.recipe.file_links.iter().any(|l|l.source_rule==key && s.layer==l.pdf_layer)).collect::<Vec<_>>()}),evidence.clone())?;
+        report.record(&format!("rule/{key}/paint"),status,"Decoded colour-bearing regions compared with authorised source/assignment paint",json!({"layers":summaries.iter().filter(|s|request.recipe.file_links.iter().any(|l|l.source_rule==key && s.links.contains(&l.key))).collect::<Vec<_>>()}),evidence.clone())?;
         if let Some(f) = report.findings.iter_mut().find(|f| f.obligation.key == format!("rule/{key}/paint")) {
             f.location = summaries
                 .iter()
-                .filter(|s| request.recipe.file_links.iter().any(|l| l.source_rule == key && s.layer == l.pdf_layer))
+                .filter(|s| request.recipe.file_links.iter().any(|l| l.source_rule == key && s.links.contains(&l.key)))
                 .find_map(|s| s.location.clone());
         }
     }
@@ -403,7 +448,7 @@ pub fn check(request: &Request, program: &Program, census: &Census, report: &mut
         "global/colour",
         if any_fail { Status::Fail } else { Status::Incomplete },
         "Solid paint and region findings retained; exact profile and colour-space definitions still require reconciliation",
-        json!({"layers":summaries}),
+        json!({"layers":summaries,"unmatched_underprint_paint_count":stray.len(),"unmatched_underprint_sample":stray.iter().take(64).map(|p|json!({"object":p.id,"layer":p.layer,"ink":p.ink})).collect::<Vec<_>>()}),
         evidence,
     )?;
     Ok(())
@@ -498,6 +543,79 @@ mod tests {
                 assert!(f.location.is_some());
             }
             assert_ne!(report.status, Status::Pass);
+        }
+    }
+    #[test]
+    fn underprint_hints_preserve_source_colour_checks_and_refuse_conflicting_roles() {
+        for (content, wanted) in [
+            ("1 0 0 0 k 0 0 10 10 re f 0 1 0 0 k 10 0 10 10 re f", Status::Pass),
+            ("0 1 0 0 k 0 0 10 10 re f 1 0 0 0 k 10 0 10 10 re f", Status::Fail),
+        ] {
+            let bytes = fixture(content);
+            let mut census = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+            crate::ordering::try_reconcile(&bytes, &mut census).unwrap();
+            let (mut request, _) = overlapping();
+            let link = &mut request.recipe.file_links[0];
+            link.pdf_layer = "White Underprint-5".into();
+            link.name_mode = "source".into();
+            link.separation_name = None;
+            for label in ["White Underprint-5", "White Underprint-17", "White Underprint"] {
+                for paint in &mut census.paints {
+                    paint.layer = label.into();
+                }
+                assert_eq!(paint_status(&request, &expected(), &census), wanted);
+            }
+            let mut other = request.recipe.file_links[0].clone();
+            other.key = "ambiguous".into();
+            other.destination = "Indigo".into();
+            other.pdf_layer = "White Underprint-1".into();
+            request.recipe.file_links.push(other);
+            let mut program = expected();
+            program.outputs.insert("ambiguous".into(), program.outputs["output"].clone());
+            assert_eq!(paint_status(&request, &program, &census), Status::Incomplete);
+        }
+    }
+    #[test]
+    fn splitting_same_role_contributors_across_fingerprints_preserves_paint_results() {
+        for (content, global, scoped) in [
+            ("1 0 0 0 k 0 0 10 10 re f 0 1 0 0 k 10 0 10 10 re f", Status::Incomplete, Status::Pass),
+            ("0 1 0 0 k 0 0 10 10 re f 1 0 0 0 k 10 0 10 10 re f", Status::Fail, Status::Incomplete),
+        ] {
+            let bytes = fixture(content);
+            let mut c = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+            crate::ordering::try_reconcile(&bytes, &mut c).unwrap();
+            for (i, paint) in c.paints.iter_mut().enumerate() {
+                paint.layer = format!("White Underprint-{}", 17 + i);
+            }
+            let (mut r, _) = overlapping();
+            r.recipe.file_links[0].name_mode = "source".into();
+            r.recipe.file_links[0].separation_name = None;
+            r.recipe.file_links[0].pdf_layer = "White Underprint-1".into();
+            let mut other = r.recipe.file_links[0].clone();
+            other.key = "other".into();
+            other.source_rule = "other-rule".into();
+            r.recipe.file_links.push(other);
+            let mut rule = r.recipe.rules[0].clone();
+            rule.rule_key = "other-rule".into();
+            r.recipe.rules.push(rule);
+            let mut p = expected();
+            let second = p.outputs.get_mut("output").unwrap().pop().unwrap();
+            p.outputs.insert("other".into(), vec![second]);
+            for label in ["White Underprint-1", "White Underprint-2", "White Underprint"] {
+                r.recipe.file_links[1].pdf_layer = label.into();
+                let mut report = crate::begin(&r).unwrap();
+                check(&r, &p, &c, &mut report).unwrap();
+                for key in ["rule/arbitrary/paint", "rule/other-rule/paint"] {
+                    assert_eq!(report.findings.iter().find(|f| f.obligation.key == key).unwrap().status, scoped, "{label}: {key}");
+                }
+                assert_eq!(report.findings.iter().find(|f| f.obligation.key == "global/colour").unwrap().status, global);
+            }
+            for pieces in p.outputs.values_mut() {
+                for piece in pieces {
+                    piece.paint = json!({"mode":"output_ink"});
+                }
+            }
+            assert_eq!(paint_status(&r, &p, &c), Status::Incomplete);
         }
     }
     fn overlapping() -> (Request, Program) {

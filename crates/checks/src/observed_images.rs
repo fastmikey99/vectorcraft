@@ -98,7 +98,7 @@ impl Prelude {
                 }
                 let layer = image.layer.ok_or("Image has no exact layer identity")?;
                 let name = order.layers.get(layer).ok_or("Image layer index missing")?;
-                let routes: Vec<_> = active.iter().filter(|l| l.pdf_layer == *name).collect();
+                let routes: Vec<_> = active.iter().filter(|l| crate::routes::layer_matches(&l.pdf_layer, name)).collect();
                 if routes.len() != 1 || routes.first().is_none_or(|l| l.name_mode != "source") {
                     return Err("Image needs an unambiguous retained-source route".into());
                 }

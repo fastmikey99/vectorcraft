@@ -187,7 +187,7 @@ fn evaluate(request: &Request, plan: &Plan, bytes: &[u8]) -> Result<(Status, Val
         return Err("Raw raster output census is ambiguous".into());
     };
     let layer = image.layer.and_then(|i| order.layers.get(i));
-    if order.layers.iter().filter(|l| *l == &link.pdf_layer).count() > 1 {
+    if order.layers.iter().filter(|l| crate::routes::layer_matches(&link.pdf_layer, l)).count() > 1 {
         return Err("Duplicate output layer identities prevent raster route reconciliation".into());
     }
     let tolerance = request
@@ -216,7 +216,7 @@ fn evaluate(request: &Request, plan: &Plan, bytes: &[u8]) -> Result<(Status, Val
     let samples_agree = !matched.is_empty();
     let best = matched.first().copied();
     let page_agrees = placed.page == actual.mask.page;
-    let layer_agrees = layer == Some(&link.pdf_layer);
+    let layer_agrees = layer.is_some_and(|actual| crate::routes::layer_matches(&link.pdf_layer, actual));
     let status = if !samples_agree || !page_agrees || !layer_agrees || tolerance.is_some_and(|t| matched.iter().all(|(d, e, _)| (d - e).max(0.0) > t))
     {
         Status::Fail

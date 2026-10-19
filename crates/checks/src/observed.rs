@@ -71,7 +71,7 @@ fn evidence(r: &Request) -> Vec<Evidence> {
     ]
 }
 fn matches(link: &crate::recipe::FileLink, p: &PaintedObject) -> bool {
-    p.layer == link.pdf_layer && (link.name_mode == "source" || p.ink.as_ref() == link.separation_name.as_ref())
+    crate::routes::paint_matches(link, p)
 }
 fn live(p: &PaintedObject) -> bool {
     p.geometry_mm.as_ref().is_some_and(|g| !g.is_empty()) && p.tint != Some(0.0)
@@ -218,16 +218,21 @@ fn check(r: &Request, c: &Census, prelude: Option<&crate::observed_images::Prelu
         return reason(report, r, "Final-output contract/object join budget exceeded; observations were not qualified");
     }
     let survival = Survival::new(c);
-    let exact_names: BTreeSet<_> = links.iter().filter(|l| l.name_mode == "exact").filter_map(|l| l.separation_name.as_deref()).collect();
-    let ambiguous = |p: &PaintedObject| {
-        p.ink.as_deref().is_some_and(|name| exact_names.contains(name)) && links.iter().any(|l| l.name_mode == "source" && matches(l, p))
-    };
+    let ambiguous = |p: &PaintedObject| crate::routes::ambiguous(&links, p);
     let ambiguous_count = paints.iter().filter(|p| ambiguous(p)).count();
+    let mut unresolved_order = BTreeSet::new();
     let mut ranges: BTreeMap<&str, BTreeMap<usize, (usize, usize)>> = BTreeMap::new();
     for link in &links {
         let mut pages: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
         for p in paints.iter().filter(|p| matches(link, p)) {
             if let Some(page) = p.page {
+                if ambiguous(p) {
+                    unresolved_order.insert((page, link.key.as_str()));
+                    continue;
+                }
+                if link.name_mode == "exact" && !positive_ink(c, p, false) {
+                    continue;
+                }
                 pages
                     .entry(page)
                     .and_modify(|v| {
@@ -247,8 +252,11 @@ fn check(r: &Request, c: &Census, prelude: Option<&crate::observed_images::Prelu
     let mut order_work = 0usize;
     for link in &links {
         let image_affected = prelude.is_some_and(|p| p.affects(&link.key));
-        let objects: Vec<_> = paints.iter().filter(|p| p.layer == link.pdf_layer).copied().collect();
-        let incompatible: Vec<_> = objects.iter().filter(|p| !links.iter().any(|l| l.pdf_layer == link.pdf_layer && matches(l, p))).collect();
+        let objects: Vec<_> = paints.iter().filter(|p| crate::routes::layer_matches(&link.pdf_layer, &p.layer)).copied().collect();
+        // Unknown hint-family paint is reported once by routing. A fingerprint
+        // cannot identify which output owns it. Exact labels retain their scope.
+        let incompatible: Vec<_> =
+            objects.iter().filter(|p| !crate::routes::layer_is_hint(&link.pdf_layer) && !links.iter().any(|l| matches(l, p))).collect();
         let matched: Vec<_> = objects.iter().filter(|p| matches(link, p)).copied().collect();
         let required = r
             .recipe
@@ -280,7 +288,8 @@ fn check(r: &Request, c: &Census, prelude: Option<&crate::observed_images::Prelu
         let pages = ranges.get(link.key.as_str()).ok_or("Output order index missing")?;
         let mut checked = 0usize;
         let mut order_limited = false;
-        'comparisons: for other in links.iter().filter(|o| o.pdf_layer != link.pdf_layer && o.layer_order != link.layer_order) {
+        let mut counterpart_unresolved = false;
+        'comparisons: for other in links.iter().filter(|o| o.layer_order != link.layer_order) {
             let other_pages = ranges.get(other.key.as_str()).ok_or("Other output order index missing")?;
             for (page, (amin, amax)) in pages {
                 order_work += 1;
@@ -288,6 +297,8 @@ fn check(r: &Request, c: &Census, prelude: Option<&crate::observed_images::Prelu
                     order_limited = true;
                     break 'comparisons;
                 }
+                // Even a nonempty range may omit paint with unresolved ownership.
+                counterpart_unresolved |= unresolved_order.contains(&(*page, other.key.as_str()));
                 if let Some((bmin, bmax)) = other_pages.get(page) {
                     checked += 1;
                     let correct = if link.layer_order < other.layer_order { amax < bmin } else { bmax < amin };
@@ -296,6 +307,8 @@ fn check(r: &Request, c: &Census, prelude: Option<&crate::observed_images::Prelu
                         comparisons
                             .push(json!({"page":page,"other":other.key,"actual_range":[amin,amax],"other_range":[bmin,bmax],"correct":correct}));
                     }
+                } else {
+                    counterpart_unresolved = true;
                 }
             }
         }
@@ -303,13 +316,13 @@ fn check(r: &Request, c: &Census, prelude: Option<&crate::observed_images::Prelu
             &format!("observed/file/{}/order", link.key),
             if bad > 0 {
                 Status::Fail
-            } else if prelude.is_some() || matched.is_empty() || flags_ambiguous || order_limited {
+            } else if prelude.is_some() || matched.is_empty() || pages.is_empty() || flags_ambiguous || order_limited || counterpart_unresolved {
                 Status::Incomplete
             } else {
                 Status::Pass
             },
             "Actual vector order between observed outputs on each page; image order and absent conditional outputs remain unresolved",
-            json!({"comparisons":comparisons,"comparisons_checked":checked,"wrong_count":bad,"budget_exhausted":order_limited}),
+            json!({"comparisons":comparisons,"comparisons_checked":checked,"wrong_count":bad,"budget_exhausted":order_limited,"counterpart_unresolved":counterpart_unresolved}),
             evidence(r),
         )?;
     }
@@ -405,8 +418,9 @@ fn anchor<'a>(r: &Request, c: &'a Census, survival: &Survival, key: &str) -> Res
     if links.is_empty() || wanted.iter().any(|s| !links.iter().any(|l| l.source_rule == *s)) {
         return Err("Every combined source needs an explicit output link".into());
     }
-    let routes: BTreeSet<_> = links.iter().map(|l| (&l.pdf_layer, &l.separation_name)).collect();
-    if routes.len() != 1 {
+    if links.first().is_some_and(|first| {
+        links.iter().any(|l| !crate::routes::layer_matches(&first.pdf_layer, &l.pdf_layer) || first.separation_name != l.separation_name)
+    }) {
         return Err("Anchor spans multiple final outputs; a qualified union mapping is required".into());
     }
     for l in &links {
@@ -420,7 +434,9 @@ fn anchor<'a>(r: &Request, c: &'a Census, survival: &Survival, key: &str) -> Res
                 .file_links
                 .iter()
                 .filter(|x| {
-                    r.garment.matches(&x.garment) && x.pdf_layer == l.pdf_layer && (x.name_mode == "source" || x.separation_name == l.separation_name)
+                    r.garment.matches(&x.garment)
+                        && crate::routes::layer_matches(&x.pdf_layer, &l.pdf_layer)
+                        && (x.name_mode == "source" || x.separation_name == l.separation_name)
                 })
                 .any(|x| !wanted.contains(x.source_rule.as_str()))
         {
@@ -434,6 +450,10 @@ fn anchor<'a>(r: &Request, c: &'a Census, survival: &Survival, key: &str) -> Res
     let objects: Vec<_> = c.paints.iter().filter(|p| live(p) && links.iter().any(|l| matches(l, p))).collect();
     if objects.is_empty() {
         return Err("No nonempty final anchor; missing output cannot prove source absence".into());
+    }
+    let active: Vec<_> = r.recipe.file_links.iter().filter(|l| r.garment.matches(&l.garment)).collect();
+    if objects.iter().any(|p| crate::routes::ambiguous(&active, p)) {
+        return Err("Ambiguous output role cannot establish a relationship anchor".into());
     }
     if objects.iter().any(|p| p.tint != Some(1.0) || !survival.unmodified(p)) {
         return Err("Relationship requires fully tinted technical coverage without later knockout/zero-tint interference".into());
@@ -744,6 +764,40 @@ mod tests {
         other.separation_name = None;
         other.source_rule = "other-rule".into();
         r.recipe.file_links.push(other);
+        assert!(anchor(&r, &c, &Survival::new(&c), "arbitrary").is_err());
+    }
+    #[test]
+    fn numbered_anchor_routes_preserve_union_and_refuse_ambiguous_ownership() {
+        let bytes = pdf("Exact#20ink", "White Underprint-17", "");
+        let mut r = request(&bytes);
+        r.recipe.file_links[0].pdf_layer = "White Underprint-1".into();
+        let mut c = crate::pdf::census(&vectorcraft_pdf::import(&bytes).unwrap());
+        crate::ordering::try_reconcile(&bytes, &mut c).unwrap();
+        assert!(anchor(&r, &c, &Survival::new(&c), "arbitrary").is_ok());
+        let mut other = r.recipe.file_links[0].clone();
+        other.key = "same-contributor".into();
+        other.pdf_layer = "White Underprint-2".into();
+        r.recipe.foundation.as_mut().unwrap()["outputs"]["same-contributor"] = json!({"select":"all","emit":"when_nonempty"});
+        r.recipe.file_links.push(other);
+        assert!(anchor(&r, &c, &Survival::new(&c), "arbitrary").is_ok());
+        for conflict in ["source", "destination", "order", "overprint"] {
+            let mut changed = r.clone();
+            let other = changed.recipe.file_links.last_mut().unwrap();
+            match conflict {
+                "source" => {
+                    other.name_mode = "source".into();
+                    other.separation_name = None;
+                }
+                "destination" => other.destination = "Indigo".into(),
+                "order" => other.layer_order += 1,
+                _ => other.overprint = !other.overprint,
+            }
+            assert!(anchor(&changed, &c, &Survival::new(&c), "arbitrary").is_err(), "{conflict}");
+        }
+        let other = r.recipe.file_links.last_mut().unwrap();
+        other.name_mode = "source".into();
+        other.separation_name = None;
+        other.source_rule = "unrelated-source-rule".into();
         assert!(anchor(&r, &c, &Survival::new(&c), "arbitrary").is_err());
     }
     #[test]

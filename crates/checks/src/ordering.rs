@@ -144,39 +144,55 @@ pub fn check(request: &Request, bytes: &[u8], census: &crate::pdf::Census, repor
             return Ok(());
         }
     };
-    match indices(&order, census) {
-        Ok(indices) => {
-            // Empty or fully clipped paths have no physical paint-order relationship.
-            let mut cursor = 0;
-            for page in &mut order.pages {
-                page.retain(|_| {
-                    let nonempty =
-                        indices.get(cursor).and_then(|i| census.paints.get(*i)).and_then(|p| p.geometry_mm.as_ref()).is_some_and(|p| !p.is_empty());
-                    cursor += 1;
-                    nonempty
-                });
-            }
-        }
+    let indices = match indices(&order, census) {
+        Ok(indices) => indices,
         Err(reason) => {
             order.issues.insert(reason);
+            vec![]
         }
-    }
+    };
     let evidence = vec![Evidence {
         artifact_sha256: request.identity.pdf_sha256.clone(),
-        producer: "checks/public-content-order-1".into(),
+        producer: "checks/public-content-order-2".into(),
         detail: "Bounded path-paint stream order, including nested form content; independent of editable layer ordering".into(),
     }];
     let inactive =
         |key: &str| report.findings.iter().any(|f| f.obligation.key == format!("file/{key}/contribution") && f.status == Status::NotApplicable);
-    let active: Vec<_> = request.recipe.file_links.iter().filter(|l| request.garment.matches(&l.garment) && !inactive(&l.key)).collect();
-    let ranges: Vec<std::collections::BTreeMap<usize, (usize, usize)>> = order
+    let roles: Vec<_> = request.recipe.file_links.iter().filter(|l| request.garment.matches(&l.garment)).collect();
+    let active: Vec<_> = roles.iter().copied().filter(|l| !inactive(&l.key)).collect();
+    // Bind sequence ranges to actual ink/role candidates, never to a numeric label.
+    let work = order.pages.iter().map(Vec::len).sum::<usize>().saturating_mul(active.len());
+    if work > 20_000_000 {
+        order.issues.insert("Paint-to-output order mapping exceeds the work budget".into());
+    }
+    let mut unresolved = std::collections::BTreeSet::new();
+    let mut cursor = 0;
+    let ranges: Vec<std::collections::BTreeMap<&str, (usize, usize)>> = order
         .pages
         .iter()
-        .map(|events| {
+        .enumerate()
+        .map(|(page, events)| {
             let mut ranges = std::collections::BTreeMap::new();
-            for (i, layer) in events.iter().enumerate() {
-                if let Some(layer) = layer {
-                    ranges.entry(*layer).and_modify(|r: &mut (usize, usize)| r.1 = i).or_insert((i, i));
+            for (event, _) in events.iter().enumerate() {
+                let paint = indices.get(cursor).and_then(|i| census.paints.get(*i));
+                cursor += 1;
+                let Some(paint) = paint.filter(|p| work <= 20_000_000 && p.geometry_mm.as_ref().is_some_and(|g| !g.is_empty())) else { continue };
+                let ambiguous = crate::routes::ambiguous(&roles, paint);
+                let source = order.source_indices.get(page).and_then(|v| v.get(event)).and_then(|i| order.sources.get(*i));
+                let tones = source
+                    .and_then(|source| crate::tone::source_tones(paint, source).ok())
+                    .filter(|tones| crate::tone::positive_supported(tones).is_ok());
+                for link in active.iter().filter(|link| crate::routes::paint_matches(link, paint)) {
+                    if ambiguous || (link.name_mode == "exact" && tones.is_none()) {
+                        unresolved.insert((page, link.key.as_str()));
+                        continue;
+                    }
+                    if link.name_mode == "exact"
+                        && !link.separation_name.as_ref().and_then(|ink| tones.as_ref()?.get(ink)).is_some_and(|tone| *tone > 0.0)
+                    {
+                        continue;
+                    }
+                    ranges.entry(link.key.as_str()).and_modify(|range: &mut (usize, usize)| range.1 = event).or_insert((event, event));
                 }
             }
             ranges
@@ -184,25 +200,25 @@ pub fn check(request: &Request, bytes: &[u8], census: &crate::pdf::Census, repor
         .collect();
     let mut any_failure = false;
     for link in &active {
-        let layer = order.layers.iter().position(|s| s == &link.pdf_layer);
         let mut findings = vec![];
         let mut checked = 0u64;
         let mut wrong = 0u64;
-        let mut incomplete = !order.issues.is_empty() || layer.is_none();
+        let mut incomplete = !order.issues.is_empty() || unresolved.iter().any(|(_, key)| *key == link.key.as_str());
         let mut failed = false;
         let mut found = false;
         for (page, ranges) in ranges.iter().enumerate() {
-            let Some(&(first, last)) = layer.and_then(|id| ranges.get(&id)) else {
+            let Some(&(first, last)) = ranges.get(link.key.as_str()) else {
                 continue;
             };
             found = true;
-            for other in active.iter().filter(|o| o.pdf_layer != link.pdf_layer && o.layer_order != link.layer_order) {
+            for other in active.iter().filter(|o| o.layer_order != link.layer_order) {
                 checked += 1;
-                let other_layer = order.layers.iter().position(|s| s == &other.pdf_layer);
-                let Some(&(other_first, other_last)) = other_layer.and_then(|id| ranges.get(&id)) else {
+                // A partial range cannot establish the complete counterpart sequence.
+                incomplete |= unresolved.contains(&(page, other.key.as_str()));
+                let Some(&(other_first, other_last)) = ranges.get(other.key.as_str()) else {
                     incomplete = true;
                     if findings.len() < 128 {
-                        findings.push(json!({"page":page,"other":other.key,"reason":"Other applicable output is absent on this page; source-page applicability requires resolution"}));
+                        findings.push(json!({"page":page,"other":other.key,"reason":"Other applicable output has no unambiguous painted identity on this page; source-page applicability requires resolution"}));
                     }
                     continue;
                 };
@@ -232,8 +248,8 @@ pub fn check(request: &Request, bytes: &[u8], census: &crate::pdf::Census, repor
         report.record(
             &format!("file/{}/order", link.key),
             status,
-            "Actual path paint sequence compared with the recipe's declared layer order; missing or unsupported content cannot establish order",
-            json!({"comparisons_sample":findings,"comparisons_checked":checked,"wrong_order_count":wrong,"issues":order.issues,"layer":link.pdf_layer}),
+            "Actual ink/role paint sequence compared with declared order; layer numbers are hints and absent or ambiguous output cannot establish order",
+            json!({"comparisons_sample":findings,"comparisons_checked":checked,"wrong_order_count":wrong,"issues":order.issues,"layer":link.pdf_layer,"layer_hint":link.pdf_layer,"identity_ambiguous":unresolved.iter().any(|(_, key)| *key == link.key.as_str())}),
             evidence.clone(),
         )?;
     }
@@ -391,6 +407,8 @@ mod tests {
             let mut request = crate::tests::request();
             request.identity.pdf_sha256 = crate::sha256(&bytes);
             request.recipe.file_links[0].layer_order = 0;
+            request.recipe.file_links[0].name_mode = "source".into();
+            request.recipe.file_links[0].separation_name = None;
             let mut upper = request.recipe.file_links[0].clone();
             upper.key = "upper".into();
             upper.pdf_layer = "Upper".into();

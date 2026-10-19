@@ -464,7 +464,7 @@ pub fn check(request: &Request, bytes: &[u8]) -> Result<Report, String> {
         if report.findings.iter().any(|f| f.obligation.key == format!("file/{}/contribution", link.key) && f.status == Status::NotApplicable) {
             continue;
         }
-        let candidates: Vec<_> = c.paints.iter().filter(|p| p.layer == link.pdf_layer).collect();
+        let candidates: Vec<_> = c.paints.iter().filter(|p| crate::routes::layer_matches(&link.pdf_layer, &p.layer)).collect();
         let matching: Vec<_> = candidates
             .iter()
             .copied()
@@ -473,7 +473,7 @@ pub fn check(request: &Request, bytes: &[u8]) -> Result<Report, String> {
                 _ => false, // Retained source inks need the prepared assignments, not guessed CMYK.
             })
             .collect();
-        if !import_complete || c.budget_exhausted || c.unresolved_layers.contains(&link.pdf_layer) {
+        if !import_complete || c.budget_exhausted || c.unresolved_layers.iter().any(|layer| crate::routes::layer_matches(&link.pdf_layer, layer)) {
             continue;
         }
         if !c.paint_order_verified {
@@ -483,6 +483,19 @@ pub fn check(request: &Request, bytes: &[u8]) -> Result<Report, String> {
                     Status::Incomplete,
                     "Raw PDF and decoded layer attribution could not be reconciled",
                     json!({"layer":link.pdf_layer}),
+                    evidence.clone(),
+                )?;
+            }
+            continue;
+        }
+        let active_links: Vec<_> = request.recipe.file_links.iter().filter(|l| request.garment.matches(&l.garment)).collect();
+        if matching.iter().any(|p| crate::routes::ambiguous(&active_links, p)) {
+            for facet in ["layer", "identity", "overprint"] {
+                report.record(
+                    &format!("file/{}/{facet}", link.key),
+                    Status::Incomplete,
+                    "Observed ink has multiple possible output roles; layer numbering cannot resolve ownership",
+                    json!({"layer_hint":link.pdf_layer,"ink":link.separation_name}),
                     evidence.clone(),
                 )?;
             }

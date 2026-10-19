@@ -31,6 +31,7 @@ mod raster_fidelity;
 mod raster_images;
 pub mod raster_prepare;
 pub mod recipe;
+mod routes;
 mod specification;
 mod tone;
 
