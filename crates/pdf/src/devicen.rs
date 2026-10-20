@@ -6,8 +6,8 @@
 //! ([`placeholder`]), its samples a marker no other image has, and once the file is written
 //! [`write`] finds each stand-in by its marker and writes the real image in its place: its size,
 //! a `[/DeviceN [/Cyan /Magenta /Yellow /Black spots…] alt tint]` colour space (the alternate
-//! space the writer gave the stand-in, the tint transform adding each spot ink's process
-//! equivalent to the process inks) and its samples, and its alpha in the stand-in's soft mask.
+//! space the writer gave the stand-in, the tint transform printing each spot ink's process
+//! equivalent over the process inks) and its samples, and its alpha in the stand-in's soft mask.
 
 use std::io::{Read, Write as _};
 use std::sync::Arc;
@@ -134,22 +134,23 @@ fn num(v: f32) -> String {
 }
 
 /// The PostScript calculator program of the tint transform of process inks and spot inks `alts`
-/// (their process equivalents): each process ink plus each spot ink's share of it, at most 1.
+/// (their process equivalents): each spot ink prints its share of each process ink over the
+/// process inks, `1 - (1 - process) × ∏(1 - tint × share)`, as the renderer mixes them.
 fn tint_program(alts: &[[f32; 4]]) -> String {
     let inputs = 4 + alts.len();
     let mut p = String::from("{");
     for j in 0..4 {
         // `j` outputs are on the stack above the inputs, so input `i` is `inputs - 1 - i + j`
-        // from the top: process ink `j` is `inputs - 1`.
-        p.push_str(&format!(" {} index", inputs - 1));
+        // from the top: process ink `j` is `inputs - 1`; once the paper left by it is pushed,
+        // spot ink `i` is `inputs - 1 - (4 + i) + j + 1`.
+        p.push_str(&format!(" {} index 1 exch sub", inputs - 1));
         for (i, alt) in alts.iter().enumerate() {
             let a = alt.get(j).copied().filter(|a| a.is_finite()).unwrap_or(0.0).clamp(0.0, 1.0);
             if a > 0.0 {
-                p.push_str(&format!(" {} index {} mul add", inputs - 1 - (4 + i) + j + 1, num(a)));
+                p.push_str(&format!(" {} index {} mul 1 exch sub mul", inputs - 1 - (4 + i) + j + 1, num(a)));
             }
         }
-        // At most 1 (the calculator has no `min`).
-        p.push_str(" dup 1 gt { pop 1 } if");
+        p.push_str(" 1 exch sub");
     }
     // The four outputs below the inputs, then the inputs dropped.
     p.push_str(&format!(" {} 4 roll", inputs + 4));
@@ -339,13 +340,13 @@ mod tests {
         // One spot ink at C 50 % and Y 100 %: inputs c m y k s.
         assert_eq!(
             tint_program(&[[0.5, 0.0, 1.0, 0.0]]),
-            "{ 4 index 1 index 0.5 mul add dup 1 gt { pop 1 } if 4 index dup 1 gt { pop 1 } if 4 index 3 index 1 mul add dup 1 gt { pop 1 } if 4 index dup 1 gt { pop 1 } if 9 4 roll pop pop pop pop pop }"
+            "{ 4 index 1 exch sub 1 index 0.5 mul 1 exch sub mul 1 exch sub 4 index 1 exch sub 1 exch sub 4 index 1 exch sub 3 index 1 mul 1 exch sub mul 1 exch sub 4 index 1 exch sub 1 exch sub 9 4 roll pop pop pop pop pop }"
         );
     }
 
-    /// The program runs (the PDF reader's own calculator) and gives each spot ink's share.
+    /// The program runs in the PDF reader's own calculator and mixes the inks as the renderer does.
     #[test]
-    fn the_tint_transform_adds_the_spot_inks_process_equivalents() {
+    fn the_tint_transform_prints_the_spot_inks_over_the_process_inks() {
         let program = tint_program(&[[0.5, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 0.0]]);
         let mut obj = format!("<< /FunctionType 4 /Domain [0 1 0 1 0 1 0 1 0 1 0 1] /Range [0 1 0 1 0 1 0 1] /Length {} >>\nstream\n", program.len())
             .into_bytes();
@@ -370,6 +371,7 @@ mod tests {
         let o = pdf.objects().into_iter().find(|o| matches!(o, craft_pdf::syntax::object::Object::Stream(_))).unwrap();
         let f = craft_pdf::interpret::Function::new(&o).unwrap();
         let out = f.eval([0.25, 0.0, 0.0, 0.5, 1.0, 0.5].into_iter().collect()).unwrap();
-        assert_eq!(out.as_slice(), [0.75, 0.5, 1.0, 0.5]);
+        let want = [1.0 - 0.75 * 0.5, 0.5, 1.0, 0.5];
+        assert!(out.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-5), "{out:?}");
     }
 }
