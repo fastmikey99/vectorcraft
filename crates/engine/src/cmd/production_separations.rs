@@ -135,7 +135,8 @@ pub fn overprint_preview(st: &crate::DocState) -> bool {
 }
 
 /// Own paints only; descendants are walked separately so selecting a plate does not select
-/// a mixed-ink parent group. Images/meshes without a named swatch belong to composite art.
+/// a mixed-ink parent group. Images/meshes without a named swatch belong to composite art; an
+/// image's spot channels belong to their spot plates as well.
 fn own_inks(doc: &Document, n: &Node) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     let mut own = n.clone();
@@ -151,6 +152,12 @@ fn own_inks(doc: &Document, n: &Node) -> BTreeSet<String> {
     });
     if matches!(n.kind, NodeKind::Image(_) | NodeKind::Mesh(_)) {
         names.insert("CMYK".to_string());
+    }
+    // A CMYK image's spot channels print on their spot plates too.
+    if let NodeKind::Image(im) = &n.kind
+        && let Some(blob) = doc.images.get(&im.key)
+    {
+        names.extend(blob.spot_names().into_iter().filter(|name| doc.swatch(name).is_some_and(|s| s.spot)));
     }
     names
 }
@@ -356,6 +363,34 @@ mod tests {
         }
         assert!(rows(&s).iter().find(|r| r.name == "WHP").unwrap().components.is_empty(), "legacy combined white isn't split by inference");
         proof::set_view(Default::default());
+    }
+    #[test]
+    fn an_images_spot_channels_belong_to_their_spot_rows() {
+        use vectorcraft_doc::cmyk::{Inks, SpotInks};
+        let _g = crate::tests_colormgmt::GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = fixture();
+        let inks = Inks::new(1, 1, vec![0; 4]).unwrap();
+        let spots = SpotInks::new(1, 1, vec!["Custom 123".into()], vec![255]).unwrap();
+        let blob = vectorcraft_doc::ImageBlob::cmyk_spot_tiff(&inks, &spots).unwrap();
+        let st = s.doc_mut().unwrap();
+        let doc = std::sync::Arc::make_mut(&mut st.doc);
+        doc.images.insert("spot".into(), blob);
+        let im = vectorcraft_doc::ImageObject {
+            key: "spot".into(),
+            width: 1,
+            height: 1,
+            xf: vectorcraft_geom::Affine::IDENTITY,
+            link: None,
+            placement: Default::default(),
+        };
+        let n = Node::new(doc.alloc_id(), NodeKind::Image(Box::new(im)));
+        let id = n.id;
+        let layer = doc.layers[0].id;
+        doc.insert(Some(layer), 0, n).unwrap();
+        let rs = rows(&s);
+        assert!(rs.iter().find(|r| r.name == "Custom 123").unwrap().ids.contains(&id));
+        assert!(rs.iter().find(|r| r.name == "CMYK").unwrap().ids.contains(&id));
+        assert!(!rs.iter().find(|r| r.name == "WHP").unwrap().ids.contains(&id));
     }
     #[test]
     fn production_separations_preview_never_changes_saved_art_and_select_edits_only_existing_group() {

@@ -66,6 +66,8 @@ pub(crate) struct ImageKey {
     pub mip: u8,
     /// Separations Preview table generation (0 = ordinary image).
     pub separation: u64,
+    /// The colours a CMYK image's spot channels print in ([`crate::ink::spots_key`]; 0 = none).
+    pub spots: u64,
 }
 
 /// A blob's content key and whether it holds CMYK inks, worked out once per blob allocation.
@@ -73,6 +75,8 @@ pub(crate) struct ImageKey {
 pub(crate) struct BlobId {
     pub content: Arc<str>,
     pub cmyk: bool,
+    /// A CMYK image's spot channels ([`ImageBlob::spot_names`]).
+    pub spots: Arc<[String]>,
 }
 
 struct Entry {
@@ -195,7 +199,9 @@ pub(crate) fn blob_id(blob: &ImageBlob) -> BlobId {
         return id;
     }
     // Outside the lock: hashing a large image takes a while.
-    let id = BlobId { content: format!("{}:{}", blob.content_key(), blob.bytes.len()).into(), cmyk: blob.is_cmyk() };
+    let cmyk = blob.is_cmyk();
+    let spots = if cmyk { blob.spot_names().into() } else { Arc::from([]) };
+    let id = BlobId { content: format!("{}:{}", blob.content_key(), blob.bytes.len()).into(), cmyk, spots };
     store().remember_id(&blob.bytes, id.clone());
     id
 }
@@ -240,7 +246,7 @@ mod tests {
     use super::*;
 
     fn key(content: &str) -> ImageKey {
-        ImageKey { content: content.into(), adjust: None, grey: false, ink: Ink::Display, luts: (0, 0), mip: 0, separation: 0 }
+        ImageKey { content: content.into(), adjust: None, grey: false, ink: Ink::Display, luts: (0, 0), mip: 0, separation: 0, spots: 0 }
     }
 
     #[test]
