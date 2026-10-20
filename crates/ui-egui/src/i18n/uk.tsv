@@ -4848,3 +4848,12 @@ lighting	Light	Світло
 @msg	copies must be true or false	copies має бути true або false
 @msg	the image's opacity mask has its own transparency: release it first	маска непрозорості зображення має власну прозорість: спершу звільніть її
 @msg	id must name an image	id має вказувати на зображення
+	Run Separation Action Lists	Виконати списки дій кольороподілу
+@msg	PAL XML nesting exceeds 32 levels	Вкладеність PAL XML перевищує 32 рівні
+@msg	PAL action has no Type	Дія PAL не має Type
+@msg	PAL action nesting exceeds 32 levels	Вкладеність дій PAL перевищує 32 рівні
+@msg	PAL exceeds 4 MiB	PAL перевищує 4 MiB
+@msg	PAL has more than 10000 actions	PAL містить понад 10000 дій
+@msg	PAL list paths must be relative names without parent traversal	Шляхи списків PAL мають бути відносними без переходу до батьківських папок
+@msg	PAL list resolves outside the action-list root	Список PAL розташований поза кореневою папкою списків дій
+@msg	expected PAL ActionList Version 2.0	очікувався PAL ActionList Version 2.0

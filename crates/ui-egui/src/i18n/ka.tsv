@@ -5160,3 +5160,12 @@ imageTrace	Outline	კონტური
 @msg	copies must be true or false	copies უნდა იყოს true ან false
 @msg	the image's opacity mask has its own transparency: release it first	გამოსახულების გაუმჭვირვალობის ნიღაბს აქვს საკუთარი გამჭვირვალობა: ჯერ გაათავისუფლეთ ის
 @msg	id must name an image	id უნდა მიუთითებდეს გამოსახულებაზე
+	Run Separation Action Lists	ფერთა დაშლის მოქმედებათა სიების გაშვება
+@msg	PAL XML nesting exceeds 32 levels	PAL XML-ის ჩადგმა 32 დონეს აჭარბებს
+@msg	PAL action has no Type	PAL მოქმედებას Type არ აქვს
+@msg	PAL action nesting exceeds 32 levels	PAL მოქმედებების ჩადგმა 32 დონეს აჭარბებს
+@msg	PAL exceeds 4 MiB	PAL 4 MiB-ს აჭარბებს
+@msg	PAL has more than 10000 actions	PAL შეიცავს 10000-ზე მეტ მოქმედებას
+@msg	PAL list paths must be relative names without parent traversal	PAL სიების გზები უნდა იყოს ფარდობითი, მშობელ საქაღალდეებში გადასვლის გარეშე
+@msg	PAL list resolves outside the action-list root	PAL სია მოქმედებების სიების ძირეული საქაღალდის გარეთაა
+@msg	expected PAL ActionList Version 2.0	მოსალოდნელია PAL ActionList Version 2.0

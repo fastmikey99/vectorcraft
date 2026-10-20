@@ -5171,3 +5171,12 @@ mark-style	Japanese	Japonesas
 @msg	copies must be true or false	copies deve ser true ou false
 @msg	the image's opacity mask has its own transparency: release it first	a máscara de opacidade da imagem tem transparência própria: libere-a primeiro
 @msg	id must name an image	id deve indicar uma imagem
+	Run Separation Action Lists	Executar listas de ações de separação
+@msg	PAL XML nesting exceeds 32 levels	O aninhamento XML PAL excede 32 níveis
+@msg	PAL action has no Type	A ação PAL não tem Type
+@msg	PAL action nesting exceeds 32 levels	O aninhamento de ações PAL excede 32 níveis
+@msg	PAL exceeds 4 MiB	PAL excede 4 MiB
+@msg	PAL has more than 10000 actions	PAL contém mais de 10000 ações
+@msg	PAL list paths must be relative names without parent traversal	Os caminhos das listas PAL devem ser relativos sem acessar pastas superiores
+@msg	PAL list resolves outside the action-list root	A lista PAL está fora da pasta raiz das listas de ações
+@msg	expected PAL ActionList Version 2.0	esperado PAL ActionList Version 2.0

@@ -5254,3 +5254,12 @@ mark-style	Japanese	Japonské
 @msg	copies must be true or false	copies musí být true nebo false
 @msg	the image's opacity mask has its own transparency: release it first	maska krytí obrázku má vlastní průhlednost: nejprve ji uvolněte
 @msg	id must name an image	id musí označovat obrázek
+	Run Separation Action Lists	Spustit seznamy akcí pro separace
+@msg	PAL XML nesting exceeds 32 levels	Vnoření PAL XML přesahuje 32 úrovní
+@msg	PAL action has no Type	Akce PAL nemá Type
+@msg	PAL action nesting exceeds 32 levels	Vnoření akcí PAL přesahuje 32 úrovní
+@msg	PAL exceeds 4 MiB	PAL přesahuje 4 MiB
+@msg	PAL has more than 10000 actions	PAL má více než 10000 akcí
+@msg	PAL list paths must be relative names without parent traversal	Cesty seznamů PAL musí být relativní bez přechodu do nadřazených složek
+@msg	PAL list resolves outside the action-list root	Seznam PAL se nachází mimo kořen seznamů akcí
+@msg	expected PAL ActionList Version 2.0	očekává se PAL ActionList Version 2.0

@@ -5209,3 +5209,12 @@ theme	Appearance	Utseende
 @msg	copies must be true or false	copies måste vara true eller false
 @msg	the image's opacity mask has its own transparency: release it first	bildens opacitetsmask har egen genomskinlighet: frigör den först
 @msg	id must name an image	id måste ange en bild
+	Run Separation Action Lists	Kör åtgärdslistor för färgseparation
+@msg	PAL XML nesting exceeds 32 levels	PAL XML-nästling överskrider 32 nivåer
+@msg	PAL action has no Type	PAL-åtgärden saknar Type
+@msg	PAL action nesting exceeds 32 levels	Nästling av PAL-åtgärder överskrider 32 nivåer
+@msg	PAL exceeds 4 MiB	PAL överskrider 4 MiB
+@msg	PAL has more than 10000 actions	PAL har fler än 10000 åtgärder
+@msg	PAL list paths must be relative names without parent traversal	PAL-listornas sökvägar måste vara relativa utan åtkomst till överordnade mappar
+@msg	PAL list resolves outside the action-list root	PAL-listan ligger utanför åtgärdslistornas rotmapp
+@msg	expected PAL ActionList Version 2.0	förväntade PAL ActionList Version 2.0

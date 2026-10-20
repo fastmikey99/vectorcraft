@@ -5090,3 +5090,12 @@ lighting	Light	光源
 @msg	copies must be true or false	copies 必须是 true 或 false
 @msg	the image's opacity mask has its own transparency: release it first	图像的不透明度蒙版有自身的透明度：请先释放它
 @msg	id must name an image	id 必须指定一个图像
+	Run Separation Action Lists	运行分色动作列表
+@msg	PAL XML nesting exceeds 32 levels	PAL XML 嵌套超过32层
+@msg	PAL action has no Type	PAL 操作缺少 Type
+@msg	PAL action nesting exceeds 32 levels	PAL 操作嵌套超过32层
+@msg	PAL exceeds 4 MiB	PAL 超过4 MiB
+@msg	PAL has more than 10000 actions	PAL 包含超过10000个操作
+@msg	PAL list paths must be relative names without parent traversal	PAL 列表路径必须为相对路径且不能访问父文件夹
+@msg	PAL list resolves outside the action-list root	PAL 列表位于操作列表根文件夹之外
+@msg	expected PAL ActionList Version 2.0	需要 PAL ActionList Version 2.0

@@ -5216,3 +5216,12 @@ theme	Appearance	Външен вид
 @msg	copies must be true or false	copies трябва да е true или false
 @msg	the image's opacity mask has its own transparency: release it first	маската за непрозрачност на изображението има собствена прозрачност: първо я освободете
 @msg	id must name an image	id трябва да посочва изображение
+	Run Separation Action Lists	Изпълнение на списъци с действия за цветоотделяне
+@msg	PAL XML nesting exceeds 32 levels	Влагането на PAL XML надвишава 32 нива
+@msg	PAL action has no Type	PAL действието няма Type
+@msg	PAL action nesting exceeds 32 levels	Влагането на PAL действия надвишава 32 нива
+@msg	PAL exceeds 4 MiB	PAL надвишава 4 MiB
+@msg	PAL has more than 10000 actions	PAL има повече от 10000 действия
+@msg	PAL list paths must be relative names without parent traversal	Пътищата на PAL списъците трябва да са относителни без преминаване към родителска папка
+@msg	PAL list resolves outside the action-list root	PAL списъкът се намира извън основната папка на списъците с действия
+@msg	expected PAL ActionList Version 2.0	очаква се PAL ActionList Version 2.0

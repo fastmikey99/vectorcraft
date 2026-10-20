@@ -5233,3 +5233,12 @@ swatch	Bright Violet	Kraftig violet
 @msg	copies must be true or false	copies skal være true eller false
 @msg	the image's opacity mask has its own transparency: release it first	billedets opacitetsmaske har sin egen gennemsigtighed: frigiv den først
 @msg	id must name an image	id skal angive et billede
+	Run Separation Action Lists	Kør handlingslister til farveseparation
+@msg	PAL XML nesting exceeds 32 levels	PAL XML-indlejring overstiger 32 niveauer
+@msg	PAL action has no Type	PAL-handlingen mangler Type
+@msg	PAL action nesting exceeds 32 levels	Indlejring af PAL-handlinger overstiger 32 niveauer
+@msg	PAL exceeds 4 MiB	PAL overstiger 4 MiB
+@msg	PAL has more than 10000 actions	PAL har mere end 10000 handlinger
+@msg	PAL list paths must be relative names without parent traversal	PAL-listestier skal være relative uden adgang til overordnede mapper
+@msg	PAL list resolves outside the action-list root	PAL-listen ligger uden for handlingslisternes rodmappe
+@msg	expected PAL ActionList Version 2.0	forventede PAL ActionList Version 2.0

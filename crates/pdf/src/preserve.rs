@@ -440,3 +440,133 @@ mod tests {
         assert!(!crate::pages::open(&out.bytes, None).unwrap().pages()[0].raw().contains_key(b"ArtBox"));
     }
 }
+
+/// Store preparation page boxes while retaining the imported blending space and output intents.
+/// Export coordinates start at the prepared media frame, so original PDF origin translations
+/// must not be reapplied after preparation changes the page boxes.
+pub fn set_preparation_boxes(doc: &mut Document, boxes: &BTreeMap<String, vectorcraft_geom::Rect>) -> Result<(), PdfError> {
+    let board = doc.artboards.first().ok_or_else(|| error("missing preparation artboard"))?;
+    let media = boxes.get("MediaBox").ok_or_else(|| error("missing preparation MediaBox"))?;
+    let mut state: State = match doc.unknown.get(KEY) {
+        Some(value) => serde_json::from_value(value.clone()).map_err(|_| error("invalid saved print settings"))?,
+        None => State::default(),
+    };
+    let mut values = BTreeMap::new();
+    for name in BOXES {
+        if let Some(r) = boxes.get(name) {
+            let v = [r.x0 - media.x0, media.y1 - r.y1, r.x1 - media.x0, media.y1 - r.y0];
+            if !valid_box(&v) {
+                return Err(error("invalid preparation page box"));
+            }
+            values.insert(name.into(), v);
+        }
+    }
+    if let Some(page) = state.pages.iter_mut().find(|p| p.artboard == board.id) {
+        page.boxes = values;
+        page.origin = [0.0, 0.0];
+        page.frame = rect(board.rect);
+    } else {
+        state.pages.push(Page { artboard: board.id, frame: rect(board.rect), origin: [0.0, 0.0], boxes: values, group: None });
+    }
+    doc.unknown.insert(KEY.into(), serde_json::to_value(state).map_err(|_| error("cannot store preparation page boxes"))?);
+    Ok(())
+}
+
+/// Finish a single-page preparation PDF with explicit page boxes and declared spot inks.
+/// Boxes use the document's top-left, y-down coordinates. Unpainted inks are resources only;
+/// declaring an ink does not add marks or separation geometry to the artwork.
+pub fn preparation_output(pdf: Vec<u8>, boxes: &BTreeMap<String, vectorcraft_geom::Rect>, doc: &Document) -> Result<Vec<u8>, PdfError> {
+    let parsed = crate::linearize::parse(&pdf).map_err(error)?;
+    if parsed.pages.len() != 1 {
+        return Err(error("preparation output requires one page"));
+    }
+    let page = parsed.pages.first().and_then(|n| parsed.objects.get(n)).ok_or_else(|| error("missing preparation page"))?;
+    let media = boxes.get("MediaBox").ok_or_else(|| error("missing preparation MediaBox"))?;
+    let mut replacements = BTreeMap::new();
+    for name in BOXES {
+        if let Some(r) = boxes.get(name) {
+            let v = [r.x0 - media.x0, media.y1 - r.y1, r.x1 - media.x0, media.y1 - r.y0];
+            if !valid_box(&v) {
+                return Err(error("invalid preparation page box"));
+            }
+            replacements.insert(name, format!("[{} {} {} {}]", v[0], v[1], v[2], v[3]));
+        }
+    }
+    let resolve = |value: &Obj<'_>| match value {
+        Obj::Ref(n, _) => parsed.objects.get(n).map(|o| &o.value),
+        _ => None,
+    };
+    let resources = page.value.get(b"Resources").ok_or_else(|| error("missing preparation resources"))?;
+    let resources = resolve(resources).unwrap_or(resources);
+    let colors = resources.get(b"ColorSpace");
+    let colors = colors.map(|c| resolve(c).unwrap_or(c));
+    let mut entries = String::from("<<");
+    if let Some(Obj::Dict { start, end, .. }) = colors {
+        let body = pdf.get(start + 2..end - 2).ok_or_else(|| error("invalid resource dictionary span"))?;
+        entries.push_str(std::str::from_utf8(body).map_err(|_| error("non-UTF8 color resources"))?);
+    }
+    for (i, spot) in doc.swatches.iter().filter(|s| s.spot).enumerate() {
+        let color = spot.paint.color().ok_or_else(|| error("spot ink has no alternate color"))?;
+        let [c, m, y, k] = color.to_cmyk();
+        let name = spot.name.as_bytes().iter().map(|b| format!("#{b:02X}")).collect::<String>();
+        entries.push_str(&format!(
+            " /PALInk{i} [/Separation /{name} /DeviceCMYK <</FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [{c} {m} {y} {k}] /N 1>>]"
+        ));
+    }
+    entries.push_str(" >>");
+    let resources = dictionary(&pdf, resources, &BTreeMap::from([("ColorSpace", entries)]))?;
+    replacements.insert("Resources", String::from_utf8(resources).map_err(|_| error("non-UTF8 resource dictionary"))?);
+    let mut patch = Patch::new(&parsed.xref);
+    patch.replace(page.value_span.0, page.value_span.1, dictionary(&pdf, &page.value, &replacements)?);
+    patch.apply(&pdf, &parsed.xref)
+}
+
+#[cfg(test)]
+mod preparation_tests {
+    use super::*;
+    use vectorcraft_color::{Color, Paint, Swatch};
+    use vectorcraft_geom::Rect;
+    use vectorcraft_testkit::pdf::{PdfPage, pdf};
+    #[test]
+    fn preparation_boxes_and_unused_ink_preserve_existing_page_paint() {
+        let input = pdf(&[PdfPage::new(100.0, 80.0, "0 1 0 0 k 10 10 20 20 re f")], None);
+        let mut doc = crate::import(&input).unwrap();
+        doc.swatches.push(Swatch { name: "Ink / (one) é".into(), paint: Paint::solid(Color::rgb(1.0, 0.0, 1.0)), spot: true, global: true });
+        let plain = crate::export(&doc, &PdfOptions::default()).unwrap();
+        let boxes = BTreeMap::from([("MediaBox".into(), Rect::new(0.0, 0.0, 100.0, 80.0)), ("ArtBox".into(), Rect::new(10.0, 50.0, 30.0, 70.0))]);
+        let output = preparation_output(plain, &boxes, &doc).unwrap();
+        let info = crate::info(&output, None).unwrap();
+        assert_eq!(info.pages[0].boxes.iter().find(|(b, _)| *b == CropTo::Art).unwrap().1, Rect::new(10.0, 10.0, 30.0, 30.0));
+        let read = crate::import(&output).unwrap();
+        assert_eq!(
+            read.bounds_of(&read.layers.iter().map(|n| n.id).collect::<Vec<_>>(), true),
+            doc.bounds_of(&doc.layers.iter().map(|n| n.id).collect::<Vec<_>>(), true)
+        );
+        assert!(String::from_utf8_lossy(&output).contains("#49#6E#6B#20#2F#20#28#6F#6E#65#29#20#C3#A9"));
+    }
+}
+
+#[cfg(test)]
+mod preparation_origin_tests {
+    use super::*;
+    use vectorcraft_geom::Rect;
+    use vectorcraft_testkit::pdf::{PdfPage, pdf};
+    #[test]
+    fn preparation_resets_source_origin_without_shifting_art_or_discarding_blending() {
+        let mut page = PdfPage::new(100.0, 80.0, "0 0 0 1 k 10 10 20 20 re f");
+        page.media = [-5.0, -10.0, 95.0, 70.0];
+        page.entries = "/Group <</S /Transparency /CS /DeviceRGB /I true /K false>>".into();
+        let mut doc =
+            crate::import_with_report(&pdf(&[page], None), &crate::ImportOptions { crop: CropTo::Media, ..Default::default() }).unwrap().document;
+        let expected = doc.layers[0].visual_bounds();
+        let boxes = BTreeMap::from([("MediaBox".into(), Rect::new(0.0, 0.0, 100.0, 80.0))]);
+        set_preparation_boxes(&mut doc, &boxes).unwrap();
+        let bytes = crate::export(&doc, &PdfOptions::default()).unwrap();
+        let output = preparation_output(bytes, &boxes, &doc).unwrap();
+        let reopened = crate::import(&output).unwrap();
+        assert_eq!(expected, reopened.layers[0].visual_bounds());
+        let pdf = crate::pages::open(&output, None).unwrap();
+        let group = pdf.pages()[0].raw().get::<Dict<'_>>(b"Group").unwrap();
+        assert_eq!(group.get::<Name<'_>>(b"CS").unwrap().as_str(), "DeviceRGB");
+    }
+}

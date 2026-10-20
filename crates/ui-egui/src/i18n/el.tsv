@@ -5205,3 +5205,12 @@ effect	Points	Σημεία
 @msg	copies must be true or false	το copies πρέπει να είναι true ή false
 @msg	the image's opacity mask has its own transparency: release it first	η μάσκα αδιαφάνειας της εικόνας έχει δική της διαφάνεια: αποδεσμεύστε την πρώτα
 @msg	id must name an image	το id πρέπει να ορίζει μια εικόνα
+	Run Separation Action Lists	Εκτέλεση λιστών ενεργειών διαχωρισμού χρωμάτων
+@msg	PAL XML nesting exceeds 32 levels	Η εμφώλευση PAL XML υπερβαίνει τα 32 επίπεδα
+@msg	PAL action has no Type	Η ενέργεια PAL δεν έχει Type
+@msg	PAL action nesting exceeds 32 levels	Η εμφώλευση ενεργειών PAL υπερβαίνει τα 32 επίπεδα
+@msg	PAL exceeds 4 MiB	Το PAL υπερβαίνει τα 4 MiB
+@msg	PAL has more than 10000 actions	Το PAL έχει περισσότερες από 10000 ενέργειες
+@msg	PAL list paths must be relative names without parent traversal	Οι διαδρομές λιστών PAL πρέπει να είναι σχετικές χωρίς πρόσβαση σε γονικούς φακέλους
+@msg	PAL list resolves outside the action-list root	Η λίστα PAL βρίσκεται εκτός του ριζικού φακέλου λιστών ενεργειών
+@msg	expected PAL ActionList Version 2.0	αναμενόταν PAL ActionList Version 2.0

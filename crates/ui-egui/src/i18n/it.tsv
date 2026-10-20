@@ -4868,3 +4868,12 @@ lighting	Light	Luce
 @msg	copies must be true or false	copies deve essere true o false
 @msg	the image's opacity mask has its own transparency: release it first	la maschera di opacità dell’immagine ha una propria trasparenza: rilasciala prima
 @msg	id must name an image	id deve indicare un’immagine
+	Run Separation Action Lists	Esegui elenchi di azioni di separazione
+@msg	PAL XML nesting exceeds 32 levels	La nidificazione XML PAL supera 32 livelli
+@msg	PAL action has no Type	L’azione PAL non ha Type
+@msg	PAL action nesting exceeds 32 levels	La nidificazione delle azioni PAL supera 32 livelli
+@msg	PAL exceeds 4 MiB	PAL supera 4 MiB
+@msg	PAL has more than 10000 actions	PAL contiene più di 10000 azioni
+@msg	PAL list paths must be relative names without parent traversal	I percorsi degli elenchi PAL devono essere relativi senza accedere alle cartelle superiori
+@msg	PAL list resolves outside the action-list root	L’elenco PAL si trova fuori dalla cartella radice degli elenchi di azioni
+@msg	expected PAL ActionList Version 2.0	previsto PAL ActionList Version 2.0

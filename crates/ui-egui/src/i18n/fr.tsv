@@ -5253,3 +5253,12 @@ theme	Appearance	Apparence
 @msg	copies must be true or false	copies doit valoir true ou false
 @msg	the image's opacity mask has its own transparency: release it first	le masque d’opacité de l’image a sa propre transparence : libérez-le d’abord
 @msg	id must name an image	id doit désigner une image
+	Run Separation Action Lists	Exécuter les listes d’actions de séparation
+@msg	PAL XML nesting exceeds 32 levels	L’imbrication XML PAL dépasse 32 niveaux
+@msg	PAL action has no Type	L’action PAL ne possède pas de Type
+@msg	PAL action nesting exceeds 32 levels	L’imbrication des actions PAL dépasse 32 niveaux
+@msg	PAL exceeds 4 MiB	PAL dépasse 4 MiB
+@msg	PAL has more than 10000 actions	PAL contient plus de 10000 actions
+@msg	PAL list paths must be relative names without parent traversal	Les chemins des listes PAL doivent être relatifs sans accéder aux dossiers parents
+@msg	PAL list resolves outside the action-list root	La liste PAL se trouve hors du dossier racine des listes d’actions
+@msg	expected PAL ActionList Version 2.0	PAL ActionList Version 2.0 attendu

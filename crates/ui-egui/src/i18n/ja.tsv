@@ -4908,3 +4908,12 @@ lighting	Light	ライト
 @msg	copies must be true or false	copies は true または false でなければなりません
 @msg	the image's opacity mask has its own transparency: release it first	画像の不透明マスクに独自の透明部分があります: 先に解除してください
 @msg	id must name an image	id は画像を指定する必要があります
+	Run Separation Action Lists	色分解アクションリストを実行
+@msg	PAL XML nesting exceeds 32 levels	PAL XML の入れ子が32階層を超えています
+@msg	PAL action has no Type	PAL アクションに Type がありません
+@msg	PAL action nesting exceeds 32 levels	PAL アクションの入れ子が32階層を超えています
+@msg	PAL exceeds 4 MiB	PAL が4 MiBを超えています
+@msg	PAL has more than 10000 actions	PAL に10000件を超えるアクションがあります
+@msg	PAL list paths must be relative names without parent traversal	PAL リストのパスは親フォルダーへ移動しない相対パスにしてください
+@msg	PAL list resolves outside the action-list root	PAL リストがアクションリストのルートフォルダー外にあります
+@msg	expected PAL ActionList Version 2.0	PAL ActionList Version 2.0 が必要です
