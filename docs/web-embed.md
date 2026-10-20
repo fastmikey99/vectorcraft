@@ -187,6 +187,34 @@ it is not embedded as production recipe authority in the PDF. Named object group
 persist in native documents; public PDF import cannot reconstruct group roles that
 were flattened or omitted by an exporter.
 
+### Per-job units (Reporter fork)
+
+The ready message advertises `units: true`. An open can include two optional fields:
+
+- `units`: the opened document's General unit (rulers, positions, sizes, dialog
+  distances), such as `"inches"` or `"millimeters"`.
+- `strokeUnits`: the Stroke unit (weights, dashes) while that document is open.
+
+Each is a string naming a unit as Preferences › Units names them: the key, label or
+suffix in any case, ignoring spaces and punctuation (`inches`, `Inches`, `in`,
+`millimeters`, `mm`, `points`, `pt`, `picas`, `centimeters`, `pixels`, `feetInches`,
+`meters`, `yards`, `feet`). Anything else (a number, an unknown name) is refused
+with `vectorcraft:failed` (`vectorcraft:open: units must name a unit, such as inches
+or millimeters`) and nothing opens.
+
+They are display choices for this job, not edits and not preferences:
+
+- `units` is applied to the document the open makes, also a native document saved in
+  other units, and also after the Import PDF dialog. The document stays unmodified:
+  no `dirty: true`, no undo step. A later save carries the units it shows.
+- Neither changes the person's stored preferences, so the `vectorcraft:prefs` the
+  editor sends back keep their own Units › General and Stroke (a person who works in
+  millimetres is not left in inches by one US job).
+- Every open sets them for its job: an open without `strokeUnits` shows strokes in
+  the person's Stroke preference again; one without `units` opens in the file's own
+  units or the preference, as before. Choosing a different Stroke unit in
+  Preferences ends the page's choice.
+
 ### Production preview and floating panels (2026-10-17)
 
 Host configuration starts the ink composite immediately, with visibility stored on

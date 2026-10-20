@@ -5,6 +5,9 @@ use std::sync::Arc;
 
 use serde_json::json;
 
+use vectorcraft_doc::Unit;
+use vectorcraft_engine::units::Measure;
+
 use crate::{HostInbox, HostOpen, Inbox, VectorcraftApp, menus};
 
 const SQUARE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect x="10" y="10" width="20" height="20"/></svg>"#;
@@ -23,6 +26,8 @@ fn hand(app: &mut VectorcraftApp, inbox: &HostInbox, name: &str, bytes: &[u8]) {
         print_production: false,
         separations: None,
         raster_effects_ppi: None,
+        units: None,
+        stroke_units: None,
     });
     app.drain_inbox();
 }
@@ -126,6 +131,8 @@ fn production_context_is_validated_before_replacing_the_file_and_installed_befor
         print_production: false,
         separations: Some(Context::default()),
         raster_effects_ppi: None,
+        units: None,
+        stroke_units: None,
     });
     app.drain_inbox();
     assert_eq!(titles(&app), ["original.svg"]);
@@ -137,6 +144,8 @@ fn production_context_is_validated_before_replacing_the_file_and_installed_befor
         print_production: false,
         separations: Some(context.clone()),
         raster_effects_ppi: None,
+        units: None,
+        stroke_units: None,
     });
     app.drain_inbox();
     assert_eq!(titles(&app), ["configured.svg"]);
@@ -159,6 +168,8 @@ fn reopening_a_separation_keeps_its_docked_panel_in_place() {
         print_production: false,
         separations: Some(Context { label: "Reporter".into(), ..Default::default() }),
         raster_effects_ppi: None,
+        units: None,
+        stroke_units: None,
     });
     app.drain_inbox();
     assert_eq!(app.ui.open_panel, None, "a docked panel must not also pop out over the artwork");
@@ -176,6 +187,8 @@ fn the_page_sets_a_floor_for_the_raster_effects_resolution_without_marking_the_f
             print_production: false,
             separations: None,
             raster_effects_ppi: ppi.map(|p: f64| p as u32),
+            units: None,
+            stroke_units: None,
         });
     };
     open(&host, "job.svg", SQUARE.to_vec(), Some(300.0));
@@ -205,6 +218,8 @@ fn the_raster_effects_floor_waits_for_a_pdf_behind_the_import_dialog() {
         print_production: false,
         separations: None,
         raster_effects_ppi: None,
+        units: None,
+        stroke_units: None,
     });
     app.drain_inbox();
     let page = || vectorcraft_testkit::pdf::PdfPage::new(100.0, 100.0, "0 0 1 rg 10 10 50 50 re f");
@@ -215,6 +230,8 @@ fn the_raster_effects_floor_waits_for_a_pdf_behind_the_import_dialog() {
         print_production: false,
         separations: None,
         raster_effects_ppi: Some(300),
+        units: None,
+        stroke_units: None,
     });
     app.drain_inbox();
     assert_eq!(titles(&app), ["first.svg"], "the Import PDF dialog is up");
@@ -228,4 +245,93 @@ fn the_raster_effects_floor_waits_for_a_pdf_behind_the_import_dialog() {
     app.drain_inbox();
     let st = app.session.active().unwrap();
     assert_eq!((titles(&app), st.doc.raster_effects_ppi, st.is_dirty()), (vec!["two.pdf".to_string()], 300.0, false));
+}
+
+fn open_in(host: &HostInbox, name: &str, bytes: Vec<u8>, units: Option<Unit>, stroke_units: Option<Unit>) {
+    host.lock().unwrap().push(HostOpen {
+        name: name.into(),
+        bytes,
+        print_production: false,
+        separations: None,
+        raster_effects_ppi: None,
+        units,
+        stroke_units,
+    });
+}
+
+#[test]
+fn the_page_shows_its_job_in_its_units_without_an_edit_or_a_preference() {
+    let (mut app, _, host) = single();
+    app.session.prefs.units_general = "millimeters".into();
+    app.session.prefs.units_stroke = "points".into();
+    let prefs = serde_json::to_value(&app.session.prefs).unwrap();
+    open_in(&host, "job.svg", SQUARE.to_vec(), Some(Unit::Inches), Some(Unit::Inches));
+    app.drain_inbox();
+    let st = app.session.active().unwrap();
+    assert_eq!(st.doc.units, Unit::Inches, "the page's General unit, not the person's millimetres");
+    assert!(!st.is_dirty(), "nothing to save: the units are a display choice");
+    assert!(st.history.undo.is_empty() && st.history.redo.is_empty(), "and nothing to undo");
+    assert_eq!((app.session.general_unit(), app.session.unit(Measure::Stroke)), (Unit::Inches, Unit::Inches));
+    assert_eq!(serde_json::to_value(&app.session.prefs).unwrap(), prefs, "the stored preferences are the person's own");
+    // The next job without units: the file's or the person's units again, strokes too.
+    open_in(&host, "nz.svg", SQUARE.to_vec(), None, None);
+    app.drain_inbox();
+    assert_eq!((app.session.general_unit(), app.session.unit(Measure::Stroke)), (Unit::Millimeters, Unit::Points));
+    assert_eq!(serde_json::to_value(&app.session.prefs).unwrap(), prefs);
+}
+
+#[test]
+fn the_pages_units_override_a_native_document_saved_in_others() {
+    let (mut app, _, host) = single();
+    hand(&mut app, &host, "first.svg", SQUARE);
+    app.run("document.setUnits", json!({"units": "millimeters"})).unwrap();
+    let saved = vectorcraft_format::save_file(&app.session.active().unwrap().doc);
+    open_in(&host, "saved.vectorcraft", saved.clone(), None, None);
+    app.drain_inbox();
+    assert_eq!(app.session.active().unwrap().doc.units, Unit::Millimeters, "a restored document keeps its saved units");
+    open_in(&host, "saved.vectorcraft", saved, Some(Unit::Inches), None);
+    app.drain_inbox();
+    let st = app.session.active().unwrap();
+    assert_eq!((st.doc.units, st.is_dirty(), st.history.undo.len()), (Unit::Inches, false, 0));
+    // An edit afterwards is one undo step that keeps the units; undoing it is clean again.
+    app.run("select.all", json!({})).unwrap();
+    app.run("object.move", json!({ "dx": 5, "dy": 0 })).unwrap();
+    app.run("edit.undo", json!({})).unwrap();
+    let st = app.session.active().unwrap();
+    assert_eq!((st.doc.units, st.is_dirty()), (Unit::Inches, false));
+}
+
+#[test]
+fn the_pages_units_wait_for_a_pdf_behind_the_import_dialog() {
+    let (mut app, _, host) = single();
+    open_in(&host, "first.svg", SQUARE.to_vec(), Some(Unit::Millimeters), None);
+    app.drain_inbox();
+    let page = || vectorcraft_testkit::pdf::PdfPage::new(100.0, 100.0, "0 0 1 rg 10 10 50 50 re f");
+    let pdf = vectorcraft_testkit::pdf::pdf_with(&[page(), page()], &[], None);
+    open_in(&host, "two.pdf", pdf, Some(Unit::Inches), Some(Unit::Millimeters));
+    app.drain_inbox();
+    assert_eq!(titles(&app), ["first.svg"], "the Import PDF dialog is up");
+    assert_eq!(app.session.active().unwrap().doc.units, Unit::Millimeters, "the open document is not the page's file");
+    assert_eq!(app.session.unit(Measure::Stroke), Unit::Points, "nor are its strokes");
+    let ctx = egui::Context::default();
+    crate::theme::install_fonts(&ctx);
+    let key = egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() };
+    let mut out = ctx.run_ui(egui::RawInput { events: vec![key], ..Default::default() }, |ui| crate::dialogs::show(&mut app, ui.ctx()));
+    out.textures_delta.clear();
+    app.drain_inbox();
+    let st = app.session.active().unwrap();
+    assert_eq!((titles(&app), st.doc.units, st.is_dirty()), (vec!["two.pdf".to_string()], Unit::Inches, false));
+    assert_eq!(app.session.unit(Measure::Stroke), Unit::Millimeters);
+}
+
+#[test]
+fn choosing_a_stroke_unit_ends_the_pages() {
+    let (mut app, _, host) = single();
+    open_in(&host, "job.svg", SQUARE.to_vec(), None, Some(Unit::Inches));
+    app.drain_inbox();
+    assert_eq!(app.session.unit(Measure::Stroke), Unit::Inches);
+    app.run("prefs.set", json!({"key": "unitsStroke", "value": "points"})).unwrap();
+    assert_eq!(app.session.unit(Measure::Stroke), Unit::Inches, "the same preference again isn't a choice");
+    app.run("prefs.set", json!({"key": "unitsStroke", "value": "millimeters"})).unwrap();
+    assert_eq!(app.session.unit(Measure::Stroke), Unit::Millimeters);
 }

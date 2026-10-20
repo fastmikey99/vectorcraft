@@ -601,6 +601,13 @@ impl DocState {
         self.revision += 1;
     }
 
+    /// Show this document in `units` (its General unit) as Preferences ▸ Units ▸ General does: a
+    /// display change, not an edit, so it adds no undo step and leaves the document as clean or as
+    /// changed as it was.
+    pub fn show_in_units(&mut self, units: vectorcraft_doc::Unit) {
+        self.apply_display_preferences(Some(units), None);
+    }
+
     /// Record the current document as saved.
     pub fn mark_saved(&mut self) {
         self.saved_doc = self.doc.clone();
@@ -1377,6 +1384,9 @@ pub struct Session {
     pub link_stamps: std::collections::HashMap<(u64, String), link_watch::Stamp>,
     /// The stamps being taken on a worker thread ([`Session::start_link_scan`]).
     pub link_scan: Option<link_watch::LinkScan>,
+    /// The Stroke unit an embedding page chose for the job it opened, shown instead of Preferences ▸
+    /// Units ▸ Stroke without changing that preference ([`Session::set_stroke_unit_override`]).
+    stroke_unit_override: Option<vectorcraft_doc::Unit>,
 }
 
 impl Default for Session {
@@ -1440,6 +1450,7 @@ impl Session {
             search_threads: None,
             link_stamps: Default::default(),
             link_scan: None,
+            stroke_unit_override: None,
         }
     }
 
