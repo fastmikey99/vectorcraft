@@ -15,6 +15,9 @@ use zune_jpeg::zune_core::options::DecoderOptions;
 
 use crate::ImageBlob;
 
+pub mod spots;
+pub use spots::SpotInks;
+
 /// Most pixels a CMYK image is decoded with (256 MB of samples): larger ones decode as RGB.
 pub const MAX_CMYK_PIXELS: u64 = 1 << 26;
 
