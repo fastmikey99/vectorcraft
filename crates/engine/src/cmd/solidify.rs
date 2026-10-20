@@ -280,20 +280,21 @@ pub(crate) fn check(src: &DynamicImage, out: &DynamicImage, level: u8, mask: Opt
 }
 
 /// The chunks of PNG `bytes` (type, the whole chunk: length, type, data and CRC) up to and including
-/// `IEND` — anything after it is not part of the image and is ignored, as decoders do; `None` when they
-/// aren't a well-formed PNG.
+/// `IEND`. Anything after `IEND` is not part of the image, and a file cut short ends where its last
+/// whole chunk does — the chunks read so far are kept, as decoders keep the pixels (review rounds 3–4);
+/// `None` only when it isn't a PNG.
 fn chunks(bytes: &[u8]) -> Option<Vec<([u8; 4], &[u8])>> {
     let mut rest = bytes.strip_prefix(b"\x89PNG\r\n\x1a\n")?;
     let mut out = vec![];
-    while !rest.is_empty() {
-        let len = usize::try_from(u32::from_be_bytes(rest.get(..4)?.try_into().ok()?)).ok()?;
-        let end = len.checked_add(12)?;
-        let kind: [u8; 4] = rest.get(4..8)?.try_into().ok()?;
-        out.push((kind, rest.get(..end)?));
+    while let (Some(len), Some(kind)) = (rest.get(..4), rest.get(4..8)) {
+        let Ok(len) = usize::try_from(u32::from_be_bytes(len.try_into().ok()?)) else { break };
+        let Some(chunk) = len.checked_add(12).and_then(|end| rest.get(..end)) else { break };
+        let kind: [u8; 4] = kind.try_into().ok()?;
+        out.push((kind, chunk));
         if &kind == b"IEND" {
             break;
         }
-        rest = rest.get(end..)?;
+        rest = &rest[chunk.len()..];
     }
     Some(out)
 }

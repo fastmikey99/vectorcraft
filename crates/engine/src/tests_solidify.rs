@@ -147,16 +147,25 @@ fn sixteen_bit_and_grey_alpha_keep_their_colour_type() {
 
 #[test]
 fn a_png_keeps_its_resolution_and_colour_chunks() {
-    keeps_chunks(false);
+    keeps_chunks(Tail::Whole);
 }
 
 #[test]
 fn bytes_after_iend_do_not_lose_the_colour_and_resolution_chunks() {
-    // Codex round 3: trailing bytes after IEND made the chunk walk fail and the chunks were dropped.
-    keeps_chunks(true);
+    // Review round 3: trailing bytes after IEND made the chunk walk fail and the chunks were dropped.
+    keeps_chunks(Tail::Extra);
 }
 
-fn keeps_chunks(trailing: bool) {
+#[test]
+fn a_cut_off_iend_does_not_lose_the_colour_and_resolution_chunks() {
+    // Review round 4: IEND's CRC missing — the decoder still reads the pixels, so the chunks must stay.
+    keeps_chunks(Tail::Cut);
+}
+
+#[derive(PartialEq)]
+enum Tail { Whole, Extra, Cut }
+
+fn keeps_chunks(tail: Tail) {
     // A pHYs chunk (300 ppi: 11811 pixels a metre) and a gAMA chunk after the header.
     let chunk = |kind: &[u8; 4], data: &[u8]| {
         let mut c = (data.len() as u32).to_be_bytes().to_vec();
@@ -172,10 +181,12 @@ fn keeps_chunks(trailing: bool) {
     with.extend(chunk(b"pHYs", &[0, 0, 0x2e, 0x23, 0, 0, 0x2e, 0x23, 1]));
     with.extend(chunk(b"gAMA", &45455u32.to_be_bytes()));
     with.extend_from_slice(&plain[33..]);
-    if trailing {
-        with.push(0);
+    match tail {
+        Tail::Extra => with.push(0),
+        Tail::Cut => with.truncate(with.len() - 4),
+        Tail::Whole => {}
     }
-    assert!(image::load_from_memory(&with).is_ok());
+    assert!(image::load_from_memory(&with).is_ok(), "the decoder reads it");
     let (mut s, ids) = session_with(with, (7, 1), &[1.0]);
     select(&mut s, ids[0]);
     s.execute(C, &json!({})).unwrap();
