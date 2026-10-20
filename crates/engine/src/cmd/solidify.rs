@@ -279,7 +279,8 @@ pub(crate) fn check(src: &DynamicImage, out: &DynamicImage, level: u8, mask: Opt
     }
 }
 
-/// The chunks of PNG `bytes` (type, the whole chunk: length, type, data and CRC); `None` when they
+/// The chunks of PNG `bytes` (type, the whole chunk: length, type, data and CRC) up to and including
+/// `IEND` — anything after it is not part of the image and is ignored, as decoders do; `None` when they
 /// aren't a well-formed PNG.
 fn chunks(bytes: &[u8]) -> Option<Vec<([u8; 4], &[u8])>> {
     let mut rest = bytes.strip_prefix(b"\x89PNG\r\n\x1a\n")?;
@@ -289,6 +290,9 @@ fn chunks(bytes: &[u8]) -> Option<Vec<([u8; 4], &[u8])>> {
         let end = len.checked_add(12)?;
         let kind: [u8; 4] = rest.get(4..8)?.try_into().ok()?;
         out.push((kind, rest.get(..end)?));
+        if &kind == b"IEND" {
+            break;
+        }
         rest = rest.get(end..)?;
     }
     Some(out)
