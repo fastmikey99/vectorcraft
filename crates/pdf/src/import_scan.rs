@@ -581,6 +581,21 @@ impl Walker<'_, '_> {
                 order.issues.insert("Image placement transform is unresolved".into());
             }
             let containing_form_clip = state.form_clip.filter(|bounds| state.exact_matrix.is_some_and(|m| crate::print_clip::contains(*bounds, m)));
+            let form_clip_interior = if containing_form_clip.is_some() {
+                None
+            } else {
+                state
+                    .form_clip_interior
+                    .filter(|bounds| state.interval_matrix.is_some_and(|m| crate::print_clip_interval::contains(*bounds, m) == Some(true)))
+            };
+            let retained_form_crop = if containing_form_clip.is_none() && form_clip_interior.is_none() {
+                state
+                    .form_clip
+                    .zip(state.exact_matrix)
+                    .filter(|(bounds, m)| bounds.iter().all(|n| n.abs() <= 1 << 20) && m[1] == 0 && m[2] == 0 && m[0] != 0 && m[3] != 0)
+            } else {
+                None
+            };
             order.images.push(crate::PrintImageUse {
                 samples,
                 sample_error,
@@ -597,13 +612,8 @@ impl Walker<'_, '_> {
                 matrix: state.matrix.map(|m| m.as_coeffs()),
                 clip_context: state.clip_context,
                 containing_form_clip,
-                form_clip_interior: if containing_form_clip.is_some() {
-                    None
-                } else {
-                    state
-                        .form_clip_interior
-                        .filter(|bounds| state.interval_matrix.is_some_and(|m| crate::print_clip_interval::contains(*bounds, m) == Some(true)))
-                },
+                form_clip_interior,
+                retained_form_crop,
                 overprint: state.fill,
                 overprint_mode: u8::from(state.nonzero),
                 description,

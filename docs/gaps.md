@@ -741,3 +741,9 @@ Two Codex reviews, full CI, native/WASI/Reporter replay and actual prior/current
 A separate bounded interval witness now establishes non-cropping containment for a strict decimal subset. Exact integer proof identities remain unchanged; unknown clips, ambiguous arithmetic and insufficient margins stay unresolved. Source capture retains the new witness without adding a manufacturing tolerance.
 
 Codex review, full CI, native/WASI/Reporter replay and independent transformed direct/Form comparisons support this bounded extension. Broader PDF, numerical and production qualification gaps remain open; headline readiness estimates are unchanged.
+
+## HC42 — Retained exact Form crops (2026-10-20)
+
+A separately approved crop boundary now retains exact rational pixel edges, partial-cell samples and original replay for bounded axis-aligned integer Form/image transforms. Reporter explicitly exposes that decision. Source continuity compares samples/grid and visible crop geometry; boundary uncertainty cannot hide independently proven defects.
+
+Codex review and a focused closure, full CI, native/WASI/Reporter replay and independent crop controls support this bounded extension. Decimal/path clips, ICC originals and broader production qualification remain open; headline readiness estimates are unchanged.

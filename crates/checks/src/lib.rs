@@ -22,6 +22,7 @@ pub mod pdf;
 pub mod preparation;
 pub mod prepare;
 pub mod prepare_edits;
+mod prepared_crop;
 pub mod prepared_mask;
 pub mod program;
 #[cfg(not(target_arch = "wasm32"))]

@@ -15,6 +15,9 @@ pub struct Mask {
     pub pixel_to_page_mm: [f64; 6],
     /// Row-major bits, high bit first, zero padding in the last byte.
     pub bits_hex: String,
+    /// Optional exact rational pixel-edge crop, separately reviewed from alpha.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip: Option<crate::prepared_crop::Clip>,
 }
 impl Mask {
     fn bytes(&self) -> Result<Vec<u8>, String> {
@@ -49,7 +52,16 @@ impl Mask {
         if [bounds.x0, bounds.y0, bounds.x1, bounds.y1].iter().any(|n| !n.is_finite() || n.abs() > 1_000_000.0) {
             return Err("Prepared mask placement exceeds coordinate bounds".into());
         }
+        if let Some(clip) = &self.clip {
+            clip.validate(self.width, self.height)?;
+        }
         Ok(bytes)
+    }
+    pub(crate) fn cell_visible(&self, x: u32, y: u32) -> bool {
+        self.clip.as_ref().is_none_or(|clip| clip.intersects(x, y))
+    }
+    pub(crate) fn boundary_policy(&self) -> &'static str {
+        if self.clip.is_some() { "exact_binary_alpha_with_retained_crop_v1" } else { "exact_binary_alpha" }
     }
     pub fn validate(&self) -> Result<(), String> {
         self.bytes().map(|_| ())
@@ -61,7 +73,7 @@ impl Mask {
         for y in 0..self.height {
             for x in 0..self.width {
                 let at = y as usize * self.width as usize + x as usize;
-                if bytes.get(at / 8).is_some_and(|b| b & (1 << (7 - at % 8)) != 0) {
+                if self.cell_visible(x, y) && bytes.get(at / 8).is_some_and(|b| b & (1 << (7 - at % 8)) != 0) {
                     x0 = x0.min(x);
                     y0 = y0.min(y);
                     x1 = x1.max(x + 1);
@@ -122,6 +134,13 @@ impl Mask {
         }
         let mut path = BezPath::new();
         for rect in rectangles {
+            let rect = if let Some(clip) = &self.clip { rect.intersect(clip.rect()) } else { rect };
+            if rect.width() <= 0.0 || rect.height() <= 0.0 {
+                continue;
+            }
+            if self.clip.is_some() && (rect.width() < 0.0001 || rect.height() < 0.0001) {
+                return Err("Retained crop leaves a sub-resolution mask rectangle".into());
+            }
             path.extend(rect.to_path(0.000001).elements().iter().copied());
         }
         let xf = Affine::new(self.pixel_to_page_mm);
@@ -144,7 +163,15 @@ impl Mask {
 mod tests {
     use super::*;
     fn mask(width: u32, height: u32, bits: &str) -> Mask {
-        Mask { source_sha256: "a".repeat(64), width, height, page: 0, pixel_to_page_mm: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], bits_hex: bits.into() }
+        Mask {
+            source_sha256: "a".repeat(64),
+            width,
+            height,
+            page: 0,
+            pixel_to_page_mm: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            bits_hex: bits.into(),
+            clip: None,
+        }
     }
     #[test]
     fn exact_hole_and_opaque_masks_preserve_pixel_edges() {
@@ -178,5 +205,37 @@ mod tests {
         }
         m.bits_hex = bits;
         assert!(m.path().unwrap_err().contains("contour budget"));
+    }
+}
+
+#[cfg(test)]
+mod crop_tests {
+    use super::*;
+    #[test]
+    fn retained_rational_boundary_survives_serialization_and_mask_geometry() {
+        let mut mask = Mask {
+            source_sha256: "a".repeat(64),
+            width: 3,
+            height: 3,
+            page: 0,
+            pixel_to_page_mm: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            bits_hex: "ff80".into(),
+            clip: None,
+        };
+        assert!(serde_json::to_value(&mask).unwrap().get("clip").is_none());
+        mask.clip = Some(crate::prepared_crop::Clip::from_raw([19, 18, 40, 54], [36, 0, 0, 36, 18, 18], 3, 3).unwrap());
+        assert_eq!(mask.visible_window().unwrap(), Some([0, 0, 2, 3]));
+        let p = mask.path().unwrap();
+        let b = p.to_bezpath().bounding_box();
+        assert!((b.x0 - 1.0 / 12.0).abs() < 0.00001);
+        assert!((b.x1 - 11.0 / 6.0).abs() < 0.00001);
+        assert_eq!((b.y0, b.y1), (0.0, 3.0));
+        let serialized = serde_json::to_string(&mask).unwrap();
+        let restored: Mask = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(crate::digest(&mask).unwrap(), crate::digest(&restored).unwrap());
+        assert_eq!(p, restored.path().unwrap());
+        mask.clip.as_mut().unwrap().edges[2] = [1, 1_000_000];
+        mask.clip.as_mut().unwrap().edges[0] = [0, 1];
+        assert!(mask.path().unwrap_err().contains("sub-resolution"));
     }
 }

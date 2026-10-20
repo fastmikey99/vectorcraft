@@ -63,6 +63,11 @@ pub struct PrintImageUse {
     /// Only emitted when the exact integral witness above is unavailable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub form_clip_interior: Option<[i64; 4]>,
+    /// Retained cropping boundary plus its exact image transform. This is not a
+    /// non-cropping witness: consumers must retain and explicitly review the crop.
+    /// Only emitted when neither existing containment witness is available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retained_form_crop: Option<([i64; 4], [i64; 6])>,
     pub overprint: bool,
     pub overprint_mode: u8,
     pub description: PrintImageDescription,

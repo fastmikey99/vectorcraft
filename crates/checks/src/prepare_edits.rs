@@ -35,7 +35,7 @@ pub(crate) fn raster_placement(
         }
         match serde_json::from_value::<Edit>(fact.value.clone()).map_err(|e| e.to_string())? {
             Edit::RasterMask { source, source_sha256, policy } if source == id => {
-                if approved || source_sha256 != mask.source_sha256 || policy != "exact_binary_alpha" {
+                if approved || source_sha256 != mask.source_sha256 || policy != mask.boundary_policy() {
                     return Err("Raster source boundary decision is invalid".into());
                 }
                 approved = true;

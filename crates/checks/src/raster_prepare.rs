@@ -18,8 +18,12 @@ pub struct Source {
     pub paint: Value,
     pub ink: Option<String>,
 }
-fn diagnostic(id: &str) -> String {
-    format!("{id}: explicit exact-binary-alpha boundary decision required")
+fn diagnostic(id: &str, cropped: bool) -> String {
+    if cropped {
+        format!("{id}: explicit exact-binary-alpha and retained-crop boundary decision required")
+    } else {
+        format!("{id}: explicit exact-binary-alpha boundary decision required")
+    }
 }
 /// Return false without altering the ordinary draft if this bounded path cannot account for it.
 /// A raw clip flag needs retained exact or conservatively bounded containment evidence; it is never dropped.
@@ -68,7 +72,8 @@ pub fn capture(bytes: &[u8], draft: &mut Draft, native_images: usize, import_iss
         let size = if matches!(metadata.rotation, 90 | 270) { [y1 - y0, x1 - x0] } else { [x1 - x0, y1 - y0] };
         let page_bounds = Rect::new(0.0, 0.0, size[0], size[1]);
         for (index, image) in images.iter().enumerate() {
-            if image.clip_context && image.containing_form_clip.is_none() && image.form_clip_interior.is_none() {
+            if image.clip_context && image.containing_form_clip.is_none() && image.form_clip_interior.is_none() && image.retained_form_crop.is_none()
+            {
                 return Err("Clipped raster preparation requires a retained and reviewed mask/clip boundary".into());
             }
             if image.overprint || image.compositing_unresolved || image.description.optional_content || image.description.interpolate {
@@ -100,7 +105,12 @@ pub fn capture(bytes: &[u8], draft: &mut Draft, native_images: usize, import_iss
             if bounds.x0 < page_bounds.x0 || bounds.y0 < page_bounds.y0 || bounds.x1 > page_bounds.x1 || bounds.y1 > page_bounds.y1 {
                 return Err("Raster source extends outside the physical page crop; explicit clipping preparation is required".into());
             }
+            let clip = image
+                .retained_form_crop
+                .map(|(bounds, matrix)| crate::prepared_crop::Clip::from_raw(bounds, matrix, samples.width, samples.height))
+                .transpose()?;
             let mask = Mask {
+                clip,
                 source_sha256: digest(image)?,
                 width: samples.width,
                 height: samples.height,
@@ -135,7 +145,7 @@ pub fn capture(bytes: &[u8], draft: &mut Draft, native_images: usize, import_iss
     draft.baseline.source_census = sources.keys().cloned().collect();
     draft.baseline.regions.clear();
     draft.geometry.regions.clear();
-    draft.diagnostics = sources.keys().map(|id| diagnostic(id)).collect();
+    draft.diagnostics = sources.iter().map(|(id, source)| diagnostic(id, source.mask.clip.is_some())).collect();
     draft.previews = previews;
     draft.raster_sources = sources;
     draft.baseline.census_evidence.producer = "checks/raw-image-preparation-1".into();
@@ -144,10 +154,10 @@ pub fn capture(bytes: &[u8], draft: &mut Draft, native_images: usize, import_iss
     Ok(true)
 }
 pub fn apply(draft: &mut Draft, id: &str, source_sha256: &str, policy: &str) -> Result<(), String> {
-    if policy != "exact_binary_alpha" {
-        return Err("Unsupported raster boundary policy".into());
-    }
     let source = draft.raster_sources.get(id).ok_or("Raster preparation source missing")?;
+    if policy != source.mask.boundary_policy() {
+        return Err("Unsupported raster boundary policy or retained crop not explicitly reviewed".into());
+    }
     if source.mask.source_sha256 != source_sha256 || draft.geometry.regions.contains_key(id) {
         return Err("Raster source changed or mask decision duplicated".into());
     }
@@ -183,7 +193,7 @@ pub fn apply(draft: &mut Draft, id: &str, source_sha256: &str, policy: &str) -> 
         prepared_mask_sha256: Some(digest(&source.mask)?),
     });
     draft.geometry.regions.insert(id.into(), artifact);
-    let pending = diagnostic(id);
+    let pending = diagnostic(id, source.mask.clip.is_some());
     draft.diagnostics.retain(|s| s != &pending);
     Ok(())
 }

@@ -52,7 +52,7 @@ fn displacement(a: &Grid, b: [f64; 6]) -> (f64, f64) {
 /// Hash a lossless pixel-grid orientation in the existing normalized sample domain.
 /// At most eight candidates over the already bounded one-megapixel capture. No
 /// resampling or free alignment is allowed; cell centres map to exact source cells.
-fn oriented_hash(samples: &vectorcraft_pdf::PrintImageSamples, width: u32, height: u32, grid: Affine) -> Result<String, String> {
+fn oriented_hash(samples: &vectorcraft_pdf::PrintImageSamples, mask: &Mask, width: u32, height: u32, grid: Affine) -> Result<String, String> {
     let pixels = (width as usize).checked_mul(height as usize).ok_or("Raster orientation dimensions overflow")?;
     if pixels == 0 || pixels > 1_048_576 || samples.colourants.len() > 4 {
         return Err("Raster orientation work budget exceeded".into());
@@ -72,6 +72,9 @@ fn oriented_hash(samples: &vectorcraft_pdf::PrintImageSamples, width: u32, heigh
         }
         Ok(point.y.floor() as usize * samples.width as usize + point.x.floor() as usize)
     };
+    let alpha = |at: usize| -> Result<f64, String> {
+        if mask.cell_visible((at % samples.width as usize) as u32, (at / samples.width as usize) as u32) { samples.alpha(at) } else { Ok(0.0) }
+    };
     let mut hash = Sha256::new();
     hash.update(b"vectorcraft-visible-image-samples-v1\0");
     hash.update(width.to_be_bytes());
@@ -83,12 +86,12 @@ fn oriented_hash(samples: &vectorcraft_pdf::PrintImageSamples, width: u32, heigh
     for pixel in 0..pixels {
         for channel in 0..samples.colourants.len() {
             let at = index(pixel)?;
-            let tone = if samples.alpha(at)? == 0.0 { 0.0 } else { samples.tone(at, channel)? };
+            let tone = if alpha(at)? == 0.0 { 0.0 } else { samples.tone(at, channel)? };
             hash.update(tone.to_be_bytes());
         }
     }
     for pixel in 0..pixels {
-        hash.update(samples.alpha(index(pixel)?)?.to_be_bytes());
+        hash.update(alpha(index(pixel)?)?.to_be_bytes());
     }
     Ok(format!("{:x}", hash.finalize()))
 }
@@ -102,7 +105,7 @@ pub(crate) fn visible_signature(mask: &Mask, samples: &vectorcraft_pdf::PrintIma
         return Ok(Value::Null);
     };
     let [x, y, w, h] = window;
-    let hash = oriented_hash(samples, w, h, Affine::translate((f64::from(x), f64::from(y))))?;
+    let hash = oriented_hash(samples, mask, w, h, Affine::translate((f64::from(x), f64::from(y))))?;
     Ok(json!({"window":window,"sha256":hash}))
 }
 fn orientations(expected: &Grid, actual: &Grid) -> Vec<[f64; 6]> {
@@ -210,7 +213,7 @@ fn evaluate(request: &Request, plan: &Plan, bytes: &[u8]) -> Result<(Status, Val
         for grid in grids {
             let grid = Affine::new(grid);
             let samples_grid = Affine::translate((f64::from(actual_window[0]), f64::from(actual_window[1]))) * grid;
-            let hash = oriented_hash(samples, expected_grid.width, expected_grid.height, samples_grid)?;
+            let hash = oriented_hash(samples, &actual.mask, expected_grid.width, expected_grid.height, samples_grid)?;
             if hash == expected_hash {
                 let oriented = (Affine::new(actual_grid.matrix) * grid).as_coeffs();
                 let (distance, error) = displacement(&expected_grid, oriented);
@@ -223,24 +226,39 @@ fn evaluate(request: &Request, plan: &Plan, bytes: &[u8]) -> Result<(Status, Val
     let best = matched.first().copied();
     let page_agrees = placed.page == actual.mask.page;
     let layer_agrees = layer.is_some_and(|actual| crate::routes::layer_matches(&link.pdf_layer, actual));
-    let status = if !samples_agree || !page_agrees || !layer_agrees || tolerance.is_some_and(|t| matched.iter().all(|(d, e, _)| (d - e).max(0.0) > t))
+    let boundary = if mask.clip.is_some() || actual.mask.clip.is_some() {
+        Some(crate::prepared_crop::compare(&placed, &actual.mask, tolerance, placement_error))
+    } else {
+        None
+    };
+    let status = if boundary.as_ref().is_some_and(|b| b.as_ref().is_ok_and(|m| m.status == Status::Fail))
+        || !samples_agree
+        || !page_agrees
+        || !layer_agrees
+        || tolerance.is_some_and(|t| matched.iter().all(|(d, e, _)| (d - e).max(0.0) > t))
     {
         Status::Fail
-    } else if tolerance.is_some_and(|t| matched.iter().any(|(d, e, _)| d + e <= t)) {
+    } else if boundary.as_ref().is_none_or(|b| b.as_ref().is_ok_and(|m| m.status == Status::Pass))
+        && tolerance.is_some_and(|t| matched.iter().any(|(d, e, _)| d + e <= t))
+    {
         Status::Pass
     } else {
         Status::Incomplete
     };
-    Ok((
-        status,
-        json!({"scope":"single_preserved_binary_alpha_image","source_region":id,"file_link":key,
+    let mut observed = json!({"scope":"single_preserved_binary_alpha_image","source_region":id,"file_link":key,
         "samples_agree":samples_agree,"page_agrees":page_agrees,"layer_agrees":layer_agrees,
         "expected_visible_sample_sha256":expected_hash,"expected_visible_window":window,"observed_visible_window":actual_window,
         "expected_sample_sha256":geometry.paint["sample_sha256"],"observed_sample_sha256":actual.paint["sample_sha256"],
         "expected_pixel_to_page_mm":placed.pixel_to_page_mm,"observed_pixel_to_page_mm":actual.mask.pixel_to_page_mm,
         "max_corner_displacement_mm":best.map(|v|v.0),"numerical_error_mm":best.map(|v|v.1),"sample_grid_orientation":best.map(|v|v.2),"matching_orientations":matched.len(),"acceptance_mm":tolerance,
-        "source_original_replay":"separate_required_obligation"}),
-    ))
+        "source_original_replay":"separate_required_obligation"});
+    if let Some(boundary) = boundary {
+        observed["retained_crop_boundary"] = match boundary {
+            Ok(measurement) => json!(measurement),
+            Err(reason) => json!({"status":"incomplete","reason":reason}),
+        };
+    }
+    Ok((status, observed))
 }
 pub fn check(request: &Request, plan: &Plan, bytes: &[u8], report: &mut Report) -> Result<(), String> {
     if request.geometry.as_ref().is_none_or(|i| !i.regions.values().any(|g| g.paint.get("type").and_then(Value::as_str) == Some("source_image"))) {
@@ -331,7 +349,7 @@ mod tests {
         let draft = crate::prepare::capture(original, "synthetic".into(), r.identity.job_revision.clone()).unwrap();
         let (id, source) = draft.raster_sources.first_key_value().unwrap();
         let mut decisions =
-            vec![fact(json!({"kind":"raster_mask","source":id,"source_sha256":source.mask.source_sha256,"policy":"exact_binary_alpha"}))];
+            vec![fact(json!({"kind":"raster_mask","source":id,"source_sha256":source.mask.source_sha256,"policy":source.mask.boundary_policy()}))];
         decisions.extend_from_slice(edits);
         let mut prepared = crate::prepare_edits::replay(draft, &decisions).unwrap();
         prepared.baseline.approval = Some(fact(json!("approved")));
