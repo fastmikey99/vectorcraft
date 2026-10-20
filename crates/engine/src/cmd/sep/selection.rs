@@ -38,9 +38,6 @@ pub(super) fn layer_ids(doc: &Document) -> Vec<NodeId> {
     });
     out
 }
-pub(super) fn leaves(n: &Node) -> Vec<NodeId> {
-    if let Some(children) = n.children() { children.iter().flat_map(|c| leaves(c)).collect() } else { vec![n.id] }
-}
 pub(super) fn all_objects(doc: &Document, selectable: bool) -> Vec<NodeId> {
     fn walk(n: &Node, selectable: bool, out: &mut Vec<NodeId>) {
         if selectable && (n.locked || !n.visible) {
@@ -108,8 +105,15 @@ pub(super) fn inks(doc: &Document, n: &Node) -> Result<BTreeMap<String, f64>> {
             _ => {}
         }
     }
+    if let NodeKind::Mesh(mesh) = &n.kind {
+        for point in &mesh.points {
+            if point.opacity > 0.0 {
+                paint_inks(doc, &Paint::solid(point.color), &mut out)?;
+            }
+        }
+    }
     if let Some(children) = n.children() {
-        for child in children {
+        for child in children.iter().skip(usize::from(n.clips())) {
             for (k, v) in inks(doc, child)? {
                 let value = out.entry(k).or_default();
                 *value = value.max(v);

@@ -79,7 +79,7 @@ fn command_clips_moves_creates_ink_and_stops_without_running_later_actions() {
                 "CreateSeparation",
                 "<SeparationName>Base ink</SeparationName><PreviewRed>1</PreviewRed><PreviewGreen>0</PreviewGreen><PreviewBlue>1</PreviewBlue>",
             ),
-            a("AddWhiteUnderPrint", ""),
+            a("FutureGeometry", ""),
             a("DeleteObjects", ""),
         ]
         .concat(),
@@ -89,7 +89,7 @@ fn command_clips_moves_creates_ink_and_stops_without_running_later_actions() {
     assert_eq!(result["status"], "stopped");
     assert_eq!(result["stoppedAt"]["list"], "nested/prepare");
     assert_eq!(result["stoppedAt"]["position"], 2);
-    assert_eq!(result["traceLength"], 12);
+    assert_eq!(result["traceLength"], 13);
     assert_eq!(result["artwork"]["allArt"], true);
     assert_eq!(result["spots"], json!(["Base ink"]));
     let d = &s.doc().unwrap().doc;
@@ -111,7 +111,7 @@ fn missing_and_recursive_calls_stop_at_the_call_without_executing_following_step
         f.pal("main", &[a("CallActionList", &format!("<Path>{target}</Path>")), a("SelectAllObjects", "")].concat());
         let v = f.run(&mut Session::new());
         assert_eq!(v["status"], "stopped");
-        assert_eq!(v["traceLength"], 1);
+        assert_eq!(v["traceLength"], 2);
         assert_eq!(v["stoppedAt"]["action"], "CallActionList");
         assert!(f.0.join("output.pdf").exists());
     }
@@ -172,7 +172,7 @@ fn groups_and_conditional_branches_execute_in_order() {
     let mut s = Session::new();
     let v = f.run(&mut s);
     assert_eq!(v["status"], "completed");
-    assert_eq!(v["traceLength"], 4);
+    assert_eq!(v["traceLength"], 5);
     assert!(s.doc().unwrap().selection.objects.iter().all(|id| s.doc().unwrap().doc.node(*id).unwrap().name.as_deref() == Some("Selected")));
 }
 #[test]
@@ -184,7 +184,7 @@ fn malformed_xml_and_unknown_actions_do_not_panic() {
     f.pal("main", &a("FutureAction", ""));
     let v = f.run(&mut Session::new());
     assert_eq!(v["stoppedAt"]["action"], "FutureAction");
-    assert_eq!(v["traceLength"], 1);
+    assert_eq!(v["traceLength"], 2);
 }
 
 #[test]
@@ -250,16 +250,158 @@ fn content_boxes_use_selection_and_relative_offsets_are_millimetres() {
 }
 
 #[test]
-fn all_separation_geometry_boundaries_stop_even_with_no_selection() {
-    for geometry in GEOMETRY {
-        let f = Fixture::new();
-        f.input();
-        f.pal("main", &[a(geometry, ""), a("CreateLayerOnTop", "<LayerName>Must not exist</LayerName>")].concat());
-        let mut s = Session::new();
-        let v = f.run(&mut s);
-        assert_eq!(v["status"], "stopped");
-        assert_eq!(v["stoppedAt"]["action"], *geometry);
-        assert_eq!(v["traceLength"], 1);
-        assert!(!s.doc().unwrap().doc.layers.iter().any(|n| n.name.as_deref() == Some("Must not exist")));
+fn geometry_empty_selections_are_noops() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    let mut p = player(&mut s);
+    for kind in ["AddWhiteUnderPrint", "Choke", "Spread", "Shaper", "Rasterize", "SetTrapTags", "RemoveTrappingTags"] {
+        assert_eq!(step(&mut p, kind, "").unwrap(), 0);
     }
+}
+
+fn rect(s: &mut Session, x: f64, y: f64, w: f64, h: f64) -> NodeId {
+    let id = s.execute("shape.rectangle", &json!({"x":x,"y":y,"width":w,"height":h})).unwrap()["id"].as_u64().unwrap();
+    s.execute("paint.setStroke", &json!({"ids":[id],"none":true})).unwrap();
+    NodeId(id)
+}
+fn under(p: &mut Player<'_>, covered: bool, distance: f64) {
+    step(p, "AddWhiteUnderPrint", &format!("<TrappingMode>Choke</TrappingMode><Distance>{distance}</Distance><JoinType>Round</JoinType><ExcludeCoveredAreas>{}</ExcludeCoveredAreas>", u8::from(covered))).unwrap();
+}
+fn selected_area(p: &Player<'_>) -> f64 {
+    p.ids()
+        .unwrap()
+        .iter()
+        .map(|id| {
+            let n = p.doc().unwrap().node(*id).unwrap();
+            let (path, rule) = super::super::pathops::node_path(n).unwrap();
+            vectorcraft_pathops::area(&path, rule)
+        })
+        .sum()
+}
+#[test]
+fn underprint_excludes_only_art_above_and_selected_objects_do_not_cover_each_other() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    let back = rect(&mut s, 0., 0., 20., 20.);
+    let front = rect(&mut s, 10., 0., 20., 20.);
+    s.doc_mut().unwrap().selection.set([back]);
+    let mut p = player(&mut s);
+    under(&mut p, true, 0.);
+    assert!((selected_area(&p) - 200.).abs() < 0.01);
+    assert_eq!(
+        p.doc().unwrap().node(p.ids().unwrap()[0]).unwrap().appearance.fill_paint(),
+        vectorcraft_color::Paint::Solid { color: vectorcraft_color::Color::rgb(1., 1., 1.), swatch: Some("Opaque White".into()), tint: 1. }
+    );
+    step(&mut p, "DeleteObjects", "").unwrap();
+    p.session.doc_mut().unwrap().selection.set([front]);
+    under(&mut p, true, 0.);
+    assert!((selected_area(&p) - 400.).abs() < 0.01);
+    step(&mut p, "DeleteObjects", "").unwrap();
+    p.session.doc_mut().unwrap().selection.set([back, front]);
+    under(&mut p, true, 0.);
+    assert!((selected_area(&p) - 600.).abs() < 0.01);
+}
+#[test]
+fn underprint_chokes_union_once_and_selects_only_new_art() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    let a = rect(&mut s, 0., 0., 10., 10.);
+    let b = rect(&mut s, 10., 0., 10., 10.);
+    s.doc_mut().unwrap().selection.set([a, b]);
+    let mut p = player(&mut s);
+    under(&mut p, false, 25.4 / 72.);
+    assert!((selected_area(&p) - 144.).abs() < 0.01);
+    assert_eq!(p.ids().unwrap().len(), 1);
+    assert!(p.doc().unwrap().node(a).is_some());
+    step(&mut p, "Choke", "<Distance>100</Distance><JoinType>Round</JoinType><SpreadTarget>OriginalPath</SpreadTarget>").unwrap();
+    assert!(p.ids().unwrap().is_empty());
+}
+#[test]
+fn shaper_copy_and_empty_difference_are_valid() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    let a = rect(&mut s, 0., 0., 10., 10.);
+    let b = rect(&mut s, 0., 0., 10., 10.);
+    s.doc_mut().unwrap().selection.set([a, b]);
+    let mut p = player(&mut s);
+    step(&mut p, "Shaper", "<Operation>Unite</Operation><WorkOnCopy>1</WorkOnCopy>").unwrap();
+    assert!((selected_area(&p) - 100.).abs() < 0.01);
+    assert!(p.doc().unwrap().node(a).is_some());
+    p.session.doc_mut().unwrap().selection.set([a, b]);
+    step(&mut p, "Shaper", "<Operation>MinusFront</Operation><WorkOnCopy>0</WorkOnCopy>").unwrap();
+    assert!(p.ids().unwrap().is_empty());
+    assert!(p.doc().unwrap().node(a).is_none());
+}
+
+#[test]
+fn called_lists_can_contain_decimal_distances() {
+    let f = Fixture::new();
+    f.input();
+    f.pal("main", &a("CallActionList", "<Path>Spread 0.4</Path>"));
+    f.pal("Spread 0.4", &a("ShowMessage", "<Message>Done</Message>"));
+    assert_eq!(f.run(&mut Session::new())["status"], "completed");
+}
+
+#[test]
+fn clean_removes_fully_clipped_nonpath_content() {
+    use vectorcraft_doc::Node;
+    use vectorcraft_geom::PathData;
+    let f = Fixture::new();
+    f.input();
+    let mut s = Session::new();
+    s.execute("document.open", &json!({"path":f.0.join("input.pdf")})).unwrap();
+    let d = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().doc);
+    let mesh = vectorcraft_doc::GradientMesh::from_surface(1, 1, &|u, v| vectorcraft_geom::Point::new(60. + u * 10., 60. + v * 10.), &|_, _| {
+        vectorcraft_color::Color::WHITE
+    });
+    let mut n = Node::path(d.alloc_id(), PathData::default(), Default::default());
+    n.kind = vectorcraft_doc::NodeKind::Mesh(mesh);
+    // The clip's real geometry is disjoint; an unsupported object fully outside it is harmless.
+    let mask = Node::path(d.alloc_id(), vectorcraft_geom::shapes::rectangle(Rect::new(0., 0., 10., 10.)), Default::default());
+    let mut group = Node::group(d.alloc_id(), vec![std::sync::Arc::new(mask), std::sync::Arc::new(n)]);
+    group.set_clips(true);
+    let actions = reader::parse(&format!("<ActionList Version=\"2.0\">{}</ActionList>", a("CleanObjects", "<ExecuteClip>1</ExecuteClip>"))).unwrap();
+    let options = clean::Options::read(&actions[0].params).unwrap();
+    let (out, _) = clean::clean(d, group, &options, &[]).unwrap();
+    assert!(out.unwrap().children().unwrap().is_empty());
+}
+
+#[test]
+fn background_prep_is_traced_and_selected_ink_tint_and_overprint_follow_pal() {
+    let f = Fixture::new();
+    let mut page = PdfPage::new(100., 100., "/BG cs 1 scn 0 0 100 100 re f 0 1 0 0 k 20 20 40 40 re f");
+    page.resources =
+        "/ColorSpace << /BG [/Separation /SupaBG /DeviceCMYK << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 1 0 0] /N 1 >>] >>".into();
+    std::fs::write(f.0.join("input.pdf"), pdf(&[page], None)).unwrap();
+    f.pal("main", &[
+        a("SelectAllObjects", ""),
+        a("CreateSeparation", "<SeparationName>Base</SeparationName><PreviewRed>1</PreviewRed><PreviewGreen>0</PreviewGreen><PreviewBlue>1</PreviewBlue>"),
+        a("AddWhiteUnderPrint", "<TrappingMode>Spread</TrappingMode><Distance>0.2</Distance><JoinType>Miter</JoinType><MiterLimit>6</MiterLimit><UseSelectedSeparation>1</UseSelectedSeparation>"),
+        a("SetFillFlatPaint", "<Percentage>40</Percentage>"),
+        a("SetFillOverprint", ""),
+    ].concat());
+    let mut s = Session::new();
+    let result = f.run(&mut s);
+    assert_eq!(result["status"], "completed");
+    assert_eq!(result["trace"][0]["objectsAffected"], 1);
+    assert_eq!(result["trace"][0]["action"], "DeleteBackground");
+    let p = player(&mut s);
+    let node = p.doc().unwrap().node(p.ids().unwrap()[0]).unwrap();
+    assert!(matches!(node.appearance.fill_paint(),vectorcraft_color::Paint::Solid {swatch:Some(ref name),tint,..} if name=="Base" && tint==0.4));
+    assert!(node.appearance.fill().unwrap().overprint);
+    assert!((selected_area(&p) - (40. + 0.4 * 72. / 25.4_f64).powi(2)).abs() < 0.01);
+}
+
+#[test]
+fn minimum_page_shape_uses_physical_size_about_its_center() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    rect(&mut s, 10., 20., 100., 50.);
+    let mut p = player(&mut s);
+    step(&mut p, "CreateShapeOnSelection", "<Shape>Rectangle</Shape><CornerRadius>0</CornerRadius>").unwrap();
+    step(&mut p,"SetObjectsSize","<Mode>Relative</Mode><Anchor>Center</Anchor><Width>19</Width><Height>19</Height><UseWidth>1</UseWidth><UseHeight>1</UseHeight><IncludeGradientsAndPatterns>1</IncludeGradientsAndPatterns><IncludeStrokeWeights>1</IncludeStrokeWeights><IncludeOpacityMasks>1</IncludeOpacityMasks>").unwrap();
+    let b = p.doc().unwrap().bounds_of(&p.ids().unwrap(), true).unwrap();
+    assert!((b.width() - 19. * 72. / 25.4).abs() < 1e-8);
+    assert!((b.height() - 19. * 72. / 25.4).abs() < 1e-8);
+    assert!((b.center() - vectorcraft_geom::Point::new(60., 45.)).hypot() < 1e-10);
 }

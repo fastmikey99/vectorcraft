@@ -6,10 +6,10 @@ const PROCESS: [&str; 4] = ["Cyan", "Magenta", "Yellow", "Black"];
 fn process(name: &str) -> Option<usize> {
     PROCESS.iter().position(|n| *n == name)
 }
-fn roots(d: &Document, ids: &[NodeId]) -> Vec<NodeId> {
+pub(super) fn roots(d: &Document, ids: &[NodeId]) -> Vec<NodeId> {
     ids.iter().copied().filter(|id| d.node(*id).is_some() && !d.ancestry(*id).is_some_and(|v| v.iter().any(|p| p != id && ids.contains(p)))).collect()
 }
-fn leaf_targets(d: &Document, ids: &[NodeId]) -> Vec<NodeId> {
+pub(super) fn leaf_targets(d: &Document, ids: &[NodeId]) -> Vec<NodeId> {
     let mut out = Vec::new();
     for id in roots(d, ids) {
         if let Some(n) = d.node(id) {
@@ -382,8 +382,8 @@ impl Player<'_> {
                     return Err(error("unknown page box"));
                 }
                 let rect = if a.kind == "SetPageBoxSizeByContent" {
-                    if p.value("Mode") != Some("FitAll") || p.value("AdjustType") != Some("Both") {
-                        return Err(error("only FitAll/Both content page boxes are supported"));
+                    if !matches!(p.value("Mode"), Some("FitAll" | "FitToSelection")) || p.value("AdjustType") != Some("Both") {
+                        return Err(error("only FitAll or FitToSelection with Both content page boxes are supported"));
                     }
                     let targets = self.ids()?;
                     self.doc()?.bounds_of(&roots(self.doc()?, &targets), true).ok_or_else(|| error("cannot fit page box to empty artwork"))?
@@ -412,6 +412,48 @@ impl Player<'_> {
                 }
                 Ok(count)
             }
+            "CreateShapeOnSelection" => {
+                if ids.is_empty() {
+                    return Ok(0);
+                }
+                if required(p, "Shape")? != "Rectangle" || number(p, "CornerRadius")? != 0.0 {
+                    return Err(error("PAL shape creation supports rectangles with zero corner radius"));
+                }
+                let bounds = self.doc()?.bounds_of(&roots(self.doc()?, &ids), true).ok_or_else(|| error("cannot fit page box to empty artwork"))?;
+                let layer = self.layers.last().copied().or_else(|| self.doc().ok().and_then(|d| d.layers.last().map(|n| n.id)));
+                self.session.edit("Rectangle", |d, sel| {
+                    let mut appearance = vectorcraft_doc::Appearance::default();
+                    appearance.set_fill(Paint::solid(Color::cmyk(0.0, 0.0, 0.0, 1.0)));
+                    appearance.set_stroke(Paint::None);
+                    let n = Node::path(d.alloc_id(), vectorcraft_geom::shapes::rectangle(bounds), appearance);
+                    let id = n.id;
+                    d.insert(layer, usize::MAX, n)?;
+                    sel.set([id]);
+                    Ok(())
+                })?;
+                Ok(1)
+            }
+            "SetObjectsSize" => {
+                if ids.is_empty() {
+                    return Ok(0);
+                }
+                // Relative chooses an anchor on the selection (as opposed to the crosshair).
+                // Size is a physical length; this is Set Object Size, not Scale Object.
+                if required(p, "Mode")? != "Relative" || required(p, "Anchor")? != "Center" || !flag(p, "IncludeOpacityMasks")? {
+                    return Err(error("PAL object sizing supports the selection center with opacity masks included"));
+                }
+                let bounds = self.doc()?.bounds_of(&roots(self.doc()?, &ids), true).ok_or_else(|| error("cannot fit page box to empty artwork"))?;
+                if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
+                    return Err(error("page box has nonpositive size"));
+                }
+                let sx = if flag(p, "UseWidth")? { number(p, "Width")? * 72.0 / 25.4 / bounds.width() * 100.0 } else { 100.0 };
+                let sy = if flag(p, "UseHeight")? { number(p, "Height")? * 72.0 / 25.4 / bounds.height() * 100.0 } else { 100.0 };
+                if sx <= 0.0 || sy <= 0.0 {
+                    return Err(error("page box has nonpositive size"));
+                }
+                self.call("object.scale",json!({"sx":sx,"sy":sy,"origin":[bounds.center().x,bounds.center().y],"patterns":flag(p,"IncludeGradientsAndPatterns")?,"strokes":flag(p,"IncludeStrokeWeights")?,"corners":true}))?;
+                Ok(count)
+            }
             "CleanObjects" => {
                 let opts = clean::Options::read(p)?;
                 let brushes = vectorcraft_brush::library(self.doc()?);
@@ -435,6 +477,7 @@ impl Player<'_> {
                     Ok(total)
                 })
             }
+            "AddWhiteUnderPrint" | "Choke" | "Spread" | "Shaper" | "Rasterize" | "SetTrapTags" | "RemoveTrappingTags" => self.geometry(a),
             other => Err(error(format!("not implemented: {other}"))),
         }
     }
@@ -507,7 +550,7 @@ impl Player<'_> {
         Ok(count)
     }
 }
-fn flat_paint(d: &Document, inks: &[String], t: f32, registration: bool) -> Result<Paint> {
+pub(super) fn flat_paint(d: &Document, inks: &[String], t: f32, registration: bool) -> Result<Paint> {
     if registration {
         return Ok(Paint::registration());
     }
