@@ -2029,7 +2029,7 @@ impl<'a> Device<'a> for Builder<'_> {
                 let cmyk = if known || white {
                     None
                 } else {
-                    crate::import_image::cmyk(st, w, h).unwrap_or_else(|why| {
+                    crate::import_image::cmyk(st, w, h, &mut self.colors).unwrap_or_else(|why| {
                         self.warn(why);
                         None
                     })

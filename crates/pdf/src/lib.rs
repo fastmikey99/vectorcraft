@@ -41,6 +41,7 @@
 //!   opens an encrypted file.
 #![forbid(unsafe_code)]
 
+mod devicen;
 mod editing;
 mod encrypt;
 mod export;
@@ -260,6 +261,8 @@ mod tests_cmykimages;
 mod tests_compression;
 #[cfg(test)]
 mod tests_dashalign;
+#[cfg(test)]
+mod tests_devicen_images;
 #[cfg(test)]
 mod tests_editing;
 #[cfg(test)]

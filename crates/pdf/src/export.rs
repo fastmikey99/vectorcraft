@@ -231,6 +231,8 @@ pub(crate) struct Writer {
     cmyk: bool,
     /// Spot colours written with a Lab alternate, gathered from the exporters ([`Self::absorb`]).
     lab_spots: Vec<(String, vectorcraft_color::cms::Lab)>,
+    /// Images with spot channels, drawn as stand-ins until the file is written ([`crate::devicen`]).
+    devicen: Vec<crate::devicen::Pending>,
     warnings: Vec<String>,
     /// RGB content of a CMYK document, gathered from the exporters ([`Self::absorb`]).
     rgb_in_cmyk: RgbInCmyk,
@@ -317,6 +319,7 @@ impl Writer {
             cmyk: out.blends_cmyk(cmyk),
             out: Arc::new(out),
             lab_spots: vec![],
+            devicen: vec![],
             warnings,
             rgb_in_cmyk: RgbInCmyk::default(),
             pdf13: set.pdf13(),
@@ -416,6 +419,7 @@ impl Writer {
                 self.lab_spots.push(spot);
             }
         }
+        self.devicen.extend(ex.devicen);
         // The exporter caches images by their key, followed by their size and mask after a NUL.
         for (cache, image) in ex.images {
             if let (Some(key), Some(image)) = (cache.split('\0').next(), image) {
@@ -430,7 +434,7 @@ impl Writer {
     /// `left_out` ([`leaving_out_undecodable`]) and the writer's error is returned.
     pub(crate) fn finish(mut self, left_out: &mut HashSet<String>) -> Result<(Vec<u8>, Vec<String>), PdfError> {
         let images = std::mem::take(&mut self.images);
-        let mut bytes = self.pdf.finish().map_err(|e| {
+        let bytes = self.pdf.finish().map_err(|e| {
             if let write::WriteError::Serialization(k) = &e
                 && let krilla::error::KrillaError::Image(failed, ..) = &**k
             {
@@ -438,6 +442,8 @@ impl Writer {
             }
             PdfError::from(e)
         })?;
+        // Images with spot channels in place of their stand-ins, before anything else edits the file.
+        let mut bytes = crate::devicen::write(bytes, &self.devicen)?;
         if self.cmyk {
             cmyk_blending(&mut bytes, self.out.tagged);
         }
@@ -570,6 +576,8 @@ pub(crate) struct Exporter<'a> {
     knockout: bool,
     /// Spot colours written with a Lab alternate ([`crate::lab_spot`]): colorant name, Lab values.
     lab_spots: Vec<(String, vectorcraft_color::cms::Lab)>,
+    /// Images with spot channels, drawn as stand-ins until the file is written ([`crate::devicen`]).
+    devicen: Vec<crate::devicen::Pending>,
     /// Images may ask viewers to smooth them (not in PDF/A).
     interpolate: bool,
     /// How images are resampled and compressed.
@@ -629,6 +637,7 @@ impl<'a> Exporter<'a> {
             brushes: None,
             knockout: doc.page_knockout,
             lab_spots: vec![],
+            devicen: vec![],
             interpolate: set.standard != Standard::PdfA2b && !set.disable_image_interpolation,
             compression: &set.compression,
             non_printing: false,
@@ -1955,6 +1964,9 @@ impl Exporter<'_> {
         let doc = self.doc;
         let out = self.out.clone();
         let img = doc.images.get(key).filter(|_| !self.left_out.contains(key)).and_then(|blob| {
+            if let Some(image) = self.spot_image(blob, None) {
+                return Some(image);
+            }
             let cmyk_image = blob.is_cmyk();
             if !cmyk_image && self.convert && out.separates_rgb() && doc.color_mode == vectorcraft_doc::ColorMode::Cmyk {
                 self.rgb_in_cmyk.images.insert(key.to_string());
@@ -1997,6 +2009,9 @@ impl Exporter<'_> {
         let doc = self.doc;
         let img = doc.images.get(&im.key).filter(|b| b.is_cmyk()).and_then(|blob| {
             let alpha = crate::images::mask_alpha(doc.images.get(&mi.key)?, im.width, im.height, m.clip)?;
+            if !blob.spot_names().is_empty() {
+                return self.spot_image(blob, Some(alpha));
+            }
             let r = crate::images::recode_cmyk(blob, size, self.compression, self.interpolate, self.out.cmyk_pixels(), Some(alpha));
             if let (Some(w), Some(_)) = (r.warning, &r.image) {
                 self.warn(w);
@@ -2005,6 +2020,23 @@ impl Exporter<'_> {
         });
         self.images.insert(cache, img.clone());
         img
+    }
+
+    /// CMYK image `blob` with spot channels as a DeviceN image ([`crate::devicen`]), its samples
+    /// as they are (neither converted nor resampled: they are separations), with `alpha` as its
+    /// soft mask. `None` for other images.
+    fn spot_image(&mut self, blob: &vectorcraft_doc::ImageBlob, alpha: Option<Vec<u8>>) -> Option<Image> {
+        if blob.spot_names().is_empty() {
+            return None;
+        }
+        let doc = self.doc;
+        let (out, intent) = (self.out.clone(), self.intent);
+        let alt = |name: &str| {
+            doc.swatch(name).filter(|s| s.spot).and_then(|s| s.paint.color()).map_or([0.0; 4], |c| out.cmyk(&doc.linked_color(c, true), intent))
+        };
+        let (image, pending) = crate::devicen::placeholder(blob, alt, alpha, self.interpolate)?;
+        self.devicen.push(pending);
+        Some(image)
     }
 
     /// Draw image `im`: `img` when given (its pixels already written), else as it is loaded.
