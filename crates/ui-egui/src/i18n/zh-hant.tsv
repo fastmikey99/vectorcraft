@@ -3926,3 +3926,8 @@ lighting	Light	光源
 @msg	Internal checker failure: {e}	檢查器內部錯誤：{e}
 	Receive Separation Check Results	接收分色檢查結果
 @msg	Service check export exceeds the 64 MiB upload budget	用於檢查的匯出檔案超過 64 MiB 上傳限制
+
+# Trapping SOP intent
+	Colour Trapping Intent	色彩補漏白設定
+@msg	Invalid No trap region	無補漏白區域無效
+@msg	No trap selection exceeds the object budget	無補漏白選取範圍超過物件數量限制

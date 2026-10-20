@@ -4589,3 +4589,8 @@ theme	Appearance	Giao diện
 	Receive Separation Check Results	Nhận kết quả kiểm tra tách màu
 @msg	Service check export exceeds the 64 MiB upload budget	Tệp xuất để kiểm tra vượt quá giới hạn tải lên 64 MiB
 @msg	Colour operand count exceeds precision reconciliation budget	Số toán hạng màu vượt quá giới hạn kiểm tra độ chính xác
+
+# Trapping SOP intent
+	Colour Trapping Intent	Thiết lập chồng lấn màu
+@msg	Invalid No trap region	Vùng không chồng lấn màu không hợp lệ
+@msg	No trap selection exceeds the object budget	Vùng chọn không chồng lấn màu vượt quá giới hạn đối tượng

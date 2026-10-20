@@ -4589,3 +4589,8 @@ lighting	Light	Світло
 	Receive Separation Check Results	Отримати результати перевірки кольороподілу
 @msg	Service check export exceeds the 64 MiB upload budget	Експорт для перевірки перевищує обмеження завантаження 64 MiB
 @msg	Colour operand count exceeds precision reconciliation budget	Кількість колірних операндів перевищує ліміт перевірки точності
+
+# Trapping SOP intent
+	Colour Trapping Intent	Налаштування трепінгу кольорів
+@msg	Invalid No trap region	Недопустима область без трепінгу
+@msg	No trap selection exceeds the object budget	Виділення без трепінгу перевищує ліміт об’єктів

@@ -4999,3 +4999,8 @@ imageTrace	Outline	Körvonal
 	Receive Separation Check Results	Színkivonat-ellenőrzési eredmények fogadása
 @msg	Service check export exceeds the 64 MiB upload budget	Az ellenőrzéshez exportált fájl meghaladja a 64 MiB-os feltöltési korlátot
 @msg	Colour operand count exceeds precision reconciliation budget	A színoperandusok száma meghaladja a pontosság-ellenőrzés korlátját
+
+# Trapping SOP intent
+	Colour Trapping Intent	Színalátöltési beállítás
+@msg	Invalid No trap region	Érvénytelen alátöltés nélküli terület
+@msg	No trap selection exceeds the object budget	Az alátöltés nélküli kijelölés túllépi az objektumkorlátot

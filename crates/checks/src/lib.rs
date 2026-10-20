@@ -39,6 +39,7 @@ pub mod recipe;
 mod routes;
 mod specification;
 mod tone;
+pub mod trapping;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

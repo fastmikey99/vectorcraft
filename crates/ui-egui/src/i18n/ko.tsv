@@ -4573,3 +4573,8 @@ lighting	Light	광원
 	Receive Separation Check Results	색 분판 검사 결과 받기
 @msg	Service check export exceeds the 64 MiB upload budget	검사용 내보내기가 64 MiB 업로드 한도를 초과합니다
 @msg	Colour operand count exceeds precision reconciliation budget	색상 피연산자 수가 정밀도 검증 한도를 초과합니다
+
+# Trapping SOP intent
+	Colour Trapping Intent	색상 트래핑 지정
+@msg	Invalid No trap region	트래핑 제외 영역이 잘못되었습니다
+@msg	No trap selection exceeds the object budget	트래핑 제외 선택이 개체 수 제한을 초과합니다

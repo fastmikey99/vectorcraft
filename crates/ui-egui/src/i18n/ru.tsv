@@ -4605,3 +4605,8 @@ lighting	Light	Свет
 	Receive Separation Check Results	Получить результаты проверки цветоделения
 @msg	Service check export exceeds the 64 MiB upload budget	Экспорт для проверки превышает ограничение загрузки в 64 MiB
 @msg	Colour operand count exceeds precision reconciliation budget	Число цветовых операндов превышает лимит проверки точности
+
+# Trapping SOP intent
+	Colour Trapping Intent	Настройка треппинга цветов
+@msg	Invalid No trap region	Недопустимая область без треппинга
+@msg	No trap selection exceeds the object budget	Выделение без треппинга превышает лимит объектов

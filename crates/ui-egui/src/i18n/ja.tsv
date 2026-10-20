@@ -4650,3 +4650,8 @@ lighting	Light	ライト
 	Receive Separation Check Results	色分解チェックの結果を受信
 @msg	Service check export exceeds the 64 MiB upload budget	チェック用の書き出しがアップロード上限の64 MiBを超えています
 @msg	Colour operand count exceeds precision reconciliation budget	色のオペランド数が精度照合の上限を超えています
+
+# Trapping SOP intent
+	Colour Trapping Intent	色トラッピングの指定
+@msg	Invalid No trap region	トラッピングなしの領域が無効です
+@msg	No trap selection exceeds the object budget	トラッピングなしの選択がオブジェクト数の上限を超えています

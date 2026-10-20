@@ -107,6 +107,7 @@ impl Drop for WorkerPermit {
 }
 pub fn specs() -> Vec<CommandSpec> {
     vec![
+        cmd!(query "production.trapping", "Colour Trapping Intent", [], None, "{intent?: {mode,exclusions,objects}, selectedNoTrap?: bool} editable job intent; no geometry generated",has_doc,trapping),
         cmd!(query "production.checks.configure", "Configure Separation Checks", [], None, "{request: versioned check request} immutable recipe/job/baseline inputs",has_doc,configure),
         cmd!(query "production.checks.run", "Check Separations", [], None, "{pdfOptions?: object,service?: bool} check a snapshot in the background; provisional until exact-byte service verification",has_doc,run),
         cmd!(query "production.checks.complete", "Receive Separation Check Results", [], None, "{token,report? | error?} accept only a matching service snapshot; never assert final validity",has_doc,complete),
@@ -114,6 +115,51 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!(query "production.checks.list", "Separation Check Results", [], None, "{} full obligation coverage and separate validity",has_doc,list),
         cmd!(query "production.checks.select", "Inspect Separation Finding", [], None, "{key: obligation key} inspect evidenced PDF defect geometry",has_doc,select),
     ]
+}
+fn trapping(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "production.trapping";
+    let mut intent = s.doc()?.doc.trapping.clone();
+    if let Some(value) = p.get("intent") {
+        intent = if value.is_null() {
+            None
+        } else {
+            Some(serde_json::from_value::<vectorcraft_doc::trapping::TrappingIntent>(value.clone()).map_err(|e| bad(C, e.to_string()))?)
+        };
+    }
+    if p.get("selectedNoTrap").and_then(Value::as_bool) == Some(true) {
+        let objects = s.doc()?.selection.objects.iter().map(|id| id.0).collect();
+        intent =
+            Some(vectorcraft_doc::trapping::TrappingIntent { mode: vectorcraft_doc::trapping::TrapMode::Mixed, exclusions: Some(vec![]), objects });
+    }
+    if let Some(i) = &intent {
+        i.validate().map_err(|e| bad(C, e))?;
+    }
+    if intent != s.doc()?.doc.trapping {
+        s.edit("Colour trapping intent", |d, _| {
+            d.trapping = intent.clone();
+            Ok(())
+        })?;
+    }
+    Ok(json!(intent))
+}
+fn apply_trapping(request: &mut Request, intent: Option<&vectorcraft_doc::trapping::TrappingIntent>) -> std::result::Result<(), String> {
+    if let Some(intent) = intent {
+        intent.validate()?;
+    }
+    let value = json!(intent);
+    request.acceptance.insert(
+        "trapping_intent".into(),
+        vectorcraft_checks::preparation::Fact {
+            provenance: vectorcraft_checks::preparation::Provenance::Derived {
+                artifact_sha256: digest(&value)?,
+                algorithm: "explicit-trapping-intent".into(),
+                version: "1".into(),
+            },
+            value,
+        },
+    );
+    request.identity.measurement_sha256 = digest(&request.acceptance)?;
+    Ok(())
 }
 fn configure(s: &mut Session, p: &Value) -> Result<Value> {
     if p.get("request").is_some_and(Value::is_null) {
@@ -123,6 +169,10 @@ fn configure(s: &mut Session, p: &Value) -> Result<Value> {
     let request: Request =
         serde_json::from_value(p.get("request").cloned().unwrap_or(Value::Null)).map_err(|e| bad("production.checks.configure", e.to_string()))?;
     let report = vectorcraft_checks::print_quality::begin(&request).map_err(|e| bad("production.checks.configure", e))?;
+    if request.acceptance.contains_key("trapping_intent") {
+        let intent = vectorcraft_checks::trapping::intent(&request).map_err(|e| bad("production.checks.configure", e))?;
+        trapping(s, &json!({"intent":intent}))?;
+    }
     let origin_run_id = request.run_id.clone();
     // Dropping a previous pending state cancels it; its completion has no route into this state.
     s.doc_mut()?.production_checks = State { request: Some(request), report: Some(report), origin_run_id, ..Default::default() };
@@ -154,6 +204,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let mut request = s.doc()?.production_checks.request.clone().ok_or_else(|| bad(C, "Choose the process recipe and Dark/Light in Reporter"))?;
     let doc = s.doc()?.doc.clone();
+    apply_trapping(&mut request, doc.trapping.as_ref()).map_err(|e| bad(C, e))?;
     let import_losses = s.doc()?.import_losses.clone();
     let options = p.get("pdfOptions").cloned().unwrap_or_else(|| json!({}));
     let state = &mut s.doc_mut()?.production_checks;
@@ -378,6 +429,40 @@ mod tests {
             assert!(start.elapsed() < std::time::Duration::from_secs(15));
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+    #[test]
+    fn explicit_clear_overrides_saved_intent_and_frozen_service_intent_is_bound() {
+        let mut s = session();
+        let intent = json!({"mode":"mixed","exclusions":null,"objects":[]});
+        s.execute("production.trapping", &json!({"intent":intent})).unwrap();
+        s.execute("production.checks.run", &json!({"service":true})).unwrap();
+        let (_, bytes) = take_remote_export(&mut s).unwrap().unwrap();
+        let r = s.doc().unwrap().production_checks.request.clone().unwrap();
+        assert_eq!(r.acceptance["trapping_intent"].value, intent);
+        assert_eq!(r.identity.measurement_sha256, digest(&r.acceptance).unwrap());
+        assert_eq!(r.identity.pdf_sha256, sha256(&bytes));
+        s.execute("production.checks.cancel", &json!({})).unwrap();
+        let mut cleared = r;
+        apply_trapping(&mut cleared, None).unwrap();
+        s.execute("production.checks.configure", &json!({"request":cleared})).unwrap();
+        assert!(s.doc().unwrap().doc.trapping.is_none());
+    }
+    #[test]
+    fn trapping_intent_is_editable_persistent_and_undoable() {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({"width":100,"height":100})).unwrap();
+        s.execute("shape.rectangle", &json!({"x":10,"y":10,"width":20,"height":20})).unwrap();
+        let objects = s.doc().unwrap().selection.objects.clone();
+        s.execute("production.trapping", &json!({"selectedNoTrap":true})).unwrap();
+        let saved = serde_json::to_value(&*s.doc().unwrap().doc).unwrap();
+        let restored: Document = serde_json::from_value(saved).unwrap();
+        assert_eq!(restored.trapping.as_ref().unwrap().objects, objects.iter().map(|i| i.0).collect::<Vec<_>>());
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert!(s.doc().unwrap().doc.trapping.is_none());
+        assert!(
+            s.execute("production.trapping", &json!({"intent":{"mode":"mixed","exclusions":[{"page":0,"bounds_mm":[0,0,-1,2]}],"objects":[]}}))
+                .is_err()
+        );
     }
     #[test]
     fn background_check_keeps_editing_and_marks_snapshot_stale() {

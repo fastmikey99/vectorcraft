@@ -8,8 +8,56 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         widgets::dim_label(ui, "No document open.");
         return;
     };
+    let intent = st.doc.trapping.clone();
+    let has_selection = !st.selection.objects.is_empty();
     let state = st.production_checks.clone();
     let stale = state.is_stale(&st.doc);
+    let mut mode = intent
+        .as_ref()
+        .map(|i| match i.mode {
+            vectorcraft_doc::trapping::TrapMode::Trap => "trap",
+            vectorcraft_doc::trapping::TrapMode::NoTrap => "no_trap",
+            vectorcraft_doc::trapping::TrapMode::Mixed => "mixed",
+        })
+        .unwrap_or("");
+    let old_mode = mode;
+    egui::ComboBox::from_label("Colour trapping")
+        .selected_text(match mode {
+            "trap" => "Trap",
+            "no_trap" => "No trap",
+            "mixed" => "Mixed",
+            _ => "Not supplied",
+        })
+        .show_ui(ui, |ui| {
+            for (key, label) in [("", "Not supplied"), ("trap", "Trap"), ("no_trap", "No trap"), ("mixed", "Mixed")] {
+                ui.selectable_value(&mut mode, key, label);
+            }
+        });
+    if mode != old_mode {
+        let value = if mode.is_empty() {
+            serde_json::Value::Null
+        } else {
+            json!({"mode":mode,"exclusions":if mode=="mixed" {serde_json::Value::Null} else {json!([])},"objects":[]})
+        };
+        if let Err(e) = app.run("production.trapping", json!({"intent":value})) {
+            app.ui.status = e;
+        }
+    }
+    if ui.add_enabled(has_selection, egui::Button::new("Set selection as No trap")).clicked()
+        && let Err(e) = app.run("production.trapping", json!({"selectedNoTrap":true}))
+    {
+        app.ui.status = e;
+    }
+    if let Some(intent) = intent.filter(|i| i.mode == vectorcraft_doc::trapping::TrapMode::Mixed) {
+        widgets::dim_label(
+            ui,
+            &format!(
+                "{} native No trap objects; {}",
+                intent.objects.len(),
+                intent.exclusions.map_or_else(|| "mixed-trap exclusions not known".into(), |r| format!("{} explicit regions", r.len()))
+            ),
+        );
+    }
     ui.horizontal(|ui| {
         let (label, command) = if state.running() { ("Cancel checks", "production.checks.cancel") } else { ("Run checks", "production.checks.run") };
         if widgets::flat_button(ui, label, 100.0).clicked()
@@ -102,6 +150,8 @@ mod tests {
         let texts = frame(&mut app);
         assert!(texts.iter().any(|s| s.contains("process recipe and Dark/Light")));
         assert!(texts.iter().any(|s| s == "Run checks"));
+        assert!(texts.iter().any(|s| s == "Colour trapping"));
+        assert!(texts.iter().any(|s| s == "Set selection as No trap"));
     }
     #[test]
     fn failure_summary_keeps_unchecked_coverage_visible() {

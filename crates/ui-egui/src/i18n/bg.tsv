@@ -5012,3 +5012,8 @@ theme	Appearance	Външен вид
 @msg	Internal checker failure: {e}	Вътрешна грешка на проверката: {e}
 	Receive Separation Check Results	Получаване на резултатите от проверката на цветоотделянето
 @msg	Service check export exceeds the 64 MiB upload budget	Експортът за проверка надвишава ограничението за качване от 64 MiB
+
+# Trapping SOP intent
+	Colour Trapping Intent	Настройка на застъпването на цветовете
+@msg	Invalid No trap region	Невалидна област без застъпване
+@msg	No trap selection exceeds the object budget	Изборът без застъпване надвишава лимита за обекти

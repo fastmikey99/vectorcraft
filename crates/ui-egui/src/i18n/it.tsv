@@ -4609,3 +4609,8 @@ lighting	Light	Luce
 	Receive Separation Check Results	Ricevi i risultati del controllo delle separazioni
 @msg	Service check export exceeds the 64 MiB upload budget	L’esportazione per il controllo supera il limite di caricamento di 64 MiB
 @msg	Colour operand count exceeds precision reconciliation budget	Il numero di operandi di colore supera il limite di verifica della precisione
+
+# Trapping SOP intent
+	Colour Trapping Intent	Impostazione del trapping dei colori
+@msg	Invalid No trap region	Area senza trapping non valida
+@msg	No trap selection exceeds the object budget	La selezione senza trapping supera il limite di oggetti

@@ -5031,3 +5031,8 @@ theme	Appearance	Apparence
 	Receive Separation Check Results	Recevoir les résultats de vérification des séparations
 @msg	Service check export exceeds the 64 MiB upload budget	L’export pour vérification dépasse la limite de téléversement de 64 MiB
 @msg	Colour operand count exceeds precision reconciliation budget	Le nombre d’opérandes de couleur dépasse la limite de vérification de précision
+
+# Trapping SOP intent
+	Colour Trapping Intent	Intention de recouvrement des couleurs
+@msg	Invalid No trap region	Zone sans recouvrement non valide
+@msg	No trap selection exceeds the object budget	La sélection sans recouvrement dépasse la limite d’objets

@@ -1,5 +1,7 @@
 # Gaps
 
+Trapping SOP increment (20 Oct 2026): shared construction controls, explicit trap/no-trap/mixed intent, persistent native No trap selections and bounded colour-trap/exclusion observations. [Implemented scope, limits and review dispositions](trapping-sop-qualification-20261020.md). Product parity scores and broad remaining estimates are unchanged; this is not a complete trap maker or unrestricted mixed-file qualification.
+
 ## Current scope — print quality (20 October 2026)
 
 Mike removed document certification, editor/export preservation, independent renderer comparison, recipe publication, source approval and exact-version eligibility from the operator checker. The older certification plan and evidence below are historical, superseded where they conflict with this scope.

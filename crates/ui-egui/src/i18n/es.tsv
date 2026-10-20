@@ -4974,3 +4974,8 @@ mark-style	Japanese	Japonesas
 	Receive Separation Check Results	Recibir resultados de comprobación de separaciones
 @msg	Service check export exceeds the 64 MiB upload budget	La exportación para la comprobación supera el límite de carga de 64 MiB
 @msg	Colour operand count exceeds precision reconciliation budget	El número de operandos de color supera el límite de comprobación de precisión
+
+# Trapping SOP intent
+	Colour Trapping Intent	Intención de reventado de color
+@msg	Invalid No trap region	Región sin reventado no válida
+@msg	No trap selection exceeds the object budget	La selección sin reventado supera el límite de objetos

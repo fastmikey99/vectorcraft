@@ -4138,3 +4138,8 @@ lighting	Light	光源
 @msg	Internal checker failure: {e}	检查器内部错误：{e}
 	Receive Separation Check Results	接收分色检查结果
 @msg	Service check export exceeds the 64 MiB upload budget	用于检查的导出文件超过 64 MiB 上传限制
+
+# Trapping SOP intent
+	Colour Trapping Intent	颜色陷印设置
+@msg	Invalid No trap region	无陷印区域无效
+@msg	No trap selection exceeds the object budget	无陷印选择超出对象数量限制

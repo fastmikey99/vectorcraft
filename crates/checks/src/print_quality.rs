@@ -89,6 +89,7 @@ pub fn enumerate(r: &Request) -> Result<Vec<Obligation>, String> {
             conditional: false,
         });
     }
+    crate::trapping::enumerate(r, &mut out);
     let keys: BTreeSet<_> = out.iter().map(|o| &o.key).collect();
     if keys.len() != out.len() {
         return Err("Duplicate print question".into());
@@ -534,6 +535,7 @@ pub fn check(r: &Request, bytes: &[u8]) -> Result<Report, String> {
             let detail = crate::print_detail::measure(r, &census);
             record(&mut report, "print/detail", detail.0, detail.1, detail.2)?;
             crate::observed::practical_relationships(r, &census, &mut report)?;
+            crate::trapping::check(r, &census, &mut report)?;
         }
         Err(e) => {
             for f in report.findings.iter_mut().filter(|f| {

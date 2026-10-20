@@ -4877,3 +4877,8 @@ mark-style	Japanese	Japońskie
 	Receive Separation Check Results	Odbierz wyniki kontroli rozbarwień
 @msg	Service check export exceeds the 64 MiB upload budget	Eksport do kontroli przekracza limit przesyłania 64 MiB
 @msg	Colour operand count exceeds precision reconciliation budget	Liczba operandów koloru przekracza limit kontroli precyzji
+
+# Trapping SOP intent
+	Colour Trapping Intent	Ustawienie nadlewek kolorów
+@msg	Invalid No trap region	Nieprawidłowy obszar bez nadlewek
+@msg	No trap selection exceeds the object budget	Zaznaczenie bez nadlewek przekracza limit obiektów

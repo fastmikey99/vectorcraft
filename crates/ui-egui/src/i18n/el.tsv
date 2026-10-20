@@ -4984,3 +4984,8 @@ effect	Points	Σημεία
 	Receive Separation Check Results	Λήψη αποτελεσμάτων ελέγχου διαχωρισμών
 @msg	Service check export exceeds the 64 MiB upload budget	Η εξαγωγή για έλεγχο υπερβαίνει το όριο μεταφόρτωσης των 64 MiB
 @msg	Colour operand count exceeds precision reconciliation budget	Το πλήθος των τελεστέων χρώματος υπερβαίνει το όριο ελέγχου ακρίβειας
+
+# Trapping SOP intent
+	Colour Trapping Intent	Ρύθμιση παγίδευσης χρωμάτων
+@msg	Invalid No trap region	Μη έγκυρη περιοχή χωρίς παγίδευση
+@msg	No trap selection exceeds the object budget	Η επιλογή χωρίς παγίδευση υπερβαίνει το όριο αντικειμένων

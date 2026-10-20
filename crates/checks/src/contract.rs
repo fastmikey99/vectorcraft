@@ -74,6 +74,14 @@ struct Geometry {
     paint_extension: String,
     overlap: String,
     coordinates: String,
+    trapping: Option<TrapSettings>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrapSettings {
+    close_gaps_mm: f64,
+    allow_overshoot: bool,
+    pullback: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -463,6 +471,10 @@ pub(crate) fn issues(r: &Recipe) -> Vec<String> {
         || f.geometry.paint_extension != "extend_source"
         || f.geometry.overlap != "union_coverage"
         || f.geometry.coordinates != "shared_page_space"
+        || f.geometry.trapping.as_ref().is_some_and(|t| {
+            let _ = (t.allow_overshoot, t.pullback);
+            !t.close_gaps_mm.is_finite() || !(0.0..=10.0).contains(&t.close_gaps_mm)
+        })
     {
         add("Unsupported geometry contract".into());
     }

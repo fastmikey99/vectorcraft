@@ -4988,3 +4988,8 @@ theme	Appearance	Utseende
 	Receive Separation Check Results	Ta emot resultat från separationskontrollen
 @msg	Service check export exceeds the 64 MiB upload budget	Exporten för kontroll överskrider uppladdningsgränsen på 64 MiB
 @msg	Colour operand count exceeds precision reconciliation budget	Antalet färgoperander överskrider gränsen för precisionskontroll
+
+# Trapping SOP intent
+	Colour Trapping Intent	Inställning för färgöverlappning
+@msg	Invalid No trap region	Ogiltigt område utan färgöverlappning
+@msg	No trap selection exceeds the object budget	Markeringen utan färgöverlappning överskrider objektgränsen

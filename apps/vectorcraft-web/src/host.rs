@@ -184,7 +184,23 @@ impl Bridge {
                 self.snapshot.borrow_mut().replace(token.clone(), app.session.active().and_then(|st| st.production_checks.remote_document()));
                 self.report_snapshot(app);
                 let buffer = js_sys::Uint8Array::from(bytes.as_slice()).buffer();
-                let payload = message(&[("type", "vectorcraft:check".into()), ("id", token.clone().into()), ("bytes", buffer.clone().into())]);
+                let payload = message(&[
+                    ("type", "vectorcraft:check".into()),
+                    ("id", token.clone().into()),
+                    ("bytes", buffer.clone().into()),
+                    (
+                        "trapping",
+                        js_sys::JSON::parse(
+                            &app.session
+                                .active()
+                                .and_then(|st| st.production_checks.request.as_ref())
+                                .and_then(|r| r.acceptance.get("trapping_intent"))
+                                .map(|f| f.value.to_string())
+                                .unwrap_or_else(|| "null".into()),
+                        )
+                        .unwrap_or(wasm_bindgen::JsValue::NULL),
+                    ),
+                ]);
                 let sent = payload.is_some_and(|m| self.parent.post_message_with_transfer(&m, &self.origin, &js_sys::Array::of1(&buffer)).is_ok());
                 if sent {
                     *self.check_inflight.borrow_mut() = Some((token, js_sys::Date::now()));

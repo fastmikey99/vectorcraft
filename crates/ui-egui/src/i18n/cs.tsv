@@ -5032,3 +5032,8 @@ mark-style	Japanese	Japonské
 	Receive Separation Check Results	Přijmout výsledky kontroly separací
 @msg	Service check export exceeds the 64 MiB upload budget	Export pro kontrolu překračuje limit nahrávání 64 MiB
 @msg	Colour operand count exceeds precision reconciliation budget	Počet barevných operandů překračuje limit pro kontrolu přesnosti
+
+# Trapping SOP intent
+	Colour Trapping Intent	Nastavení trappingu barev
+@msg	Invalid No trap region	Neplatná oblast bez trappingu
+@msg	No trap selection exceeds the object budget	Výběr bez trappingu překračuje limit objektů

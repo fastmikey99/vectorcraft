@@ -22,6 +22,7 @@ pub mod intertwine;
 pub mod shared;
 mod symbol_export_type;
 mod symbol_registration;
+pub mod trapping;
 pub use inline::{SYMBOL_HALF, SYMBOL_SIZES};
 pub use shared::Shared;
 pub use symbol_export_type::{SYMBOL_EXPORT_TYPE, SymbolExportType};
@@ -697,6 +698,8 @@ pub struct Document {
     /// File → File Info (the title is [`Document::title`]).
     #[serde(default, skip_serializing_if = "skip::is_default")]
     pub metadata: DocMetadata,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trapping: Option<trapping::TrappingIntent>,
     /// Effect → Document Raster Effects Settings besides the resolution
     /// ([`Document::raster_effects_ppi`]).
     #[serde(default, skip_serializing_if = "skip::is_default")]
@@ -821,6 +824,7 @@ impl Document {
             setup: DocSetup::default(),
             paste_remembers_layers: false,
             metadata: DocMetadata::default(),
+            trapping: None,
             raster_effects: RasterEffectsSettings::default(),
             last_view: None,
             layers_open: None,
