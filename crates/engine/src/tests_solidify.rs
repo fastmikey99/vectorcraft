@@ -386,14 +386,14 @@ fn an_id_given_must_name_an_image_and_never_falls_back_to_the_selection() {
     select(&mut s, ids[0]);
     let before = s.doc().unwrap().doc.clone();
     let undo = s.doc().unwrap().history.undo.len();
-    for bad in [json!("invalid"), json!(-1), json!(0), json!(1.5), json!(999_999), json!(true), json!([ids[0].0]), rect] {
+    for bad in [json!("invalid"), json!(-1), json!(0), json!(1.5), json!(999_999), json!(true), json!([ids[0].0]), json!(null), rect] {
         let e = s.execute(C, &json!({"id": bad})).unwrap_err().to_string();
         assert!(e.contains("id must name an image"), "{bad}: {e}");
         assert_eq!(s.doc().unwrap().history.undo.len(), undo, "{bad}: nothing changed");
         assert_eq!(*s.doc().unwrap().doc, *before, "{bad}: the selected image is left alone");
     }
-    // Absent (or null): the selection.
-    assert_eq!(s.execute(C, &json!({"id": null})).unwrap()["ids"], json!([ids[0].0]));
+    // Absent: the selection.
+    assert_eq!(s.execute(C, &json!({})).unwrap()["ids"], json!([ids[0].0]));
 }
 
 #[test]
@@ -450,4 +450,27 @@ fn fully_opaque_own_alpha_under_a_mask_thresholds_the_mask() {
     let r = s.execute(C, &json!({})).unwrap();
     assert_eq!((r["form"].clone(), counts(&r)), (json!("mask"), (5, 3, 4)));
     assert_eq!(key_of(&s, id), "src");
+}
+
+#[test]
+fn copies_with_a_different_mask_are_not_changed() {
+    // Two same-size images share the CMYK colour blob; the second's mask is another image.
+    let (mut s, ids, _) = masked_session(ALPHAS.to_vec(), 7, 1, false, 2);
+    let other = ids[1];
+    s.edit("t", |d, _| {
+        let soft: Vec<u8> = ALPHAS.iter().rev().copied().collect();
+        d.images.insert("mask2".into(), ImageBlob::new("image/png", png(DynamicImage::ImageLuma8(image::GrayImage::from_raw(7, 1, soft).unwrap()))));
+        let art = image_node(d, "mask2", (7, 1), 50.0, 1.0);
+        d.node_mut(other).unwrap().extras_mut().mask = Some(Box::new(OpacityMask::new(art, true)));
+        Ok(())
+    })
+    .unwrap();
+    select(&mut s, ids[0]);
+    let undo = s.doc().unwrap().history.undo.len();
+    let r = s.execute(C, &json!({"copies": true})).unwrap();
+    assert_eq!(r["ids"], json!([ids[0].0]), "only the selected image changed");
+    assert_ne!(mask_key(&s, ids[0]), "mask");
+    assert_eq!(mask_key(&s, other), "mask2", "the copy with another mask keeps it");
+    assert_eq!((key_of(&s, ids[0]), key_of(&s, other)), ("ink".to_string(), "ink".to_string()));
+    assert_eq!(s.doc().unwrap().history.undo.len(), undo + 1);
 }

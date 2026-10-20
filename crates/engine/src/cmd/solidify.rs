@@ -22,7 +22,11 @@
 //!
 //! Images keyed by content share their pixels: the result goes in under a key of its own, and only
 //! the images changed are pointed at it (with `copies`, the others showing the same pixels at the
-//! same printed size), so copies at other sizes keep theirs. One undo step.
+//! same printed size, and the same transparency source), so copies at other sizes keep theirs.
+//! Copies with a different opacity mask (the same colour pixels and size, but a mask that isn't
+//! the same image read the same way, or a mask on one and not the other) are not changed, since
+//! the result made from this image's transparency isn't theirs; the reply's `ids` lists what was.
+//! One undo step.
 
 use std::io::Cursor;
 
@@ -38,7 +42,7 @@ pub fn specs() -> Vec<CommandSpec> {
         "Remove Soft Pixels",
         [],
         None,
-        "{id?: image id (absent: the one selected object; any other id that doesn't name an image is refused), level?: 1–255 (128: alpha at or above it becomes opaque, below it clear), copies?: bool (default false; true: also every other image showing the same pixels and transparency at the same printed size)} every pixel of one embedded image fully opaque or fully clear: its own alpha channel, or the greyscale image of its opacity mask; colour samples and the pixel grid are kept exactly, the result is checked against the source before it is kept; one undo step → {id, ids (the images changed, in document order; empty when no pixel was soft), form: \"alpha\"|\"mask\", width, height (of the samples thresholded), level, softPixels (alpha 1–254 before), clearPixels, opaquePixels (after)}",
+        "{id?: image id (absent: the one selected object; an id given, null included, that doesn't name an image is refused), level?: 1–255 (128: alpha at or above it becomes opaque, below it clear), copies?: bool (default false; true: also every other image showing the same pixels and transparency at the same printed size; copies with a different opacity mask are not changed, and ids lists what was)} every pixel of one embedded image fully opaque or fully clear: its own alpha channel, or the greyscale image of its opacity mask; colour samples and the pixel grid are kept exactly, the result is checked against the source before it is kept; one undo step → {id, ids (the images changed, in document order; empty when no pixel was soft), form: \"alpha\"|\"mask\", width, height (of the samples thresholded), level, softPixels (alpha 1–254 before), clearPixels, opaquePixels (after)}",
         has_doc,
         solidify
     )]
@@ -364,16 +368,16 @@ fn solidify(s: &mut Session, p: &Value) -> Result<Value> {
         Some(v) => v.as_bool().ok_or_else(|| bad(C, "copies must be true or false"))?,
     };
     let st = s.doc()?;
-    // Only an absent id (or null) takes the selection: any other id must name an image.
+    // Only an absent id takes the selection: any id given (null included) must name an image.
     let id = match p.get("id") {
-        Some(v) if !v.is_null() => {
+        Some(v) => {
             let id = v.as_u64().map(vectorcraft_doc::NodeId).ok_or_else(|| bad(C, "id must name an image"))?;
             if !matches!(st.doc.node(id).map(|n| &n.kind), Some(NodeKind::Image(_))) {
                 return Err(bad(C, "id must name an image"));
             }
             id
         }
-        _ => match st.selection.objects.as_slice() {
+        None => match st.selection.objects.as_slice() {
             [id] => *id,
             _ => return Err(EngineError::Other("select one image to remove its soft pixels".into())),
         },
