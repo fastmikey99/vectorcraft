@@ -202,6 +202,7 @@ pub struct HostOpen {
     pub bytes: Vec<u8>,
     pub print_production: bool,
     pub separations: Option<vectorcraft_engine::cmd::production_separations::Context>,
+    pub checks: Option<serde_json::Value>,
 }
 pub type HostInbox = Arc<Mutex<Vec<HostOpen>>>;
 pub type HostOpenResult = Box<dyn Fn(Result<(), String>)>;
@@ -761,6 +762,9 @@ impl VectorcraftApp {
             self.publish_clipboard();
         }
         self.sync_views();
+        if r.is_ok() && id == "production.checks.select" {
+            canvas::focus_check_finding(self);
+        }
         match &r {
             Err(e) => self.ui.status = e.clone(),
             Ok(v) => {
@@ -1029,12 +1033,21 @@ impl VectorcraftApp {
                 io::report_open_error(self, &name, &e);
             }
         }
-        for HostOpen { name, bytes, print_production, separations } in handed {
+        for HostOpen { name, bytes, print_production, separations, checks } in handed {
             if let Some(c) = &separations
                 && let Err(e) = c.validate()
             {
                 io::report_open_error(self, &name, &e);
                 continue;
+            }
+            if let Some(value) = &checks {
+                let valid = serde_json::from_value::<vectorcraft_engine::cmd::production_checks::CheckRequest>(value.clone())
+                    .map_err(|e| e.to_string())
+                    .and_then(|request| vectorcraft_engine::cmd::production_checks::validate_request(&request));
+                if let Err(e) = valid {
+                    io::report_open_error(self, &name, &e);
+                    continue;
+                }
             }
             // Acknowledge only after both the document and its panel context are installed.
             let report = self.services.host_open_result.take();
@@ -1049,6 +1062,10 @@ impl VectorcraftApp {
                     let context = serde_json::to_value(c).map_err(|e| e.to_string())?;
                     self.run("production.separations.configure", serde_json::json!({"context":context}))?;
                     self.run("window.panel.activate", serde_json::json!({"panel":"productionSeparations"}))?;
+                }
+                if let Some(request) = checks {
+                    self.run("production.checks.configure", serde_json::json!({"request":request}))?;
+                    self.run("window.panel.activate", serde_json::json!({"panel":"productionChecks"}))?;
                 }
                 Ok(r)
             });
@@ -1240,6 +1257,9 @@ impl VectorcraftApp {
         picks::poll(self, ctx);
         self.write_formats_before_text_input(ctx);
         background::poll(self);
+        if vectorcraft_engine::cmd::production_checks::poll_pending(&mut self.session) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         screen_color::poll(self, ctx);
         opening::poll(self);
         #[cfg(not(target_arch = "wasm32"))]

@@ -4982,3 +4982,22 @@ mark-style	Japanese	Japanilainen
 	Unassigned	Ei määritetty
 @msg	Invalid separation context or too many entries	Virheellinen värierottelukonteksti tai liikaa merkintöjä
 @msg	Invalid or duplicate separation name/component	Virheellinen tai päällekkäinen värierottelun nimi tai osa
+
+# Hybrid separation checks
+	Checks	Tarkistukset
+	Configure Separation Checks	Määritä värierottelujen tarkistukset
+	Check Separations	Tarkista värierottelut
+	Cancel Separation Checks	Peruuta värierottelujen tarkistukset
+	Separation Check Results	Värierottelujen tarkistustulokset
+	Inspect Separation Finding	Tarkastele värierottelun havaintoa
+@msg	Check cancelled	Tarkistus peruutettu
+@msg	Check worker state unavailable	Tarkistusprosessin tila ei ole saatavilla
+@msg	Internal checker failure: {e}	Tarkistuksen sisäinen virhe: {e}
+	Receive Separation Check Results	Vastaanota värierottelun tarkistustulokset
+@msg	Service check export exceeds the 64 MiB upload budget	Tarkistukseen vietävä tiedosto ylittää 64 MiB:n lähetysrajan
+@msg	Colour operand count exceeds precision reconciliation budget	Värioperandien määrä ylittää tarkkuuden tarkistuksen rajan
+
+# Trapping SOP intent
+	Colour Trapping Intent	Värien lihotusmääritys
+@msg	Invalid No trap region	Virheellinen alue ilman lihotusta
+@msg	No trap selection exceeds the object budget	Valinta ilman lihotusta ylittää objektirajan

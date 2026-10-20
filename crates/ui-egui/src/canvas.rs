@@ -152,6 +152,25 @@ pub fn mods(m: egui::Modifiers, space: bool) -> Mods {
 }
 
 /// Fit the view (View → Fit Artboard / Fit All / Actual Size).
+pub(crate) fn focus_check_finding(app: &mut VectorcraftApp) {
+    let Some((page, bounds)) = app.session.active().and_then(|st| st.production_checks.selected_rect(&st.doc)) else {
+        return;
+    };
+    let Some(canvas) = app.canvas_rect else {
+        return;
+    };
+    let Some(view) = app.view_mut() else {
+        return;
+    };
+    let (sn, cs) = view.rotation.to_radians().sin_cos();
+    let w = bounds.width() * cs.abs() + bounds.height() * sn.abs();
+    let h = bounds.width() * sn.abs() + bounds.height() * cs.abs();
+    view.zoom = ((canvas.width() as f64 - 80.0) / w.max(1.0)).min((canvas.height() as f64 - 80.0) / h.max(1.0)).clamp(0.0313, 640.0);
+    view.center = bounds.center();
+    view.artboard = page;
+    view.fitted = true;
+}
+
 pub fn fit(app: &mut VectorcraftApp, how: &str) {
     let Some(rect) = app.canvas_rect else {
         if let Some(v) = app.view_mut() {
@@ -497,6 +516,10 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         }
     }
     draw_overlays(&painter, &xf, &overlays, &t, HandleLook::of(&app.session.prefs));
+    if let Some((_, bounds)) = app.session.active().and_then(|st| st.production_checks.selected_rect(&st.doc)) {
+        painter.add(egui::Shape::closed_line(xf.quad(bounds), Stroke::new(2.0, t.selection)));
+    }
+
     if !revolve_edit {
         shaper_widget_overlay(app, &painter, &xf);
     }

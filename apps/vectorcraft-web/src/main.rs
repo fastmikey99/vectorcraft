@@ -16,6 +16,8 @@
 //! URL query flags: `?webgl` forces the WebGL2 backend instead of WebGPU; `?lang=es` (any
 //! language code) stands in for the browser's languages when the interface language is Automatic.
 
+#[cfg(any(target_arch = "wasm32", test))]
+mod check_snapshot;
 #[cfg(target_arch = "wasm32")]
 mod fonts;
 #[cfg(target_arch = "wasm32")]

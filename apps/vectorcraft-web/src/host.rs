@@ -65,6 +65,12 @@ pub struct Bridge {
     /// The files the parent hands over (`Services::host_inbox`), which outlive graphics restarts.
     inbox: Inbox,
     ready: Rc<Cell<bool>>,
+    checks: Rc<RefCell<Option<(JsValue, serde_json::Value)>>>,
+    check_results: Rc<RefCell<Option<(String, serde_json::Value)>>>,
+    check_inflight: Rc<RefCell<Option<(String, f64)>>>,
+    check_validity: Rc<RefCell<Option<(String, String)>>>,
+    snapshot: Rc<RefCell<crate::check_snapshot::Snapshot>>,
+    snapshot_validity: Rc<RefCell<Option<(String, String)>>>,
 }
 
 impl Bridge {
@@ -86,6 +92,12 @@ impl Bridge {
             prefs: Rc::default(),
             inbox: Inbox::default(),
             ready: Rc::default(),
+            checks: Rc::default(),
+            check_results: Rc::default(),
+            check_inflight: Rc::default(),
+            check_validity: Rc::default(),
+            snapshot: Rc::default(),
+            snapshot_validity: Rc::default(),
         })
     }
 
@@ -116,6 +128,8 @@ impl Bridge {
             ("openAcknowledgement", true.into()),
             ("printProduction", true.into()),
             ("productionSeparations", true.into()),
+            ("separationChecks", true.into()),
+            ("separationCheckService", true.into()),
         ]);
     }
 
@@ -131,8 +145,80 @@ impl Bridge {
 
     /// Each frame: write the exports the parent asked for and send them back.
     pub fn run_exports(&self, app: &mut VectorcraftApp) {
+        if let Some((id, request)) = self.checks.borrow_mut().take() {
+            match app.run("production.checks.configure", serde_json::json!({"request":request})) {
+                Ok(_) => {
+                    self.send(&[("type", "vectorcraft:checks-configured".into()), ("id", id)]);
+                }
+                Err(error) => self.post_export_failed(&id, &error),
+            }
+        }
+        if let Some((token, result)) = self.check_results.borrow_mut().take() {
+            let params = serde_json::json!({"token":token,"report":result.get("report"),"error":result.get("error")});
+            if let Err(error) = app.run("production.checks.complete", params) {
+                log::warn!("refused service check result: {error}");
+            }
+            if self.check_inflight.borrow().as_ref().is_some_and(|(id, _)| id == &token) {
+                *self.check_inflight.borrow_mut() = None;
+            }
+        }
+        let active = app.session.active().and_then(|st| st.production_checks.remote_token()).map(String::from);
+        let previous = self.check_inflight.borrow().clone();
+        if let Some((token, started)) = previous {
+            let expired = js_sys::Date::now() - started > 180_000.0;
+            if active.as_deref() != Some(token.as_str()) || expired {
+                self.send(&[("type", "vectorcraft:check-cancel".into()), ("id", token.clone().into())]);
+                *self.check_inflight.borrow_mut() = None;
+                if expired
+                    && let Err(error) = app.run(
+                        "production.checks.complete",
+                        serde_json::json!({"token":token,"error":"Verification service exceeded the response deadline"}),
+                    )
+                {
+                    log::warn!("could not finish expired check: {error}");
+                }
+            }
+        }
+        match vectorcraft_engine::cmd::production_checks::take_remote_export(&mut app.session) {
+            Ok(Some((token, bytes))) => {
+                self.snapshot.borrow_mut().replace(token.clone(), app.session.active().and_then(|st| st.production_checks.remote_document()));
+                self.report_snapshot(app);
+                let buffer = js_sys::Uint8Array::from(bytes.as_slice()).buffer();
+                let payload = message(&[
+                    ("type", "vectorcraft:check".into()),
+                    ("id", token.clone().into()),
+                    ("bytes", buffer.clone().into()),
+                    (
+                        "trapping",
+                        js_sys::JSON::parse(
+                            &app.session
+                                .active()
+                                .and_then(|st| st.production_checks.request.as_ref())
+                                .and_then(|r| r.acceptance.get("trapping_intent"))
+                                .map(|f| f.value.to_string())
+                                .unwrap_or_else(|| "null".into()),
+                        )
+                        .unwrap_or(wasm_bindgen::JsValue::NULL),
+                    ),
+                ]);
+                let sent = payload.is_some_and(|m| self.parent.post_message_with_transfer(&m, &self.origin, &js_sys::Array::of1(&buffer)).is_ok());
+                if sent {
+                    *self.check_inflight.borrow_mut() = Some((token, js_sys::Date::now()));
+                } else if let Err(error) = app
+                    .run("production.checks.complete", serde_json::json!({"token":token,"error":"Could not submit PDF to the verification service"}))
+                {
+                    log::warn!("could not finish failed check submission: {error}");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => log::warn!("could not export service check snapshot: {error}"),
+        }
         let asked = std::mem::take(&mut *self.exports.borrow_mut());
         for (id, export) in asked {
+            if let Some(token) = id.as_string() {
+                self.snapshot.borrow_mut().replace(token, app.session.active().map(|st| st.doc.clone()));
+                self.report_snapshot(app);
+            }
             match crate::operations::write_export(app, &export) {
                 Ok((name, bytes, bounds, native)) => match self.post_file(&name, &bytes, Some(&id), bounds, native, export.preserve_source) {
                     Ok(()) => {
@@ -170,10 +256,48 @@ impl Bridge {
     }
 
     /// After each frame: tell the parent when unsaved changes appear or go away.
+    fn report_snapshot(&self, app: &VectorcraftApp) {
+        let snapshot = self.snapshot.borrow();
+        if snapshot.id.is_empty() {
+            return;
+        }
+        let current = (snapshot.id.clone(), snapshot.validity(app.session.active().map(|st| &st.doc)).to_string());
+        if self.snapshot_validity.borrow().as_ref() != Some(&current)
+            && self.send(&[
+                ("type", "vectorcraft:snapshot-validity".into()),
+                ("id", current.0.as_str().into()),
+                ("validity", current.1.as_str().into()),
+            ])
+        {
+            *self.snapshot_validity.borrow_mut() = Some(current);
+        }
+    }
+
     pub fn report_dirty(&self, app: &VectorcraftApp) {
+        self.report_snapshot(app);
         let dirty = app.session.documents().iter().any(|d| d.is_dirty());
         if self.reported.get() != Some(dirty) && self.send(&[("type", "vectorcraft:dirty".into()), ("dirty", dirty.into())]) {
             self.reported.set(Some(dirty));
+        }
+        let current = app.session.active().and_then(|st| {
+            let report = st.production_checks.report.as_ref()?;
+            let validity = match st.production_checks.validity(&st.doc) {
+                vectorcraft_checks::Validity::Stale => "stale",
+                _ => "provisional",
+            };
+            Some((report.run_id.clone(), validity.to_string()))
+        });
+        if *self.check_validity.borrow() != current {
+            if let Some((run_id, validity)) = &current
+                && !self.send(&[
+                    ("type", "vectorcraft:check-validity".into()),
+                    ("run_id", run_id.as_str().into()),
+                    ("validity", validity.as_str().into()),
+                ])
+            {
+                return;
+            }
+            *self.check_validity.borrow_mut() = current;
         }
     }
 
@@ -246,6 +370,41 @@ impl Bridge {
                 }
                 return;
             }
+            if string(&data, "type").as_deref() == Some("vectorcraft:check-result") {
+                let Some(token) = string(&data, "id").filter(|id| id.len() <= 256) else {
+                    return;
+                };
+                if !bridge.check_inflight.borrow().as_ref().is_some_and(|(id, _)| id == &token) {
+                    return;
+                }
+                let result = js_sys::JSON::stringify(&data)
+                    .ok()
+                    .and_then(|s| s.as_string())
+                    .filter(|s| s.len() <= 32 * 1024 * 1024)
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .unwrap_or_else(|| serde_json::json!({"error":"Invalid or oversized service check result"}));
+                *bridge.check_results.borrow_mut() = Some((token, result));
+                wake();
+                return;
+            }
+            if string(&data, "type").as_deref() == Some("vectorcraft:checks") {
+                let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
+                let request = js_sys::Reflect::get(&data, &JsValue::from_str("request"))
+                    .ok()
+                    .and_then(|v| js_sys::JSON::stringify(&v).ok())
+                    .and_then(|s| s.as_string())
+                    .filter(|s| s.len() <= 16 * 1024 * 1024)
+                    .ok_or_else(|| "Invalid or oversized check context".to_string())
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).map_err(|e| e.to_string()));
+                match request {
+                    Ok(request) => {
+                        *bridge.checks.borrow_mut() = Some((id, request));
+                        wake();
+                    }
+                    Err(error) => bridge.post_export_failed(&id, &error),
+                }
+                return;
+            }
             if string(&data, "type").as_deref() == Some("vectorcraft:hello") {
                 if bridge.ready.get() {
                     bridge.post_ready();
@@ -301,11 +460,30 @@ impl Bridge {
                             }
                         }
                     };
+                    let value = js_sys::Reflect::get(&data, &JsValue::from_str("checks")).unwrap_or(JsValue::UNDEFINED);
+                    let checks = if value.is_undefined() || value.is_null() {
+                        None
+                    } else {
+                        let parsed = js_sys::JSON::stringify(&value)
+                            .ok()
+                            .and_then(|s| s.as_string())
+                            .filter(|s| s.len() <= 16 * 1024 * 1024)
+                            .ok_or_else(|| "Check context exceeds the request budget".to_string())
+                            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).map_err(|e| e.to_string()));
+                        match parsed {
+                            Ok(request) => Some(request),
+                            Err(error) => {
+                                bridge.post_failed(&error);
+                                return;
+                            }
+                        }
+                    };
                     bridge.inbox.lock().unwrap_or_else(|e| e.into_inner()).push(vectorcraft_ui_egui::HostOpen {
                         name: open.name,
                         bytes: open.bytes,
                         print_production: flag.as_bool().unwrap_or(false),
                         separations,
+                        checks,
                     });
                     wake();
                 }

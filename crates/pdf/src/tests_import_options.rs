@@ -30,6 +30,71 @@ fn close(a: Rect, b: Rect) -> bool {
 }
 
 #[test]
+fn verification_retains_enclosing_clip_paths_without_changing_default_import() {
+    let count = |d: &Document| {
+        let mut clips = 0;
+        d.walk(|n| {
+            if matches!(n.kind, NodeKind::Group { clip: true, .. }) {
+                clips += 1;
+            }
+        });
+        clips
+    };
+    for clip in ["10 10 80 80 re", "0 0 100 100 re"] {
+        let content = format!("q {clip} W n 0 g 20 20 20 20 re f Q");
+        let bytes = pdf(&[PdfPage::new(100.0, 100.0, &content)], None);
+        let editable = open(&bytes, ImportOptions::default());
+        let verified = open(&bytes, ImportOptions { preserve_clip_paths: true, reject_depth_loss: true, ..Default::default() });
+        assert_eq!(count(&editable), 0);
+        assert_eq!(count(&verified), 1, "{clip}");
+        // Document art bounds include retained clip nodes. Compare the painted
+        // paths themselves; the enclosing boundary is deliberately additional.
+        let painted = |d: &Document| {
+            let mut bounds = vec![];
+            d.walk(|n| {
+                if matches!(n.kind, NodeKind::Path { clipping: false, .. }) {
+                    bounds.push(n.geometric_bounds());
+                }
+            });
+            bounds
+        };
+        assert_eq!(painted(&editable), painted(&verified));
+    }
+}
+
+#[test]
+fn verification_enclosing_clip_does_not_make_unpainted_crop_overflow() {
+    for clip in ["0 0 100 100 re", "-20 -20 140 140 re"] {
+        for (paint, outside) in [("30 30 10 10 re", false), ("10 10 30 30 re", true)] {
+            let content = format!("q {clip} W n 0 g {paint} f Q");
+            let page = PdfPage { crop: Some([20.0, 20.0, 80.0, 80.0]), ..PdfPage::new(100.0, 100.0, &content) };
+            let result = import_with_report(&pdf(&[page], None), &ImportOptions { preserve_clip_paths: true, ..Default::default() }).unwrap();
+            assert_eq!(result.warnings.iter().any(|w| w == crate::import::PAST_PAGE_NOTE), outside, "{clip}: {:?}", result.warnings);
+        }
+    }
+}
+
+#[test]
+fn verification_large_form_bbox_keeps_inside_vector_art_without_crop_warning() {
+    let content = "0 g 30 30 10 10 re f";
+    let form = format!("<< /Type /XObject /Subtype /Form /BBox [-20 -20 120 120] /Length {} >>\nstream\n{content}\nendstream", content.len());
+    let page = PdfPage {
+        crop: Some([20.0, 20.0, 80.0, 80.0]),
+        resources: format!("/XObject << /Fm {} 0 R >>", first_extra(1)),
+        ..PdfPage::new(100.0, 100.0, "/Fm Do")
+    };
+    let result = import_with_report(&pdf_with(&[page], &[&form], None), &ImportOptions { preserve_clip_paths: true, ..Default::default() }).unwrap();
+    assert!(!result.warnings.iter().any(|w| w == crate::import::PAST_PAGE_NOTE), "{:?}", result.warnings);
+    let mut painted = 0;
+    result.document.walk(|n| {
+        if matches!(n.kind, NodeKind::Path { clipping: false, .. }) {
+            painted += 1;
+        }
+    });
+    assert_eq!(painted, 1);
+}
+
+#[test]
 fn each_crop_box_sizes_the_artboard_and_places_the_art_in_it() {
     let bytes = pdf(&[boxed_page()], None);
     // (box, artboard size, the rectangle's top-left on the artboard).

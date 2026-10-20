@@ -4575,3 +4575,22 @@ theme	Appearance	Giao diện
 	Unassigned	Chưa gán
 @msg	Invalid separation context or too many entries	Ngữ cảnh tách màu không hợp lệ hoặc quá nhiều mục
 @msg	Invalid or duplicate separation name/component	Tên bản tách màu hoặc thành phần không hợp lệ hoặc trùng lặp
+
+# Hybrid separation checks
+	Checks	Kiểm tra
+	Configure Separation Checks	Cấu hình kiểm tra tách màu
+	Check Separations	Kiểm tra tách màu
+	Cancel Separation Checks	Hủy kiểm tra tách màu
+	Separation Check Results	Kết quả kiểm tra tách màu
+	Inspect Separation Finding	Xem phát hiện về tách màu
+@msg	Check cancelled	Đã hủy kiểm tra
+@msg	Check worker state unavailable	Không có trạng thái tiến trình kiểm tra
+@msg	Internal checker failure: {e}	Lỗi nội bộ của bộ kiểm tra: {e}
+	Receive Separation Check Results	Nhận kết quả kiểm tra tách màu
+@msg	Service check export exceeds the 64 MiB upload budget	Tệp xuất để kiểm tra vượt quá giới hạn tải lên 64 MiB
+@msg	Colour operand count exceeds precision reconciliation budget	Số toán hạng màu vượt quá giới hạn kiểm tra độ chính xác
+
+# Trapping SOP intent
+	Colour Trapping Intent	Thiết lập chồng lấn màu
+@msg	Invalid No trap region	Vùng không chồng lấn màu không hợp lệ
+@msg	No trap selection exceeds the object budget	Vùng chọn không chồng lấn màu vượt quá giới hạn đối tượng

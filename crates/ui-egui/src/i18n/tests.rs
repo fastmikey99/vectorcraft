@@ -1307,9 +1307,16 @@ pub fn message_literals() -> std::collections::BTreeSet<String> {
                 if name != "tests" {
                     stack.push(path);
                 }
-            } else if name.ends_with(".rs") && !name.starts_with("tests") && !(d == crates.join("ui-egui").join("src") && name == "control.rs") {
+            } else if name.ends_with(".rs")
+                && !name.starts_with("tests")
+                && !(d == crates.join("ui-egui").join("src") && name == "control.rs")
+                && !(d == crates.join("pdf").join("src") && matches!(name, "image_samples.rs" | "image_contract.rs" | "print_color.rs"))
+            {
                 // Control replies are English protocol data, never status-bar messages
                 // (see i18n's module contract). Engine messages are scanned in their own crates.
+                // image_samples, image_contract and print_color diagnostics are emitted only by the opt-in raw print audit. Their
+                // diagnostics are checker evidence, like the checks crate's findings;
+                // ordinary PDF import never calls it or puts these in the status bar.
                 let text = std::fs::read_to_string(&path).unwrap_or_default();
                 let code = without_test_module(&text);
                 for marker in MESSAGE_MARKERS {

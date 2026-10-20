@@ -35,21 +35,43 @@ fn stream(dict: &str, data: &[u8]) -> Vec<u8> {
 /// A 300 × 100 pt page with a CMYK rectangle and image XObjects `images` (dictionary entries
 /// after the type, stream data), 50 pt wide each: objects 5…, then the `extra` objects.
 fn pdf_with_images(images: &[(String, Vec<u8>)], extra: &[Vec<u8>]) -> Vec<u8> {
+    pdf_with_image_resources(images, extra, "")
+}
+
+fn pdf_with_image_resources(images: &[(String, Vec<u8>)], extra: &[Vec<u8>], resources: &str) -> Vec<u8> {
+    pdf_with_image_scope(images, extra, resources, None)
+}
+
+fn pdf_with_image_scope(images: &[(String, Vec<u8>)], extra: &[Vec<u8>], resources: &str, form_resources: Option<&str>) -> Vec<u8> {
     let xobjects: String = (0..images.len()).map(|i| format!("/Im{i} {} 0 R ", 5 + i)).collect();
     let mut content = String::from("0 1 0.6 0.2 k 0 80 300 20 re f\n");
     for i in 0..images.len() {
         content.push_str(&format!("q 50 0 0 50 {} 10 cm /Im{i} Do Q\n", 10 + 60 * i));
     }
+    let form_id = 5 + images.len() + extra.len();
+    let page_xobjects = if form_resources.is_some() { format!("/F {form_id} 0 R") } else { xobjects.clone() };
+    let page_content = if form_resources.is_some() { "/F Do" } else { &content };
     let mut objs = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 100] /Resources << /XObject << {xobjects}>> >> /Contents 4 0 R >>").into_bytes(),
-        stream("", content.as_bytes()),
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 100] /Resources << {resources} /XObject << {page_xobjects}>> >> /Contents 4 0 R >>")
+            .into_bytes(),
+        stream("", page_content.as_bytes()),
     ];
     for (dict, data) in images {
         objs.push(stream(&format!("/Type /XObject /Subtype /Image {dict}"), data));
     }
     objs.extend_from_slice(extra);
+    if let Some(form_resources) = form_resources {
+        objs.push(stream(
+            &format!("/Type /XObject /Subtype /Form /BBox [0 0 300 100] /Resources << {form_resources} /XObject << {xobjects} >> >>"),
+            content.as_bytes(),
+        ));
+    }
+    pdf_objects(&objs)
+}
+
+fn pdf_objects(objs: &[Vec<u8>]) -> Vec<u8> {
     let mut out = b"%PDF-1.4\n".to_vec();
     let mut at = vec![];
     for (i, o) in objs.iter().enumerate() {
@@ -159,6 +181,128 @@ fn opts(s: serde_json::Value) -> PdfOptions {
 
 fn close(a: &[u8], b: &[u8], tolerance: u8) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.abs_diff(*y) <= tolerance)
+}
+
+#[test]
+fn indexed_cmyk_keeps_palette_inks_decode_row_padding_and_alpha() {
+    let palette = [0, 0, 0, 0, 10, 20, 30, 40, 255, 0, 99, 0, 0, 255, 0, 17];
+    // Three pixels per row: two-bit samples have two padding bits on each row.
+    let image = "/Width 3 /Height 2 /ColorSpace [/Indexed /DeviceCMYK 3 6 0 R] /BitsPerComponent 2 /Decode [3 0] /SMask 7 0 R";
+    let mask = stream("/Type /XObject /Subtype /Image /Width 3 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8", &[0, 51, 102, 153, 204, 255]);
+    let input = pdf_with_images(&[(image.into(), vec![0b00011011, 0b11100111])], &[stream("", &palette), mask]);
+    let imported = import_with_report(&input, &ImportOptions::default()).unwrap();
+    assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+    let expected: Vec<u8> = [3, 2, 1, 0, 1, 2].into_iter().flat_map(|i| palette[i * 4..i * 4 + 4].iter().copied()).collect();
+    for doc in [&imported.document, &import(&export(&imported.document, &PdfOptions::default()).unwrap()).unwrap()] {
+        let images = masked(doc);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].0.cmyk().unwrap().data, expected);
+        assert!(images[0].1.is_some(), "opacity mask retained");
+    }
+}
+
+#[test]
+fn indexed_cmyk_string_palette_clamps_indices_and_reports_short_tables() {
+    let dict = "/Width 3 /Height 1 /ColorSpace [/Indexed /DeviceCMYK 1 <000000000a141e28>] /BitsPerComponent 8";
+    let input = pdf_with_images(&[(dict.into(), vec![0, 1, 255])], &[]);
+    let doc = import(&input).unwrap();
+    assert_eq!(blobs(&doc)[0].cmyk().unwrap().data, [0, 0, 0, 0, 10, 20, 30, 40, 10, 20, 30, 40]);
+    let input = pdf_with_images(&[(dict.replace("000000000a141e28", "00000000"), vec![0, 1, 255])], &[]);
+    let result = import_with_report(&input, &ImportOptions::default()).unwrap();
+    assert!(result.warnings.iter().any(|w| w.contains(crate::import_image::UNREAD)));
+}
+
+#[test]
+fn device_gray_images_keep_process_samples_and_alpha_through_export_and_reopen() {
+    let mask = stream("/Type /XObject /Subtype /Image /Width 3 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8", &[0, 51, 102, 153, 204, 255]);
+    for (space, bpc, decode, data) in [
+        ("/DeviceGray", 8, "", vec![0, 64, 255, 128, 32, 192]),
+        ("/DeviceGray", 8, "/Decode [1 0]", vec![0, 64, 255, 128, 32, 192]),
+        ("[/Indexed /DeviceGray 3 <004080ff>]", 2, "/Decode [3 0]", vec![0b00011011, 0b11100111]),
+    ] {
+        for masked in [false, true] {
+            let dict =
+                format!("/Width 3 /Height 2 /ColorSpace {space} /BitsPerComponent {bpc} {decode} {}", if masked { "/SMask 6 0 R" } else { "" });
+            let input = pdf_with_images(&[(dict, data.clone())], if masked { std::slice::from_ref(&mask) } else { &[] });
+            let source = print_order(&input).unwrap();
+            let expected = source.images[0][0].samples.as_ref().unwrap();
+            let mut doc = import(&input).unwrap();
+            for _ in 0..2 {
+                let bytes = export(&doc, &opts(json!({"disableImageInterpolation": true}))).unwrap();
+                let output = print_order(&bytes).unwrap();
+                assert_eq!(output.images[0].len(), 1);
+                let image = &output.images[0][0];
+                assert_eq!(image.description.colour_space, "DeviceGray", "{space}, masked={masked}");
+                let actual = image.samples.as_ref().unwrap();
+                assert_eq!(actual.process_base(), Some("DeviceGray"));
+                assert_eq!((actual.width, actual.height), (3, 2));
+                for pixel in 0..6 {
+                    assert_eq!(actual.tone(pixel, 0).unwrap(), expected.tone(pixel, 0).unwrap());
+                    assert_eq!(actual.alpha(pixel).unwrap(), expected.alpha(pixel).unwrap());
+                }
+                doc = import(&bytes).unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn neutral_rgb_named_black_and_gray_substitutions_are_not_relabelled_device_gray() {
+    let function = b"<< /FunctionType 2 /Domain [0 1] /C0 [1 1 1] /C1 [0 0 0] /N 1 >>".to_vec();
+    let gray_profile = stream("/N 1", &cms::icc_bytes(cms::GRAY).unwrap());
+    for (space, data, extra, resources) in [
+        ("/DeviceRGB", vec![0, 0, 0, 64, 64, 64, 255, 255, 255], vec![], ""),
+        ("[/Separation /Black /DeviceRGB 6 0 R]", vec![0, 64, 255], vec![function], ""),
+        ("[/CalGray << /WhitePoint [1 1 1] >>]", vec![0, 64, 255], vec![], ""),
+        ("[/ICCBased 6 0 R]", vec![0, 64, 255], vec![gray_profile], ""),
+        ("/DeviceGray", vec![0, 64, 255], vec![], "/ColorSpace << /DefaultGray [/CalGray << /WhitePoint [1 1 1] >>] >>"),
+        ("[/Indexed /DeviceGray 2 <0040ff>]", vec![0, 1, 2], vec![], "/ColorSpace << /DefaultGray null >>"),
+    ] {
+        let dict = format!("/Width 3 /Height 1 /ColorSpace {space} /BitsPerComponent 8");
+        let input = pdf_with_image_resources(&[(dict, data)], &extra, resources);
+        let bytes = export(&import(&input).unwrap(), &PdfOptions::default()).unwrap();
+        let output = print_order(&bytes).unwrap();
+        let expected = if space.starts_with("[/Separation") { "DeviceCMYK" } else { "DeviceRGB" };
+        assert_eq!(output.images[0][0].description.colour_space, expected, "{space} {resources}");
+    }
+}
+
+#[test]
+fn gray_preservation_respects_form_and_inherited_resource_substitutions() {
+    let image = ("/Width 3 /Height 1 /ColorSpace [/Indexed /DeviceGray 2 <0040ff>] /BitsPerComponent 8".into(), vec![0, 1, 2]);
+    let substitution = "/ColorSpace << /DefaultGray [/CalGray << /WhitePoint [1 1 1] >>] >>";
+    for (page, form, expected) in [("", "", "DeviceGray"), (substitution, "", "DeviceRGB"), ("", substitution, "DeviceRGB")] {
+        let input = pdf_with_image_scope(std::slice::from_ref(&image), &[], page, Some(form));
+        let bytes = export(&import(&input).unwrap(), &PdfOptions::default()).unwrap();
+        let output = print_order(&bytes).unwrap();
+        assert_eq!(output.images[0][0].description.colour_space, expected, "page={page}, form={form}");
+    }
+}
+
+#[test]
+fn gray_preservation_cache_isolated_for_shared_image_across_pages_in_both_orders() {
+    let substitution = "/ColorSpace << /DefaultGray [/CalGray << /WhitePoint [1 1 1] >>] >>";
+    for overrides in [["", substitution], [substitution, ""]] {
+        let page = |resources: &str| {
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Contents 5 0 R /Resources << {resources} /XObject << /Im 6 0 R >> >> >>")
+                .into_bytes()
+        };
+        let input = pdf_objects(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_vec(),
+            page(overrides[0]),
+            page(overrides[1]),
+            stream("", b"q 36 0 0 36 18 18 cm /Im Do Q"),
+            stream("/Type /XObject /Subtype /Image /Width 3 /Height 1 /ColorSpace [/Indexed /DeviceGray 2 <0040ff>] /BitsPerComponent 8", &[0, 1, 2]),
+        ]);
+        let output = export(&import(&input).unwrap(), &PdfOptions::default()).unwrap();
+        let inventory = print_order(&output).unwrap();
+        assert_eq!(inventory.images.len(), 2);
+        for (images, declaration) in inventory.images.iter().zip(overrides) {
+            assert_eq!(images.len(), 1);
+            assert_eq!(images[0].description.colour_space, if declaration.is_empty() { "DeviceGray" } else { "DeviceRGB" });
+        }
+    }
 }
 
 #[test]
@@ -466,3 +610,6 @@ fn vector_cmyk_keeps_fractional_press_values() {
     }
     assert_eq!(colours(&back), colours(&doc));
 }
+
+#[path = "tests_cmyk_mask.rs"]
+mod mask_tests;

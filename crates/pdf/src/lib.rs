@@ -46,6 +46,8 @@ mod encrypt;
 mod export;
 mod file_info;
 mod forms;
+mod image_contract;
+mod image_samples;
 mod images;
 mod import;
 mod import_color;
@@ -66,6 +68,13 @@ mod post;
 mod preserve;
 mod presets;
 mod print;
+mod print_clip;
+mod print_clip_interval;
+mod print_color;
+mod print_image;
+mod print_order;
+mod print_rect_clip;
+mod production_info;
 mod settings;
 mod streams;
 mod syntax;
@@ -74,11 +83,15 @@ pub use editing::{EDITING_FILE, Editing, LEGACY_EDITING_FILE, editing, editing_w
 pub use encrypt::Encryption;
 pub use export::{export, export_with_report, page_areas};
 pub use file_info::{FileInfo, file_info};
+pub use image_samples::PrintImageSamples;
 pub use import::{OFF_ARTBOARD_NOTE, PAST_PAGE_NOTE, import, import_with_report};
 pub use pages::{PageInfo, PdfInfo, has_illustrator_data, illustrator_data, info, is_postscript};
 pub use post::{THUMBNAIL_SIZE, Thumbnail};
 pub use presets::*;
 pub use print::*;
+pub use print_image::{PrintImageDescription, PrintImageUse, PrintRectCrop, PrintRenderingIntent};
+pub use print_order::{PrintColorSpace, PrintOrder, PrintPaintSource, print_order};
+pub use production_info::{ProductionInfo, ProductionIntent, ProductionPage, production_info};
 pub use settings::*;
 
 use vectorcraft_doc::Document;
@@ -133,6 +146,9 @@ pub struct ImportOptions {
     /// Refuse artwork exceeding safe nesting limits instead of discarding clips or masks.
     /// Print-production callers must enable this before offering an editable separation.
     pub reject_depth_loss: bool,
+    /// Retain explicit clip paths even when they enclose all visible artwork.
+    /// Verification uses these boundaries to reconcile raw PDF graphics state.
+    pub preserve_clip_paths: bool,
 }
 
 impl Default for ImportOptions {
@@ -147,6 +163,7 @@ impl Default for ImportOptions {
             layers: true,
             uncalibrated_rgb: false,
             reject_depth_loss: false,
+            preserve_clip_paths: false,
         }
     }
 }

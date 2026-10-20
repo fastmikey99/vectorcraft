@@ -115,6 +115,62 @@ fn groups_marked_inside_forms_and_clips_reach_their_layers() {
 }
 
 #[test]
+fn retained_clip_runs_preserve_each_layer_and_ungrouped_artwork() {
+    let (mut objs, catalog, ids) = groups(1, "");
+    objs[1] = "<< /Type /OCG /Name (Other) >>".into();
+    for clip in ["0 0 100 100 re", "5 5 90 90 re"] {
+        let content = format!(
+            "q {clip} W n 0 1 0 rg 10 10 5 5 re f /OC /MC0 BDC 1 0 0 rg 20 20 5 5 re f EMC /OC /MC1 BDC 0 0 1 rg 30 30 5 5 re f EMC /OC /MC0 BDC 1 0 0 rg 40 40 5 5 re f EMC 0 1 0 rg 50 50 5 5 re f Q"
+        );
+        let page =
+            PdfPage { resources: format!("/Properties << /MC0 {} 0 R /MC1 {} 0 R >>", ids[0], ids[1]), ..PdfPage::new(100.0, 100.0, &content) };
+        let bytes = pdf_with_catalog(&[page], &[&objs[0], &objs[1]], &catalog, None);
+        let doc = import_with_report(&bytes, &ImportOptions { preserve_clip_paths: true, ..Default::default() }).unwrap().document;
+        let colours = |name: &str| {
+            let layer = doc.layers.iter().find(|l| l.name.as_deref() == Some(name)).unwrap();
+            let mut todo = vec![layer.as_ref()];
+            let mut colours = vec![];
+            while let Some(node) = todo.pop() {
+                if let Some(colour) = node.appearance.fill().and_then(|p| p.paint.color()) {
+                    colours.push(colour);
+                }
+                if let Some(children) = node.children() {
+                    todo.extend(children.iter().map(|n| n.as_ref()));
+                }
+            }
+            colours
+        };
+        assert_eq!(colours("Shapes"), [Color::rgb(1.0, 0.0, 0.0); 2]);
+        assert_eq!(colours("Other"), [Color::rgb(0.0, 0.0, 1.0)]);
+        assert_eq!(colours("Page 1"), [Color::rgb(0.0, 1.0, 0.0); 2]);
+    }
+}
+
+#[test]
+fn verification_bounds_clip_copy_amplification_before_allocating_runs() {
+    let (mut objs, catalog, ids) = groups(1, "");
+    objs[1] = "<< /Type /OCG /Name (Other) >>".into();
+    let clip = "0 0 100 100 re ".repeat(250);
+    for (runs, refused) in [(2, false), (300, true)] {
+        let mut content = format!("q {clip} W n ");
+        for i in 0..runs {
+            content.push_str(&format!("/OC /MC{} BDC 0 g 20 20 10 10 re f EMC ", i % 2));
+        }
+        content.push('Q');
+        let page =
+            PdfPage { resources: format!("/Properties << /MC0 {} 0 R /MC1 {} 0 R >>", ids[0], ids[1]), ..PdfPage::new(100.0, 100.0, &content) };
+        let bytes = pdf_with_catalog(&[page], &[&objs[0], &objs[1]], &catalog, None);
+        let result = import_with_report(&bytes, &ImportOptions { preserve_clip_paths: true, ..Default::default() });
+        if refused {
+            assert!(result.unwrap_err().to_string().contains("Verification clip retention budget exceeded"));
+            assert!(import(&bytes).is_ok(), "ordinary import has no per-run copies");
+        } else {
+            assert!(result.is_ok());
+        }
+    }
+}
+
+#[test]
 fn a_form_hidden_by_its_own_group_stays_hidden() {
     let (objs, catalog, ids) = groups(1, "/OFF [{B}]");
     let form_no = first_extra(1) + 2;

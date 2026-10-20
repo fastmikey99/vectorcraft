@@ -4591,3 +4591,22 @@ lighting	Light	Свет
 	Unassigned	Не назначено
 @msg	Invalid separation context or too many entries	Недопустимый контекст цветоделения или слишком много записей
 @msg	Invalid or duplicate separation name/component	Недопустимое или повторяющееся имя цветоделения либо компонент
+
+# Hybrid separation checks
+	Checks	Проверки
+	Configure Separation Checks	Настроить проверки цветоделений
+	Check Separations	Проверить цветоделения
+	Cancel Separation Checks	Отменить проверки цветоделений
+	Separation Check Results	Результаты проверки цветоделений
+	Inspect Separation Finding	Просмотреть замечание по цветоделению
+@msg	Check cancelled	Проверка отменена
+@msg	Check worker state unavailable	Состояние процесса проверки недоступно
+@msg	Internal checker failure: {e}	Внутренняя ошибка проверки: {e}
+	Receive Separation Check Results	Получить результаты проверки цветоделения
+@msg	Service check export exceeds the 64 MiB upload budget	Экспорт для проверки превышает ограничение загрузки в 64 MiB
+@msg	Colour operand count exceeds precision reconciliation budget	Число цветовых операндов превышает лимит проверки точности
+
+# Trapping SOP intent
+	Colour Trapping Intent	Настройка треппинга цветов
+@msg	Invalid No trap region	Недопустимая область без треппинга
+@msg	No trap selection exceeds the object budget	Выделение без треппинга превышает лимит объектов

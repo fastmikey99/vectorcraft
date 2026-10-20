@@ -4575,3 +4575,22 @@ lighting	Light	Світло
 	Unassigned	Не призначено
 @msg	Invalid separation context or too many entries	Недійсний контекст кольороподілу або забагато записів
 @msg	Invalid or duplicate separation name/component	Недійсна чи повторювана назва кольороподілу або компонент
+
+# Hybrid separation checks
+	Checks	Перевірки
+	Configure Separation Checks	Налаштувати перевірки кольороподілів
+	Check Separations	Перевірити кольороподіли
+	Cancel Separation Checks	Скасувати перевірки кольороподілів
+	Separation Check Results	Результати перевірки кольороподілів
+	Inspect Separation Finding	Переглянути зауваження щодо кольороподілу
+@msg	Check cancelled	Перевірку скасовано
+@msg	Check worker state unavailable	Стан процесу перевірки недоступний
+@msg	Internal checker failure: {e}	Внутрішня помилка перевірки: {e}
+	Receive Separation Check Results	Отримати результати перевірки кольороподілу
+@msg	Service check export exceeds the 64 MiB upload budget	Експорт для перевірки перевищує обмеження завантаження 64 MiB
+@msg	Colour operand count exceeds precision reconciliation budget	Кількість колірних операндів перевищує ліміт перевірки точності
+
+# Trapping SOP intent
+	Colour Trapping Intent	Налаштування трепінгу кольорів
+@msg	Invalid No trap region	Недопустима область без трепінгу
+@msg	No trap selection exceeds the object budget	Виділення без трепінгу перевищує ліміт об’єктів

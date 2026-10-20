@@ -2887,6 +2887,7 @@ pub fn menu_tree_named(english_names: bool) -> Vec<(&'static str, Vec<Item>)> {
                 panel("Properties", "properties"),
                 panel("Separations Preview", "separations"),
                 panel("Production Separations", "productionSeparations"),
+                panel("Checks", "productionChecks"),
                 panel("Stroke", "stroke"),
                 todo("SVG Interactivity"),
                 panel("Swatches", "swatches"),

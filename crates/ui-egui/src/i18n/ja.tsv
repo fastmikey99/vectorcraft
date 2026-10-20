@@ -4636,3 +4636,22 @@ lighting	Light	ライト
 	Unassigned	未割り当て
 @msg	Invalid separation context or too many entries	色分解情報が無効か、項目が多すぎます
 @msg	Invalid or duplicate separation name/component	色分解名または構成要素が無効か重複しています
+
+# Hybrid separation checks
+	Checks	チェック
+	Configure Separation Checks	色分解チェックを設定
+	Check Separations	色分解をチェック
+	Cancel Separation Checks	色分解チェックをキャンセル
+	Separation Check Results	色分解チェックの結果
+	Inspect Separation Finding	色分解の検出結果を確認
+@msg	Check cancelled	チェックをキャンセルしました
+@msg	Check worker state unavailable	チェック処理の状態を取得できません
+@msg	Internal checker failure: {e}	チェックの内部エラー: {e}
+	Receive Separation Check Results	色分解チェックの結果を受信
+@msg	Service check export exceeds the 64 MiB upload budget	チェック用の書き出しがアップロード上限の64 MiBを超えています
+@msg	Colour operand count exceeds precision reconciliation budget	色のオペランド数が精度照合の上限を超えています
+
+# Trapping SOP intent
+	Colour Trapping Intent	色トラッピングの指定
+@msg	Invalid No trap region	トラッピングなしの領域が無効です
+@msg	No trap selection exceeds the object budget	トラッピングなしの選択がオブジェクト数の上限を超えています

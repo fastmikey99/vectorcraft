@@ -4999,3 +4999,21 @@ theme	Appearance	Външен вид
 	Unassigned	Неназначено
 @msg	Invalid separation context or too many entries	Невалиден контекст на цветоотделка или твърде много записи
 @msg	Invalid or duplicate separation name/component	Невалидно или дублирано име на цветоотделка или компонент
+
+# Hybrid separation checks
+	Checks	Проверки
+	Configure Separation Checks	Настройване на проверки на цветоотделките
+	Check Separations	Проверка на цветоотделките
+	Cancel Separation Checks	Отмяна на проверките на цветоотделките
+	Separation Check Results	Резултати от проверките на цветоотделките
+	Inspect Separation Finding	Преглед на констатация за цветоотделка
+@msg	Check cancelled	Проверката е отменена
+@msg	Check worker state unavailable	Състоянието на процеса за проверка е недостъпно
+@msg	Internal checker failure: {e}	Вътрешна грешка на проверката: {e}
+	Receive Separation Check Results	Получаване на резултатите от проверката на цветоотделянето
+@msg	Service check export exceeds the 64 MiB upload budget	Експортът за проверка надвишава ограничението за качване от 64 MiB
+
+# Trapping SOP intent
+	Colour Trapping Intent	Настройка на застъпването на цветовете
+@msg	Invalid No trap region	Невалидна област без застъпване
+@msg	No trap selection exceeds the object budget	Изборът без застъпване надвишава лимита за обекти

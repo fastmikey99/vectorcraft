@@ -623,6 +623,23 @@ proptest! {
     #![proptest_config(config())]
 
     #[test]
+    fn pdf_raw_image_samples_and_page_metadata_never_panic(
+        width in 0u32..12, height in 0u32..12,
+        bits in prop::sample::select(vec![0,1,2,3,4,8,16,32]),
+        space in prop::sample::select(vec!["/G", "/CMYK", "[/Indexed /DeviceGray 1 <00ff>]", "[/Indexed /DeviceGray 255 <ff>]", "/Missing"]),
+        decode in prop::sample::select(vec!["", "/D [0 1]", "/D [1 0]", "/D [-1e308 1e308]", "/D []", "/D [null 1]"]),
+        data in prop::collection::vec(any::<u8>(), 0..130),
+        media in prop::sample::select(vec!["[0 0 72 72]", "[0 0 1e308 1e308]", "[0 0 0 0]"]),
+    ) {
+        let hex:String=data.iter().map(|b| format!("{b:02x}")).collect();
+        let content=format!("BI /W {width} /H {height} /BPC {bits} /CS {space} {decode} /F /AHx ID {hex}> EI");
+        let bytes=handmade_pdf(&content,"",media);
+        // Either a bounded audit or a precise refusal is valid for generated input.
+        let outcome=catch_quiet(|| (vectorcraft_pdf::print_order(&bytes), vectorcraft_pdf::production_info(&bytes)));
+        prop_assert!(outcome.is_ok(), "raw source audit panicked");
+    }
+
+    #[test]
     fn pdf_garbage_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..600)) {
         let mut b = b"%PDF-1.7\n".to_vec();
         b.extend(bytes);

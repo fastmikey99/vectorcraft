@@ -20,11 +20,14 @@ use craft_pdf::interpret::CacheKey;
 use craft_pdf::syntax::Pdf;
 use craft_pdf::syntax::content::TypedIter;
 use craft_pdf::syntax::content::ops::TypedInstruction;
-use craft_pdf::syntax::object::{Array, Dict, FromBytes, MaybeRef, Name, Object, ObjectIdentifier, dict_or_stream};
+use craft_pdf::syntax::object::{Array, Dict, FromBytes, MaybeRef, Name, Number, Object, ObjectIdentifier, dict_or_stream};
 use craft_pdf::syntax::page::{Page, Resources};
 
-use crate::PdfError;
 use crate::import_color::ink_names;
+use crate::{
+    PdfError,
+    print_order::{PrintColorSpace, PrintPaintSource},
+};
 
 /// The interpreter's limit on nested form XObjects.
 const MAX_DEPTH: u32 = 50;
@@ -52,6 +55,8 @@ pub(crate) const MAX_NESTING: usize = 32;
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Ocg {
     pub name: String,
+    /// A missing/empty name received an editor label, not an exact PDF identity.
+    pub synthetic_name: bool,
     /// On in the file's default configuration (shown by viewers).
     pub on: bool,
     /// Printed (its print usage isn't off).
@@ -169,8 +174,9 @@ impl Ocgs {
             Some(false) => false,
             _ => !self.off.contains(&id),
         };
-        let name = if name.is_empty() { format!("Layer {}", self.list.len() + 1) } else { name };
-        self.list.push(Ocg { name, on, print, locked, parent: None });
+        let synthetic_name = name.is_empty();
+        let name = if synthetic_name { format!("Layer {}", self.list.len() + 1) } else { name };
+        self.list.push(Ocg { name, synthetic_name, on, print, locked, parent: None });
         self.index.insert(id, self.list.len() - 1);
         self.list.len() - 1
     }
@@ -226,6 +232,9 @@ pub(crate) fn text_string(b: &[u8]) -> String {
 /// One page as the interpreter walks it.
 #[derive(Default)]
 pub(crate) struct Scan {
+    /// A page/form resource scope declares a Gray substitution. Editable image
+    /// import must not relabel its converted preview as uncalibrated DeviceGray.
+    pub gray_override: bool,
     /// Each marked-content sequence: its tag ([`tag_key`]) and the group (index into
     /// [`Ocgs::list`]) it marks.
     pub tags: Vec<(u64, Option<usize>)>,
@@ -239,6 +248,8 @@ pub(crate) struct Scan {
     pub paints: Vec<bool>,
     /// Overprint mode of each path paint, parallel to paints.
     pub paint_zero: Vec<bool>,
+    /// Optional production audit; ordinary editable imports allocate no event log.
+    pub print_order: Option<crate::print_order::PageOrder>,
     /// How the text shown before each of [`Self::paints`] (since the one before it) overprints,
     /// and last the text after them all: one more entry than `paints`.
     pub texts: Vec<TextOverprint>,
@@ -375,6 +386,22 @@ struct State {
     nonzero: bool,
     /// The inks of fills and of strokes.
     inks: [Inks; 2],
+    spaces: [PrintColorSpace; 2],
+    /// Interned raw colour operands; absent means the space's initial colour.
+    colour_values: [Option<u32>; 2],
+    devicen_attributes: [bool; 2],
+    matrix: Option<vectorcraft_geom::Affine>,
+    exact_matrix: Option<[i64; 6]>,
+    interval_matrix: Option<crate::print_clip_interval::Matrix>,
+    rect_matrix: Option<crate::print_rect_clip::Matrix>,
+    rect_clip: Option<crate::print_rect_clip::Bounds>,
+    clip_context: bool,
+    form_clip: Option<[i64; 4]>,
+    form_clip_interior: Option<[i64; 4]>,
+    image_compositing_unresolved: bool,
+    rendering_intent: crate::PrintRenderingIntent,
+    rendering_intent_explicit: bool,
+    source_effects_unresolved: bool,
 }
 
 /// A marked-content tag as [`Scan::tags`] keeps it: its FNV-1a hash (the tags are only compared,
@@ -432,13 +459,27 @@ fn blank_tail(mut bytes: &[u8]) -> bool {
     }
 }
 
+// Space, named-ink dictionary, operand dictionary, attributes, stroke, overprint, OPM.
+type PrintSourceKey = (PrintColorSpace, Option<u32>, Option<u32>, bool, bool, bool, u8);
+
+/// Current path is not graphics state (ISO 32000-1 §8.5). W/W* is pending
+/// until a path-ending operator; unsupported subpaths cannot become rectangles.
+#[derive(Default)]
+struct AuditPath {
+    active: bool,
+    rect: Option<crate::print_rect_clip::Bounds>,
+    pending_clip: bool,
+}
 struct Walker<'w, 'p> {
+    path: AuditPath,
     ocgs: &'w mut Ocgs,
     /// The groups that are off for the interpreter (none once [`all_on`] turned them on).
     off: HashSet<ObjectIdentifier>,
     xref: &'p craft_pdf::syntax::xref::XRef,
     fonts: &'w mut FontNames,
     visible: Vec<bool>,
+    layers: Vec<Option<usize>>,
+    marked_floor: usize,
     ops: usize,
     max_ops: usize,
     max_form_bytes: usize,
@@ -448,6 +489,8 @@ struct Walker<'w, 'p> {
     /// The saved graphics states' overprint parameters and inks, the current one last, pushed and
     /// popped as the interpreter does its states.
     states: Vec<State>,
+    /// Explicit Q must not escape the implicit page/form save.
+    graphics_floor: usize,
     /// The text shown since the last painted path.
     text: TextOverprint,
     /// The inks of the text shown since the last painted path: of its fills, of its strokes.
@@ -456,6 +499,9 @@ struct Walker<'w, 'p> {
     ink_index: HashMap<Vec<String>, u32>,
     /// More inks or changes of ink than are kept: the page's inks are left out.
     inks_cut: bool,
+    print_sources: HashMap<PrintSourceKey, usize>,
+    colour_values: Vec<Vec<f64>>,
+    colour_index: HashMap<Vec<u64>, u32>,
 }
 
 impl Walker<'_, '_> {
@@ -466,11 +512,17 @@ impl Walker<'_, '_> {
     fn begin(&mut self, on: bool) {
         let v = self.is_visible() && on;
         self.visible.push(v);
+        if self.out.print_order.is_some() {
+            self.layers.push(self.layers.last().copied().flatten());
+        }
     }
 
     /// Enter optional content `d` (object `id`): a group, or a membership dictionary whose policy
     /// decides from its groups.
     fn begin_oc(&mut self, d: &Dict<'_>, id: Option<ObjectIdentifier>) {
+        if !d.get::<Name<'_>>(b"Type").is_some_and(|t| matches!(t.as_ref(), b"OCG" | b"OCMD")) {
+            self.order_issue("Invalid optional-content dictionary cannot establish print order");
+        }
         let membership = id.is_none() || d.get::<Name<'_>>(b"Type").is_some_and(|t| t.as_ref() == b"OCMD");
         let on = match id {
             Some(id) if !membership => !self.off.contains(&id),
@@ -490,6 +542,182 @@ impl Walker<'_, '_> {
             }
         };
         self.begin(on);
+        if self.out.print_order.is_some() {
+            let group = id.and_then(|id| self.ocgs.group_of(d, id, self.xref));
+            if membership {
+                self.order_issue("Optional-content membership print state requires verification");
+            }
+            if let Some(layer) = self.layers.last_mut() {
+                *layer = group;
+            }
+        }
+    }
+    fn order_issue(&mut self, issue: &str) {
+        if let Some(order) = &mut self.out.print_order {
+            order.issues.insert(issue.into());
+        }
+    }
+    fn unresolved_graphics_state(&mut self, reason: &str) {
+        self.order_issue(reason);
+        if let Some(s) = self.states.last_mut() {
+            s.image_compositing_unresolved = true;
+            s.source_effects_unresolved = true;
+        }
+    }
+    fn image_mark(&mut self, stream: &craft_pdf::syntax::object::Stream<'_>, res: &Resources<'_>, inline: bool) {
+        if self.out.print_order.is_none() || !self.is_visible() {
+            return;
+        }
+        if self.out.print_order.as_ref().is_some_and(|o| o.images.len() >= crate::print_image::MAX_IMAGES) {
+            self.out.cut = true;
+            return;
+        }
+        let state = self.state();
+        let description = crate::print_image::describe(stream, res, inline);
+        if let Some(order) = &mut self.out.print_order {
+            let remaining = crate::image_samples::SAMPLE_BUDGET.saturating_sub(order.sample_cost);
+            let mut budget = remaining;
+            let decoded = crate::image_samples::decode(stream, res, inline, &description, &mut budget);
+            order.sample_cost += remaining - budget;
+            let (samples, sample_error) = match decoded {
+                Ok(samples) => (Some(samples), None),
+                Err(error) => (None, Some(error)),
+            };
+            order.issues.insert("Image sample, mask and compositing coverage requires independent reconciliation".into());
+            order.issues.extend(description.issues.iter().cloned());
+            if description.optional_content {
+                order.issues.insert("Image optional-content print state requires verification".into());
+            }
+            if state.matrix.is_none() {
+                order.issues.insert("Image placement transform is unresolved".into());
+            }
+            let containing_form_clip = state.form_clip.filter(|bounds| state.exact_matrix.is_some_and(|m| crate::print_clip::contains(*bounds, m)));
+            let form_clip_interior = if containing_form_clip.is_some() {
+                None
+            } else {
+                state
+                    .form_clip_interior
+                    .filter(|bounds| state.interval_matrix.is_some_and(|m| crate::print_clip_interval::contains(*bounds, m) == Some(true)))
+            };
+            let retained_form_crop = if containing_form_clip.is_none() && form_clip_interior.is_none() {
+                state
+                    .form_clip
+                    .zip(state.exact_matrix)
+                    .filter(|(bounds, m)| bounds.iter().all(|n| n.abs() <= 1 << 20) && m[1] == 0 && m[2] == 0 && m[0] != 0 && m[3] != 0)
+            } else {
+                None
+            };
+            order.images.push(crate::PrintImageUse {
+                samples,
+                sample_error,
+                // Source sample extraction does not qualify intent-dependent output.
+                // An image override must never clear other unresolved graphics state.
+                compositing_unresolved: state.image_compositing_unresolved
+                    || description.rendering_intent.is_some()
+                    || description.mask_rendering_intent.is_some(),
+                effective_rendering_intent: description.rendering_intent.unwrap_or(state.rendering_intent),
+                rendering_intent_explicit: description.rendering_intent.is_some() || state.rendering_intent_explicit,
+                layer: self.layers.last().copied().flatten(),
+                before_path: order.layers.len(),
+                inline,
+                matrix: state.matrix.map(|m| m.as_coeffs()),
+                clip_context: state.clip_context,
+                containing_form_clip,
+                form_clip_interior,
+                retained_form_crop,
+                retained_rect_crop: if containing_form_clip.is_none() && form_clip_interior.is_none() && retained_form_crop.is_none() {
+                    state.rect_clip.zip(state.rect_matrix).and_then(|(bounds, matrix)| {
+                        let [width, height] = description.dimensions?;
+                        crate::print_rect_clip::pixels(bounds, matrix, width, height)
+                    })
+                } else {
+                    None
+                },
+                overprint: state.fill,
+                overprint_mode: u8::from(state.nonzero),
+                description,
+            });
+        }
+    }
+    fn concat(
+        &mut self,
+        matrix: [f64; 6],
+        exact: Option<[i64; 6]>,
+        interval: Option<crate::print_clip_interval::Matrix>,
+        rect: Option<crate::print_rect_clip::Matrix>,
+    ) {
+        if self.out.print_order.is_none() {
+            return;
+        }
+        if let Some(s) = self.states.last_mut() {
+            s.rect_matrix = s.rect_matrix.zip(rect).and_then(|(a, b)| crate::print_rect_clip::concat(a, b));
+            s.exact_matrix = s.exact_matrix.zip(exact).and_then(|(a, b)| crate::print_clip::concat(a, b));
+            s.interval_matrix = s.interval_matrix.zip(interval).and_then(|(a, b)| crate::print_clip_interval::concat(a, b));
+            s.matrix = s
+                .matrix
+                .map(|m| m * vectorcraft_geom::Affine::new(matrix))
+                .filter(|m| m.as_coeffs().iter().all(|v| v.is_finite() && v.abs() <= 1.0e12));
+            s.rect_matrix = s.rect_matrix.filter(|m| s.matrix.is_some_and(|actual| crate::print_rect_clip::agrees(*m, actual.as_coeffs())));
+            s.interval_matrix =
+                s.interval_matrix.filter(|m| s.matrix.is_some_and(|actual| crate::print_clip_interval::agrees(*m, actual.as_coeffs())));
+        }
+    }
+    fn order_mark(&mut self, stroke: bool) {
+        if !self.is_visible() {
+            return;
+        }
+        let state = self.state();
+        if state.source_effects_unresolved {
+            self.order_issue("Paint transfer, halftone, black generation or rendering intent requires qualification");
+        }
+        let kind = state.spaces[usize::from(stroke)];
+        let ink = state.inks[usize::from(stroke)].space;
+        let value_index = state.colour_values[usize::from(stroke)];
+        let devicen_attributes = state.devicen_attributes[usize::from(stroke)];
+        let overprint = if stroke { state.stroke } else { state.fill };
+        let overprint_mode = u8::from(state.nonzero);
+        if let Some(order) = &mut self.out.print_order {
+            let source = if let Some(&i) = self.print_sources.get(&(kind, ink, value_index, devicen_attributes, stroke, overprint, overprint_mode)) {
+                i
+            } else {
+                let names = ink.and_then(|i| self.out.inks.get(i as usize)).map(Vec::as_slice).unwrap_or_default();
+                let name_bytes = names.iter().map(String::len).sum::<usize>();
+                if order.sources.len() >= 4096
+                    || names.len() > 32
+                    || name_bytes > 64 * 1024
+                    || order.source_name_bytes.saturating_add(name_bytes) > crate::print_order::MAX_SOURCE_NAME_BYTES
+                {
+                    self.out.cut = true;
+                    return;
+                }
+                if names.iter().any(|name| matches!(name.as_str(), "All" | "None")) {
+                    order.issues.insert("Reserved All/None colourant coverage requires print-semantic reconciliation".into());
+                }
+                let i = order.sources.len();
+                let components = match value_index {
+                    Some(index) => self.colour_values.get(index as usize).cloned(),
+                    None => initial_components(kind, names.len()),
+                };
+                order.source_name_bytes += name_bytes;
+                order.sources.push(PrintPaintSource {
+                    stroke,
+                    overprint,
+                    overprint_mode,
+                    color_space: kind,
+                    colorants: names.to_vec(),
+                    components,
+                    devicen_attributes,
+                });
+                self.print_sources.insert((kind, ink, value_index, devicen_attributes, stroke, overprint, overprint_mode), i);
+                i
+            };
+            if order.layers.len() >= 50_000 {
+                self.out.cut = true;
+                return;
+            }
+            order.layers.push(self.layers.last().copied().flatten());
+            order.source_indices.push(source);
+        }
     }
 
     fn state(&self) -> State {
@@ -502,6 +730,10 @@ impl Walker<'_, '_> {
 
     /// The interpreter never pops its first state.
     fn restore(&mut self) {
+        if self.out.print_order.is_some() && self.states.len() <= self.graphics_floor {
+            self.order_issue("Unmatched graphics-state restore prevents source accounting");
+            return;
+        }
         if self.states.len() > 1 {
             self.states.pop();
         }
@@ -520,6 +752,7 @@ impl Walker<'_, '_> {
         let s = self.state();
         let on = if stroke { s.stroke } else { s.fill };
         self.overprinting(on);
+        self.order_mark(stroke);
         let k = self.out.paints.len();
         self.out.paints.push(on);
         self.out.paint_zero.push(!s.nonzero);
@@ -530,6 +763,7 @@ impl Walker<'_, '_> {
 
     /// The interpreter shows text.
     fn shown(&mut self) {
+        self.order_issue("Text rendering mode and glyph paint order require direct text census");
         if !self.is_visible() {
             return;
         }
@@ -543,17 +777,88 @@ impl Walker<'_, '_> {
         }
     }
 
-    /// The color space of fills (or of `stroke`s) is in ink `ink` from now on.
-    fn set_space(&mut self, stroke: bool, ink: Option<u32>) {
+    /// Retain bounded typed operands before editable conversion.
+    fn record_colour(&mut self, stroke: bool, values: Vec<f64>) {
+        let state = self.state();
+        let kind = state.spaces[usize::from(stroke)];
+        let names = state.inks[usize::from(stroke)].space.and_then(|i| self.out.inks.get(i as usize));
+        if component_count(kind, names.map_or(0, Vec::len)).is_some_and(|count| count != values.len()) {
+            self.order_issue("Colour component count differs from the active source colour space");
+        }
+        if values.len() > 32 || values.iter().any(|v| !v.is_finite()) {
+            self.order_issue("Colour component values exceed the finite operand budget");
+            return;
+        }
+        let key: Vec<_> = values.iter().map(|v| v.to_bits()).collect();
+        let index = if let Some(index) = self.colour_index.get(&key) {
+            *index
+        } else {
+            if self.colour_values.len() >= 4096 {
+                self.out.cut = true;
+                return;
+            }
+            let index = self.colour_values.len() as u32;
+            self.colour_index.insert(key, index);
+            self.colour_values.push(values);
+            index
+        };
+        if let Some(s) = self.states.last_mut() {
+            s.colour_values[usize::from(stroke)] = Some(index);
+        }
+    }
+
+    fn set_space(&mut self, stroke: bool, ink: Option<u32>, kind: PrintColorSpace) {
         if let Some(s) = self.states.last_mut() {
             s.inks[usize::from(stroke)].space = ink;
+            s.spaces[usize::from(stroke)] = kind;
+            s.colour_values[usize::from(stroke)] = None;
+            s.devicen_attributes[usize::from(stroke)] = false;
+        }
+    }
+
+    fn set_named_space(&mut self, stroke: bool, name: &Name<'_>, res: &Resources<'_>) {
+        let ink = self.space_ink(name, res);
+        self.set_space(stroke, ink, Self::source_space(name, res));
+        let attributes = self.out.print_order.is_some()
+            && matches!(res.get_color_space(name), Some(Object::Array(a)) if crate::print_color::has_devicen_attributes(&a));
+        if let Some(state) = self.states.last_mut() {
+            state.devicen_attributes[usize::from(stroke)] = attributes;
         }
     }
 
     /// The pattern of fills (or of `stroke`s) is in ink `ink` from now on.
     fn set_pattern(&mut self, stroke: bool, ink: Option<u32>) {
+        self.order_issue("Pattern or shading content requires nested composited paint census");
         if let Some(s) = self.states.last_mut() {
             s.inks[usize::from(stroke)].pattern = ink;
+            s.spaces[usize::from(stroke)] = PrintColorSpace::Other;
+        }
+    }
+
+    fn device_space(name: &[u8], res: &Resources<'_>) -> PrintColorSpace {
+        let (kind, fallback) = match name {
+            b"DeviceCMYK" | b"CMYK" => (PrintColorSpace::DeviceCmyk, b"DefaultCMYK".as_slice()),
+            b"DeviceGray" | b"G" => (PrintColorSpace::DeviceGray, b"DefaultGray".as_slice()),
+            b"DeviceRGB" | b"RGB" => (PrintColorSpace::DeviceRgb, b"DefaultRGB".as_slice()),
+            _ => return PrintColorSpace::Other,
+        };
+        if Name::new(fallback).and_then(|n| res.get_color_space(&n)).is_some() { PrintColorSpace::Other } else { kind }
+    }
+    fn source_space(name: &Name<'_>, res: &Resources<'_>) -> PrintColorSpace {
+        if matches!(name.as_ref(), b"DeviceCMYK" | b"CMYK" | b"DeviceGray" | b"G" | b"DeviceRGB" | b"RGB") {
+            return Self::device_space(name.as_ref(), res);
+        }
+        match res.get_color_space(name) {
+            Some(Object::Name(n)) => Self::device_space(n.as_ref(), res),
+            Some(Object::Array(a)) => {
+                let mut it = a.flex_iter();
+                match it.next::<Name<'_>>().as_deref() {
+                    Some(b"Separation") => PrintColorSpace::Separation,
+                    Some(b"DeviceN") => PrintColorSpace::DeviceN,
+                    _ => PrintColorSpace::Other,
+                }
+            }
+            _ => PrintColorSpace::Other,
         }
     }
 
@@ -583,6 +888,12 @@ impl Walker<'_, '_> {
     /// colorant names noted when new.
     fn ink_of(&mut self, o: &Object<'_>) -> Option<u32> {
         let Object::Array(a) = o else { return None };
+        if self.out.print_order.is_some()
+            && let Err(reason) = crate::print_color::validate_named_space(a)
+        {
+            self.order_issue(reason);
+            return None;
+        }
         let (_, names) = ink_names(&mut a.flex_iter())?;
         if let Some(i) = self.ink_index.get(&names) {
             return Some(*i);
@@ -598,6 +909,11 @@ impl Walker<'_, '_> {
     }
 
     fn note_fonts(&mut self, res: &Resources<'_>) {
+        let mut scope = Some(res);
+        while let Some(resources) = scope {
+            self.out.gray_override |= resources.color_spaces.contains_key(b"DefaultGray");
+            scope = resources.parent();
+        }
         for key in res.fonts.keys() {
             if let Some(f) = res.fonts.get::<Dict<'_>>(key.as_ref())
                 && let Some(name) = f.get::<Name<'_>>(b"BaseFont")
@@ -608,24 +924,52 @@ impl Walker<'_, '_> {
     }
 
     fn walk(&mut self, data: &[u8], res: &Resources<'_>, depth: u32) {
+        let outer_path = std::mem::take(&mut self.path);
         let mut iter = TypedIter::new(data);
         self.note_fonts(res);
         // The interpreter saves the state for each content stream, and restores what the stream
         // left saved when it ends.
         let saved = self.states.len();
         self.save();
-        self.walk_ops(&mut iter, res, depth);
+        let graphics_floor = self.graphics_floor;
+        self.graphics_floor = self.states.len();
+        let marked = self.layers.len();
+        let outer = self.out.print_order.is_some().then(|| (self.visible.clone(), self.layers.clone()));
+        let floor = self.marked_floor;
+        self.marked_floor = marked;
+        self.walk_ops(&mut iter, data, res, depth);
+        if self.out.print_order.is_some() && self.layers.len() != marked {
+            self.order_issue("Unbalanced form marked content cannot establish print order");
+            if let Some((visible, layers)) = outer {
+                self.layers = layers;
+                self.visible = visible;
+            }
+        }
+        self.marked_floor = floor;
+        if self.out.print_order.is_some() && self.states.len() != self.graphics_floor {
+            self.order_issue("Unbalanced form graphics state prevents source accounting");
+        }
+        self.graphics_floor = graphics_floor;
         self.out.cut |= !blank_tail(data.get(iter.committed()..).unwrap_or_default());
         self.states.truncate(saved);
+        if self.path.active || self.path.pending_clip {
+            self.order_issue("Unfinished Form path prevents complete clip accounting");
+        }
+        self.path = outer_path;
     }
 
     /// Scan the same stream windows as the interpreter without materializing the page.
     /// Graphics and optional-content state live across windows; page state is saved once.
     fn page(&mut self, page: &Page<'_>) {
         let resources = page.resources();
+        if let Some(state) = self.states.last_mut() {
+            state.spaces = [Self::device_space(b"DeviceGray", resources); 2];
+        }
         self.note_fonts(resources);
         let saved = self.states.len();
         self.save();
+        let graphics_floor = self.graphics_floor;
+        self.graphics_floor = self.states.len();
         let mut content = page.content_reader();
         let mut window = Vec::new();
         let limit = max_window();
@@ -633,7 +977,7 @@ impl Walker<'_, '_> {
         loop {
             let (committed, needs_more) = {
                 let mut ops = TypedIter::new_window(&window, exhausted);
-                self.walk_ops(&mut ops, resources, 0);
+                self.walk_ops(&mut ops, &window, resources, 0);
                 (ops.committed(), ops.needs_more())
             };
             if committed > window.len() {
@@ -664,15 +1008,70 @@ impl Walker<'_, '_> {
             }
         }
         self.out.cut |= content.truncated();
+        if self.out.print_order.is_some() && self.states.len() != self.graphics_floor {
+            self.order_issue("Unbalanced page graphics state prevents source accounting");
+        }
+        self.graphics_floor = graphics_floor;
         self.states.truncate(saved);
     }
 
-    fn walk_ops(&mut self, iter: &mut TypedIter<'_>, res: &Resources<'_>, depth: u32) {
-        while let Some(op) = iter.next() {
+    fn walk_ops(&mut self, iter: &mut TypedIter<'_>, data: &[u8], res: &Resources<'_>, depth: u32) {
+        loop {
+            let start = iter.committed();
+            let Some(op) = iter.next() else {
+                break;
+            };
+            let colour = self.out.print_order.as_ref().and_then(|_| colour_operands(&op));
+            if self.out.cut {
+                return;
+            }
             self.ops += 1;
             if self.ops > self.max_ops || self.out.tags.len() >= MAX_TAGS {
                 self.out.cut = true;
                 return;
+            }
+            let path_ending = matches!(
+                &op,
+                TypedInstruction::EndPath(_)
+                    | TypedInstruction::FillPathEvenOdd(_)
+                    | TypedInstruction::FillPathNonZero(_)
+                    | TypedInstruction::FillPathNonZeroCompatibility(_)
+                    | TypedInstruction::StrokePath(_)
+                    | TypedInstruction::CloseAndStrokePath(_)
+                    | TypedInstruction::FillAndStrokeEvenOdd(_)
+                    | TypedInstruction::FillAndStrokeNonZero(_)
+                    | TypedInstruction::CloseFillAndStrokeEvenOdd(_)
+                    | TypedInstruction::CloseFillAndStrokeNonZero(_)
+            );
+            // ISO 32000-1 §8.2: only path construction/clipping and a path-ending
+            // operator are legal inside a path object. In particular q/Q/cm cannot
+            // carry an unfinished path across graphics-state changes. Interpreters
+            // disagree on malformed sequences, so never certify their geometry.
+            let path_continuation = matches!(
+                &op,
+                TypedInstruction::RectPath(_)
+                    | TypedInstruction::MoveTo(_)
+                    | TypedInstruction::LineTo(_)
+                    | TypedInstruction::CubicTo(_)
+                    | TypedInstruction::CubicStartTo(_)
+                    | TypedInstruction::CubicEndTo(_)
+                    | TypedInstruction::ClosePath(_)
+                    | TypedInstruction::ClipNonZero(_)
+                    | TypedInstruction::ClipEvenOdd(_)
+            );
+            if (self.path.active || self.path.pending_clip) && !path_ending && (!path_continuation || self.path.pending_clip) {
+                self.order_issue("Illegal operator inside an unfinished path prevents clip accounting");
+                self.path.rect = None;
+            }
+            if matches!(&op, TypedInstruction::XObject(_) | TypedInstruction::InlineImage(_)) && (self.path.active || self.path.pending_clip) {
+                self.order_issue("Image/Form interleaved with an unfinished path prevents clip accounting");
+                if let Some(s) = self.states.last_mut() {
+                    s.clip_context = true;
+                    s.form_clip = None;
+                    s.form_clip_interior = None;
+                    s.rect_clip = None;
+                }
+                self.path.rect = None;
             }
             match op {
                 TypedInstruction::BeginMarkedContentWithProperties(bdc) => {
@@ -690,6 +1089,9 @@ impl Walker<'_, '_> {
                             self.ocgs.group_of(&d, id, self.xref)
                         }
                         None => {
+                            if bdc.0.as_ref() == b"OC" {
+                                self.order_issue("Unresolved optional-content property cannot establish print order");
+                            }
                             self.begin(true);
                             None
                         }
@@ -701,19 +1103,112 @@ impl Walker<'_, '_> {
                     self.out.tags.push((tag_key(bmc.0.as_ref()), None));
                 }
                 TypedInstruction::EndMarkedContent(_) => {
+                    if self.layers.len() <= self.marked_floor {
+                        self.order_issue("Unmatched marked-content end cannot establish print order");
+                    }
                     self.visible.pop();
+                    self.layers.pop();
+                }
+                TypedInstruction::Transform(m) => {
+                    let numbers = [m.0, m.1, m.2, m.3, m.4, m.5];
+                    let exact = crate::print_clip::content_matrix(data.get(start..iter.committed()).unwrap_or_default(), numbers);
+                    let interval = self
+                        .out
+                        .print_order
+                        .as_ref()
+                        .and_then(|_| crate::print_clip_interval::content_matrix(data.get(start..iter.committed()).unwrap_or_default(), numbers));
+                    let rect = self
+                        .out
+                        .print_order
+                        .as_ref()
+                        .and_then(|_| crate::print_rect_clip::content(data.get(start..iter.committed()).unwrap_or_default(), numbers, b"cm"));
+                    self.concat(numbers.map(|n| n.as_f64()), exact, interval, rect);
+                }
+                TypedInstruction::RectPath(r) => {
+                    let rect = self.state().rect_matrix.and_then(|m| {
+                        crate::print_rect_clip::rect(
+                            m,
+                            crate::print_rect_clip::content(data.get(start..iter.committed()).unwrap_or_default(), [r.0, r.1, r.2, r.3], b"re")?,
+                        )
+                    });
+                    self.path.rect = if self.path.active || self.path.pending_clip { None } else { rect };
+                    self.path.active = true;
+                }
+                TypedInstruction::MoveTo(_)
+                | TypedInstruction::LineTo(_)
+                | TypedInstruction::CubicTo(_)
+                | TypedInstruction::CubicStartTo(_)
+                | TypedInstruction::CubicEndTo(_)
+                | TypedInstruction::ClosePath(_) => {
+                    self.path.active = true;
+                    self.path.rect = None;
+                }
+                TypedInstruction::ClipNonZero(_) | TypedInstruction::ClipEvenOdd(_) => {
+                    if self.path.pending_clip || !self.path.active {
+                        self.path.rect = None;
+                    }
+                    self.path.pending_clip = true;
                 }
                 TypedInstruction::SaveState(_) => self.save(),
                 TypedInstruction::RestoreState(_) => self.restore(),
                 TypedInstruction::SetGraphicsState(gs) => {
-                    if let Some(d) = res.get_ext_g_state(gs.0)
+                    let dictionary = res.get_ext_g_state(gs.0);
+                    if let Some(d) = &dictionary {
+                        let invalid_flag = [b"OP".as_slice(), b"op"].iter().any(|key| d.contains_key(key) && d.get::<bool>(key).is_none());
+                        // Integer conversion truncates real PDF numbers. Compare the typed
+                        // number variants so a fractional (or real-valued) OPM is not
+                        // silently normalized into one of the two integer modes.
+                        let invalid_mode = d.contains_key(b"OPM") && d.get::<Number>(b"OPM").is_none_or(|n| n != Number::ZERO && n != Number::ONE);
+                        if invalid_flag || invalid_mode {
+                            self.unresolved_graphics_state("Malformed graphics-state overprint parameters require reconciliation");
+                        }
+                    } else {
+                        self.unresolved_graphics_state("Missing or malformed extended graphics-state resource requires reconciliation");
+                        if let Some(s) = self.states.last_mut() {
+                            // The missing dictionary could also have changed RI. An
+                            // image override can resolve RI, never the rest of the state.
+                            s.rendering_intent = crate::PrintRenderingIntent::Unresolved;
+                        }
+                    }
+                    if let Some(d) = dictionary
                         && let Some(s) = self.states.last_mut()
                     {
+                        if d.contains_key(b"RI") {
+                            s.rendering_intent = d
+                                .get::<Name<'_>>(b"RI")
+                                .map_or(crate::PrintRenderingIntent::Unresolved, |n| crate::PrintRenderingIntent::from_name(n.as_ref()));
+                            s.rendering_intent_explicit = true;
+                        }
                         let stroke = d.get::<bool>(b"OP");
                         s.stroke = stroke.unwrap_or(s.stroke);
                         // Without `/op`, `/OP` sets both.
                         s.fill = d.get::<bool>(b"op").or(stroke).unwrap_or(s.fill);
-                        s.nonzero = d.get::<u8>(b"OPM").map_or(s.nonzero, |m| m != 0);
+                        s.nonzero =
+                            d.get::<Number>(b"OPM").filter(|n| *n == Number::ZERO || *n == Number::ONE).map_or(s.nonzero, |n| n == Number::ONE);
+                        // ISO 32000-1 Table 58: Default restores the page-start
+                        // device state. It adds no effect to the predictor's existing
+                        // initial-device assumption; runtime qualification is separate.
+                        let unchanged_device_state = |key: &[u8]| {
+                            d.get::<Name<'_>>(key).is_some_and(|name| {
+                                (matches!(key, b"TR" | b"TR2") && name.as_ref() == b"Identity")
+                                    || (matches!(key, b"TR2" | b"BG2" | b"UCR2" | b"HT") && name.as_ref() == b"Default")
+                            })
+                        };
+                        s.source_effects_unresolved |= [b"TR".as_slice(), b"TR2", b"BG", b"BG2", b"UCR", b"UCR2", b"HT", b"HTP", b"RI"]
+                            .iter()
+                            .any(|key| d.contains_key(key) && !unchanged_device_state(key));
+                        s.image_compositing_unresolved |=
+                            [b"ca".as_slice(), b"CA", b"BM", b"SMask", b"TR", b"TR2", b"BG", b"BG2", b"UCR", b"UCR2", b"HT", b"HTP", b"RI", b"AIS"]
+                                .iter()
+                                .any(|key| d.contains_key(key) && !unchanged_device_state(key));
+                    }
+                }
+                TypedInstruction::RenderingIntent(intent) => {
+                    if let Some(s) = self.states.last_mut() {
+                        s.image_compositing_unresolved = true;
+                        s.source_effects_unresolved = true;
+                        s.rendering_intent = crate::PrintRenderingIntent::from_name(intent.0.as_ref());
+                        s.rendering_intent_explicit = true;
                     }
                 }
                 TypedInstruction::FillPathEvenOdd(_) | TypedInstruction::FillPathNonZero(_) | TypedInstruction::FillPathNonZeroCompatibility(_) => {
@@ -736,15 +1231,15 @@ impl Walker<'_, '_> {
                         self.set_pattern(false, ink);
                         self.painted(false);
                         self.restore();
+                    } else {
+                        self.order_issue("Missing shading resource cannot establish print completeness");
                     }
                 }
                 TypedInstruction::ColorSpaceNonStroke(cs) => {
-                    let ink = self.space_ink(cs.0, res);
-                    self.set_space(false, ink);
+                    self.set_named_space(false, cs.0, res);
                 }
                 TypedInstruction::ColorSpaceStroke(cs) => {
-                    let ink = self.space_ink(cs.0, res);
-                    self.set_space(true, ink);
+                    self.set_named_space(true, cs.0, res);
                 }
                 // A pattern by name; without one, `scn` sets a color in the space set before.
                 TypedInstruction::NonStrokeColorNamed(c) => {
@@ -759,25 +1254,44 @@ impl Walker<'_, '_> {
                         self.set_pattern(true, ink);
                     }
                 }
-                TypedInstruction::NonStrokeColorDeviceGray(_)
-                | TypedInstruction::NonStrokeColorDeviceRgb(_)
-                | TypedInstruction::NonStrokeColorCmyk(_) => {
-                    self.set_space(false, None);
-                }
-                TypedInstruction::StrokeColorDeviceGray(_) | TypedInstruction::StrokeColorDeviceRgb(_) | TypedInstruction::StrokeColorCmyk(_) => {
-                    self.set_space(true, None);
-                }
+                TypedInstruction::NonStrokeColorDeviceGray(_) => self.set_space(false, None, Self::device_space(b"DeviceGray", res)),
+                TypedInstruction::NonStrokeColorDeviceRgb(_) => self.set_space(false, None, Self::device_space(b"DeviceRGB", res)),
+                TypedInstruction::NonStrokeColorCmyk(_) => self.set_space(false, None, Self::device_space(b"DeviceCMYK", res)),
+                TypedInstruction::StrokeColorDeviceGray(_) => self.set_space(true, None, Self::device_space(b"DeviceGray", res)),
+                TypedInstruction::StrokeColorDeviceRgb(_) => self.set_space(true, None, Self::device_space(b"DeviceRGB", res)),
+                TypedInstruction::StrokeColorCmyk(_) => self.set_space(true, None, Self::device_space(b"DeviceCMYK", res)),
                 TypedInstruction::ShowText(_)
                 | TypedInstruction::ShowTexts(_)
                 | TypedInstruction::NextLineAndShowText(_)
                 | TypedInstruction::ShowTextWithParameters(_) => self.shown(),
+                TypedInstruction::InlineImage(image) => self.image_mark(image.0, res, true),
                 TypedInstruction::XObject(x) => {
                     if !self.is_visible() {
                         continue;
                     }
-                    let Some(s) = res.get_x_object(x.0) else { continue };
+                    let Some(s) = res.get_x_object(x.0) else {
+                        self.order_issue("Missing XObject cannot establish print completeness");
+                        continue;
+                    };
                     let d = s.dict();
+                    if d.get::<Name<'_>>(b"Subtype").as_deref() == Some(b"Image") {
+                        // Own image optional content is separate from the enclosing marked-content layer.
+                        // Preserve the normal import scanner's behaviour; this is raw audit evidence only.
+                        if self.out.print_order.is_some() {
+                            let oc = d.get::<Dict<'_>>(b"OC");
+                            if let Some(oc) = &oc {
+                                self.begin_oc(oc, d.get_ref(b"OC").map(ObjectIdentifier::from));
+                            }
+                            self.image_mark(&s, res, false);
+                            if oc.is_some() {
+                                self.visible.pop();
+                                self.layers.pop();
+                            }
+                        }
+                        continue;
+                    }
                     if d.get::<Name<'_>>(b"Subtype").as_deref() != Some(b"Form") || d.get::<[f32; 4]>(b"BBox").is_none() {
+                        self.order_issue("Unrecognised XObject requires direct paint census");
                         continue;
                     }
                     if depth >= MAX_DEPTH {
@@ -794,6 +1308,12 @@ impl Walker<'_, '_> {
                         self.out.cut = true;
                         return;
                     }
+                    if d.contains_key(b"OC") {
+                        // Native attribution currently follows marked content;
+                        // matching per-name counts cannot prove form-owned OC
+                        // agrees, even when all OCG names are distinct.
+                        self.order_issue("Form-owned optional content requires native attribution reconciliation");
+                    }
                     let oc = d.get::<Dict<'_>>(b"OC");
                     if let Some(oc) = &oc {
                         self.begin_oc(oc, d.get_ref(b"OC").map(ObjectIdentifier::from));
@@ -801,6 +1321,7 @@ impl Walker<'_, '_> {
                     }
                     if self.is_visible() {
                         if let Some(g) = d.get::<Dict<'_>>(b"Group") {
+                            self.order_issue("Form transparency group colour space requires compositing reconciliation");
                             if self.out.groups.len() >= MAX_GROUPS {
                                 self.out.cut = true;
                                 return;
@@ -810,6 +1331,42 @@ impl Walker<'_, '_> {
                         // (Its own resources, or without any those of what draws it: as the interpreter reads them.)
                         let inner = Resources::from_scope(d.get::<Dict<'_>>(b"Resources"), res.clone());
                         self.save();
+                        if d.contains_key(b"Matrix") {
+                            if let Some(matrix) = d.get::<[f64; 6]>(b"Matrix") {
+                                let exact = crate::print_clip::array(d, b"Matrix").and_then(crate::print_clip::integers);
+                                let interval = self.out.print_order.as_ref().and_then(|_| crate::print_clip_interval::array(d, b"Matrix"));
+                                let rect = self.out.print_order.as_ref().and_then(|_| crate::print_rect_clip::array(d, b"Matrix"));
+                                self.concat(matrix, exact, interval, rect);
+                            } else if let Some(state) = self.states.last_mut() {
+                                state.matrix = None;
+                                state.exact_matrix = None;
+                                state.interval_matrix = None;
+                                state.rect_matrix = None;
+                            }
+                        }
+                        if let Some(state) = self.states.last_mut() {
+                            let rect = state.rect_matrix.and_then(|m| crate::print_rect_clip::bbox(m, crate::print_rect_clip::array(d, b"BBox")?));
+                            state.rect_clip = if state.clip_context {
+                                state.rect_clip.zip(rect).and_then(|(a, b)| crate::print_rect_clip::intersect(a, b))
+                            } else {
+                                rect
+                            };
+                            let bounds = state.exact_matrix.and_then(|m| crate::print_clip::bbox(m, crate::print_clip::array(d, b"BBox")?));
+                            state.form_clip = if state.clip_context {
+                                state.form_clip.zip(bounds).and_then(|(a, b)| crate::print_clip::intersect(a, b))
+                            } else {
+                                bounds
+                            };
+                            let interior = state
+                                .interval_matrix
+                                .and_then(|m| crate::print_clip_interval::interior(m, crate::print_clip_interval::array(d, b"BBox")?));
+                            state.form_clip_interior = if state.clip_context {
+                                state.form_clip_interior.zip(interior).and_then(|(a, b)| crate::print_clip::intersect(a, b))
+                            } else {
+                                interior
+                            };
+                            state.clip_context = true;
+                        }
                         self.walk(data.as_ref(), &inner, depth + 1);
                         self.restore();
                         if self.out.cut {
@@ -818,12 +1375,159 @@ impl Walker<'_, '_> {
                     }
                     if oc.is_some() {
                         self.visible.pop();
+                        self.layers.pop();
                     }
                 }
                 _ => {}
             }
+            if path_ending {
+                if self.path.pending_clip
+                    && let Some(s) = self.states.last_mut()
+                {
+                    s.rect_clip = if s.clip_context {
+                        s.rect_clip.zip(self.path.rect).and_then(|(a, b)| crate::print_rect_clip::intersect(a, b))
+                    } else {
+                        self.path.rect
+                    };
+                    s.clip_context = true;
+                    s.form_clip = None;
+                    s.form_clip_interior = None;
+                }
+                self.path = AuditPath::default();
+            }
+            if let Some((operands, stroke)) = colour {
+                let gray = self.state().spaces[usize::from(stroke)] == PrintColorSpace::DeviceGray;
+                if let Err(reason) = colour_endpoints_preserved(data.get(start..iter.committed()).unwrap_or_default(), &operands, gray) {
+                    self.order_issue(reason);
+                }
+                self.record_colour(stroke, operands);
+            }
         }
     }
+}
+
+// ISO 32000-1 §8.6.8: setting CS/cs resets the colour to the space's
+// initial value. Named colourants start at 1; device spaces start at black.
+fn component_count(kind: PrintColorSpace, names: usize) -> Option<usize> {
+    match kind {
+        PrintColorSpace::DeviceGray => Some(1),
+        PrintColorSpace::DeviceRgb => Some(3),
+        PrintColorSpace::DeviceCmyk => Some(4),
+        PrintColorSpace::Separation => Some(1),
+        PrintColorSpace::DeviceN if names > 0 && names <= 32 => Some(names),
+        _ => None,
+    }
+}
+fn initial_components(kind: PrintColorSpace, names: usize) -> Option<Vec<f64>> {
+    Some(match kind {
+        PrintColorSpace::DeviceGray => vec![0.0],
+        PrintColorSpace::DeviceRgb => vec![0.0; 3],
+        PrintColorSpace::DeviceCmyk => vec![0.0, 0.0, 0.0, 1.0],
+        PrintColorSpace::Separation if names == 1 => vec![1.0],
+        PrintColorSpace::DeviceN if names > 0 && names <= 32 => vec![1.0; names],
+        _ => return None,
+    })
+}
+
+fn colour_operands(op: &TypedInstruction<'_, '_>) -> Option<(Vec<f64>, bool)> {
+    let values = match op {
+        TypedInstruction::NonStrokeColor(c) => c.0.iter().take(33).map(|n| n.as_f64()).collect(),
+        TypedInstruction::StrokeColor(c) => c.0.iter().take(33).map(|n| n.as_f64()).collect(),
+        TypedInstruction::NonStrokeColorNamed(c) => c.0.iter().take(33).map(|n| n.as_f64()).collect(),
+        TypedInstruction::StrokeColorNamed(c) => c.0.iter().take(33).map(|n| n.as_f64()).collect(),
+        TypedInstruction::NonStrokeColorDeviceGray(c) => vec![c.0.as_f64()],
+        TypedInstruction::StrokeColorDeviceGray(c) => vec![c.0.as_f64()],
+        TypedInstruction::NonStrokeColorDeviceRgb(c) => vec![c.0.as_f64(), c.1.as_f64(), c.2.as_f64()],
+        TypedInstruction::StrokeColorDeviceRgb(c) => vec![c.0.as_f64(), c.1.as_f64(), c.2.as_f64()],
+        TypedInstruction::NonStrokeColorCmyk(c) => vec![c.0.as_f64(), c.1.as_f64(), c.2.as_f64(), c.3.as_f64()],
+        TypedInstruction::StrokeColorCmyk(c) => vec![c.0.as_f64(), c.1.as_f64(), c.2.as_f64(), c.3.as_f64()],
+        _ => return None,
+    };
+    let stroke = matches!(
+        op,
+        TypedInstruction::StrokeColor(_)
+            | TypedInstruction::StrokeColorNamed(_)
+            | TypedInstruction::StrokeColorDeviceGray(_)
+            | TypedInstruction::StrokeColorDeviceRgb(_)
+            | TypedInstruction::StrokeColorCmyk(_)
+    );
+    Some((values, stroke))
+}
+
+/// Raw decimal endpoint classification is compared with the actual typed
+/// operands consumed by the interpreter, rather than another numeric parser.
+fn colour_endpoints_preserved(raw: &[u8], operands: &[f64], gray: bool) -> Result<(), &'static str> {
+    const SYNTAX: &str = "Colour operands require raw/decoded syntax reconciliation";
+    const DOMAIN: &str = "Colour operand domain is unsupported by unit-interval precision reconciliation";
+    const PRECISION: &str = "Colour component rounding changes zero/full-tone support; raw precision reconciliation required";
+    if operands.len() > 32 {
+        return Err("Colour operand count exceeds precision reconciliation budget");
+    }
+    let whitespace = |b: u8| matches!(b, 0 | 9 | 10 | 12 | 13 | 32);
+    let delimiter = |b: u8| whitespace(b) || matches!(b, b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%');
+    let mut input = raw;
+    let mut index = 0;
+    let mut issue = None;
+    while let Some(&first) = input.first() {
+        if whitespace(first) {
+            input = input.get(1..).ok_or(SYNTAX)?;
+            continue;
+        }
+        if first == b'%' {
+            let end = input.iter().position(|b| matches!(b, b'\r' | b'\n')).unwrap_or(input.len());
+            input = input.get(end..).ok_or(SYNTAX)?;
+            continue;
+        }
+        if first == b'/' {
+            input = input.get(1..).ok_or(SYNTAX)?;
+            let end = input.iter().position(|b| delimiter(*b)).unwrap_or(input.len());
+            input = input.get(end..).ok_or(SYNTAX)?;
+            continue;
+        }
+        if delimiter(first) {
+            return Err(SYNTAX);
+        }
+        let end = input.iter().position(|b| delimiter(*b)).unwrap_or(input.len());
+        let token = input.get(..end).ok_or(SYNTAX)?;
+        input = input.get(end..).ok_or(SYNTAX)?;
+        if !first.is_ascii_digit() && !matches!(first, b'+' | b'-' | b'.') {
+            continue;
+        }
+        let text = std::str::from_utf8(token).map_err(|_| SYNTAX)?;
+        let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
+        if !unsigned.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+            || !unsigned.bytes().any(|b| b.is_ascii_digit())
+            || unsigned.bytes().filter(|b| *b == b'.').count() > 1
+        {
+            return Err(SYNTAX);
+        }
+        let zero = unsigned.bytes().all(|b| b == b'0' || b == b'.');
+        let (integer, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+        let integer = integer.trim_start_matches('0');
+        let fractional_zero = fraction.bytes().all(|b| b == b'0');
+        let one = !text.starts_with('-') && integer == "1" && fractional_zero;
+        let decoded = *operands.get(index).ok_or(SYNTAX)?;
+        index += 1;
+        if (text.starts_with('-') && !zero)
+            || (!integer.is_empty() && (integer != "1" || !fractional_zero))
+            || !decoded.is_finite()
+            || !(0.0..=1.0).contains(&decoded)
+        {
+            issue.get_or_insert(DOMAIN);
+            continue;
+        }
+        let stored = decoded as f32;
+        // DeviceGray is retained as black tone: the importer performs this
+        // inversion in f32. Its endpoint loss matters as much as operand loss.
+        let inverted = 1.0_f32 - stored;
+        if (stored == 0.0) != zero || (stored == 1.0) != one || (gray && ((inverted == 0.0) != one || (inverted == 1.0) != zero)) {
+            issue.get_or_insert(PRECISION);
+        }
+    }
+    if index != operands.len() {
+        return Err(SYNTAX);
+    }
+    issue.map_or(Ok(()), Err)
 }
 
 /// The fonts of a document by cache key: base font name, and whether the file carries the glyphs
@@ -848,30 +1552,59 @@ fn embeds_glyphs(f: &Dict<'_>) -> bool {
 /// found are noted in `fonts` (their cache key → base font name, and whether the file carries its
 /// glyphs).
 pub(crate) fn scan_page(page: &Page<'_>, ocgs: &mut Ocgs, all_on: bool, fonts: &mut FontNames, max_form_bytes: usize) -> Result<Scan, PdfError> {
-    let scan = walk_page(page, ocgs, all_on, fonts, max_form_bytes).out;
+    let scan = walk_page(page, ocgs, all_on, fonts, max_form_bytes, None).out;
     if scan.cut { Err(incomplete_content()) } else { Ok(scan) }
 }
 
-fn walk_page<'w, 'p>(page: &Page<'p>, ocgs: &'w mut Ocgs, all_on: bool, fonts: &'w mut FontNames, max_form_bytes: usize) -> Walker<'w, 'p> {
+fn walk_page<'w, 'p>(
+    page: &Page<'p>,
+    ocgs: &'w mut Ocgs,
+    all_on: bool,
+    fonts: &'w mut FontNames,
+    max_form_bytes: usize,
+    sample_cost: Option<usize>,
+) -> Walker<'w, 'p> {
     let off = if all_on { HashSet::new() } else { ocgs.off.clone() };
     let mut w = Walker {
+        path: AuditPath::default(),
         ocgs,
         off,
         xref: page.xref(),
         fonts,
         visible: vec![],
+        layers: vec![],
+        marked_floor: 0,
         ops: 0,
         max_ops: max_ops(),
         max_form_bytes,
-        out: Scan::default(),
+        out: Scan {
+            print_order: sample_cost.map(|sample_cost| crate::print_order::PageOrder { sample_cost, ..Default::default() }),
+            ..Default::default()
+        },
         hidden_form: false,
-        states: vec![State::default()],
+        states: vec![State {
+            matrix: Some(vectorcraft_geom::Affine::IDENTITY),
+            exact_matrix: Some(crate::print_clip::IDENTITY),
+            interval_matrix: Some(crate::print_clip_interval::IDENTITY),
+            rect_matrix: Some(crate::print_rect_clip::IDENTITY),
+            ..Default::default()
+        }],
+        graphics_floor: 1,
         text: TextOverprint::None,
         text_inks: [RunInk::None; 2],
         ink_index: HashMap::new(),
         inks_cut: false,
+        print_sources: HashMap::new(),
+        colour_values: Vec::new(),
+        colour_index: HashMap::new(),
     };
     w.page(page);
+    if w.path.active || w.path.pending_clip {
+        w.order_issue("Unfinished page path prevents complete clip accounting");
+    }
+    if !w.layers.is_empty() {
+        w.order_issue("Unbalanced marked content cannot establish print order");
+    }
     w.inks_cut |= !w.out.text_inks.set(w.out.paints.len(), w.text_inks.map(RunInk::ink));
     if w.inks_cut {
         w.out.inks.clear();
@@ -884,7 +1617,7 @@ fn walk_page<'w, 'p>(page: &Page<'p>, ocgs: &'w mut Ocgs, all_on: bool, fonts: &
 /// sequence)? Its art couldn't be told apart by group once every group is on.
 pub(crate) fn hides_forms(page: &Page<'_>, ocgs: &mut Ocgs, max_form_bytes: usize) -> Result<bool, PdfError> {
     let mut fonts = HashMap::new();
-    let walk = walk_page(page, ocgs, false, &mut fonts, max_form_bytes);
+    let walk = walk_page(page, ocgs, false, &mut fonts, max_form_bytes, None);
     if walk.out.cut { Err(incomplete_content()) } else { Ok(walk.hidden_form) }
 }
 
@@ -929,4 +1662,75 @@ fn trailer_at(bytes: &[u8], at: usize) -> Option<&[u8]> {
     let open = from + rest.get(from..)?.windows(2).position(|w| w == b"<<")?;
     let d = Dict::from_bytes(rest.get(open..)?)?;
     Some(d.data())
+}
+
+/// Actual content-stream ordering, before editable layer aggregation.
+pub(crate) fn scan_print_order(
+    page: &Page<'_>,
+    ocgs: &mut Ocgs,
+    max_form_bytes: usize,
+    sample_cost: usize,
+) -> Result<crate::print_order::PageOrder, PdfError> {
+    let mut fonts = HashMap::new();
+    let scan = walk_page(page, ocgs, true, &mut fonts, max_form_bytes, Some(sample_cost)).out;
+    if scan.cut {
+        return Err(incomplete_content());
+    }
+    scan.print_order.ok_or_else(incomplete_content)
+}
+
+#[cfg(test)]
+mod colour_precision_tests {
+    use super::{TypedIter, colour_endpoints_preserved, colour_operands};
+    fn check(raw: &str, gray: bool) -> Result<(), &'static str> {
+        let mut iter = TypedIter::new(raw.as_bytes());
+        let op = iter.next().ok_or("Colour operands require raw/decoded syntax reconciliation")?;
+        let (operands, _) = colour_operands(&op).ok_or("Colour operands require raw/decoded syntax reconciliation")?;
+        colour_endpoints_preserved(raw.as_bytes(), &operands, gray)
+    }
+    #[test]
+    fn literal_colour_endpoints_use_the_actual_typed_operands() {
+        for raw in [
+            "0 .5 1 .25 k",
+            "+1 -0 0 0 k",
+            "1% ignored 0.999999999\r\n 0 0 0 k",
+            "0.000000000000000000000000000001 0 0 0 k",
+            "0\0.5 1 rg",
+            "0.0000 01.000 0 0 k",
+            ".5/123 scn",
+        ] {
+            assert!(check(raw, false).is_ok(), "{raw}");
+        }
+        for raw in [
+            "0.999999999 g".to_string(),
+            format!("0.{}1 0 0 0 k", "0".repeat(49)),
+            format!("0.{}1 scn", "0".repeat(400)),
+            "0.999999999999999999999999999999 scn".into(),
+            ". g".into(),
+            "1-5 g".into(),
+            "0.5 1 0 0 0 k".into(),
+        ] {
+            assert!(check(&raw, false).is_err(), "{raw}");
+        }
+        // The raw midpoint literal is interior; use both actual possible typed
+        // f64 neighbours to prove that classification follows the decoder value.
+        let midpoint = 1.0_f64 - 2.0_f64.powi(-25);
+        let below = f64::from_bits(midpoint.to_bits() - 1);
+        let raw = b"0.9999999701976776123046875 g";
+        assert!(colour_endpoints_preserved(raw, &[midpoint], false).is_err());
+        assert!(colour_endpoints_preserved(raw, &[below], false).is_ok());
+    }
+    #[test]
+    fn gray_inversion_and_unsupported_domains_have_explicit_refusals() {
+        for raw in ["0.00000001 g", "0.00000001 G", "0.00000001 sc", "0.00000001 SCN", "0.999999999 g"] {
+            assert!(check(raw, true).unwrap_err().contains("rounding"), "{raw}");
+        }
+        for raw in ["1. g", "+1 g", "-0 g", ".5 g", "0 G"] {
+            assert!(check(raw, true).is_ok(), "{raw}");
+        }
+        for raw in ["1.5 0 0 0 k", "-0.5 g", "1.000000000000000000000000000001 g"] {
+            assert!(check(raw, false).unwrap_err().contains("domain"), "{raw}");
+        }
+        assert!(check("0.5 1 0 0 0 k", false).unwrap_err().contains("syntax"));
+    }
 }

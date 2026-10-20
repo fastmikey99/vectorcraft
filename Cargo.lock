@@ -809,7 +809,7 @@ dependencies = [
 [[package]]
 name = "craft-pdf"
 version = "0.1.0"
-source = "git+https://github.com/fastmikey99/craft-libs?rev=6f322f53d6f73c937b4347a146e911f037d16752#6f322f53d6f73c937b4347a146e911f037d16752"
+source = "git+https://github.com/fastmikey99/craft-libs?rev=5ad940e93f8fcaa003f5ae1cf71118669eaf6bd0#5ad940e93f8fcaa003f5ae1cf71118669eaf6bd0"
 dependencies = [
  "hayro-interpret",
  "hayro-syntax",
@@ -1777,7 +1777,7 @@ dependencies = [
 [[package]]
 name = "hayro-interpret"
 version = "0.7.0"
-source = "git+https://github.com/fastmikey99/craft-libs?rev=6f322f53d6f73c937b4347a146e911f037d16752#6f322f53d6f73c937b4347a146e911f037d16752"
+source = "git+https://github.com/fastmikey99/craft-libs?rev=5ad940e93f8fcaa003f5ae1cf71118669eaf6bd0#5ad940e93f8fcaa003f5ae1cf71118669eaf6bd0"
 dependencies = [
  "bitflags 2.13.2",
  "hayro-cmap",
@@ -1795,7 +1795,7 @@ dependencies = [
 [[package]]
 name = "hayro-jbig2"
 version = "0.3.0"
-source = "git+https://github.com/fastmikey99/craft-libs?rev=6f322f53d6f73c937b4347a146e911f037d16752#6f322f53d6f73c937b4347a146e911f037d16752"
+source = "git+https://github.com/fastmikey99/craft-libs?rev=5ad940e93f8fcaa003f5ae1cf71118669eaf6bd0#5ad940e93f8fcaa003f5ae1cf71118669eaf6bd0"
 dependencies = [
  "fearless_simd",
  "hayro-ccitt",
@@ -1819,7 +1819,7 @@ checksum = "885c5ef0654933139a9b9546fc2c69e18d37f38aa2520f079092b1be18f1fcaa"
 [[package]]
 name = "hayro-syntax"
 version = "0.7.2"
-source = "git+https://github.com/fastmikey99/craft-libs?rev=6f322f53d6f73c937b4347a146e911f037d16752#6f322f53d6f73c937b4347a146e911f037d16752"
+source = "git+https://github.com/fastmikey99/craft-libs?rev=5ad940e93f8fcaa003f5ae1cf71118669eaf6bd0#5ad940e93f8fcaa003f5ae1cf71118669eaf6bd0"
 dependencies = [
  "flate2",
  "hayro-ccitt",
@@ -2219,7 +2219,7 @@ dependencies = [
 [[package]]
 name = "krilla"
 version = "0.8.2"
-source = "git+https://github.com/fastmikey99/craft-libs?rev=6f322f53d6f73c937b4347a146e911f037d16752#6f322f53d6f73c937b4347a146e911f037d16752"
+source = "git+https://github.com/fastmikey99/craft-libs?rev=5ad940e93f8fcaa003f5ae1cf71118669eaf6bd0#5ad940e93f8fcaa003f5ae1cf71118669eaf6bd0"
 dependencies = [
  "base64 0.22.1",
  "bumpalo",
@@ -4580,6 +4580,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "vectorcraft-checks"
+version = "0.12.0"
+dependencies = [
+ "image",
+ "rustix 1.1.5",
+ "serde",
+ "serde_json",
+ "sha2",
+ "vectorcraft-color",
+ "vectorcraft-doc",
+ "vectorcraft-effects",
+ "vectorcraft-geom",
+ "vectorcraft-pathops",
+ "vectorcraft-pdf",
+]
+
+[[package]]
 name = "vectorcraft-cli"
 version = "0.12.0"
 dependencies = [
@@ -4664,6 +4681,7 @@ dependencies = [
  "vectorcraft-affinity",
  "vectorcraft-brush",
  "vectorcraft-cad",
+ "vectorcraft-checks",
  "vectorcraft-color",
  "vectorcraft-doc",
  "vectorcraft-eps",
@@ -4996,6 +5014,7 @@ dependencies = [
  "log",
  "rfd",
  "serde_json",
+ "vectorcraft-checks",
  "vectorcraft-color",
  "vectorcraft-doc",
  "vectorcraft-engine",

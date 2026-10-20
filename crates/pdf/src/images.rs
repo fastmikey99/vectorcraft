@@ -92,6 +92,70 @@ fn lossless(samples: Vec<u8>, space: ImageColorspace, width: u32, height: u32, i
     Image::from_custom(Raw { color: Arc::new(samples), alpha: None, width, height, space }, interpolate).ok()
 }
 
+/// Lower a plain, exactly aligned CMYK/Gray image pair to one image-owned alpha mask.
+/// The caller excludes output conversion, resampling and enclosing compositing. Editable
+/// mask art is left intact. Unsupported mask art keeps the ordinary luminosity-group path.
+pub(crate) fn masked_cmyk(doc: &vectorcraft_doc::Document, node: &vectorcraft_doc::Node) -> Option<Image> {
+    use vectorcraft_color::BlendMode;
+    use vectorcraft_doc::{Knockout, NodeKind};
+    let plain = |n: &vectorcraft_doc::Node| {
+        n.visible
+            && n.opacity == 1.0
+            && n.blend == BlendMode::Normal
+            && !n.isolate
+            && n.knockout == Knockout::Neutral
+            && !n.knockout_shape
+            && n.appearance.items.is_empty()
+            && n.appearance.effects.is_empty()
+            && n.appearance.contents_index.is_none()
+    };
+    let NodeKind::Image(im) = &node.kind else { return None };
+    let mask = node.extras().mask.as_deref()?;
+    let NodeKind::Image(mi) = &mask.art.kind else { return None };
+    if !plain(node)
+        || !plain(&mask.art)
+        || mask.disabled
+        || !mask.clip
+        || mask.invert
+        || mask.art.extras().mask.is_some()
+        || im.width == 0
+        || im.height == 0
+        || (im.width, im.height) != (mi.width, mi.height)
+        || im.xf != mi.xf
+        || im.xf.as_coeffs().iter().any(|v| !v.is_finite())
+        || !im.xf.determinant().is_finite()
+        || im.xf.determinant() == 0.0
+        || u64::from(im.width) * u64::from(im.height) > vectorcraft_doc::cmyk::MAX_CMYK_PIXELS
+    {
+        return None;
+    }
+    let colour = doc.images.get(&im.key)?;
+    let grey = doc.images.get(&mi.key)?;
+    // JPEG preservation and colour conversion have separate policies; don't silently replace
+    // either with a decoded lossless image. Only the importer's opaque grayscale PNG is used.
+    if colour.mime != "image/tiff" || colour.source_jpeg.is_some() || grey.mime != "image/png" || grey.source_jpeg.is_some() {
+        return None;
+    }
+    let mut decoder = image::codecs::png::PngDecoder::new(Cursor::new(grey.bytes.as_slice())).ok()?;
+    let dimensions = decoder.dimensions();
+    if dimensions != (im.width, im.height)
+        || decoder.color_type() != image::ColorType::L8
+        || decoder.icc_profile().ok()?.is_some()
+        || decoder.gamma_value().ok()?.is_some()
+    {
+        return None;
+    }
+    let DynamicImage::ImageLuma8(alpha) = DynamicImage::from_decoder(decoder).ok()? else { return None };
+    let inks = colour.cmyk()?;
+    if (inks.width, inks.height) != dimensions || alpha.dimensions() != dimensions {
+        return None;
+    }
+    let raw =
+        Raw { color: Arc::new(inks.data), alpha: Some(Arc::new(alpha.into_raw())), width: im.width, height: im.height, space: ImageColorspace::Cmyk };
+    // CustomImage's hash includes both channels; no shared image-key cache can alias masks.
+    Image::from_custom(raw, false).ok()
+}
+
 /// [`from_rgba`] of pixels converted by `pixels` (when given).
 pub(crate) fn from_rgba_in(mut rgba: Vec<u8>, width: u32, height: u32, interpolate: bool, pixels: Option<&Pixels>) -> Option<Image> {
     if let Some(p) = pixels {

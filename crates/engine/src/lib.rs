@@ -268,6 +268,7 @@ pub struct UndoGroup {
 pub struct DocState {
     /// Host-supplied production names and preview-only component visibility.
     pub production_separations: cmd::production_separations::State,
+    pub production_checks: cmd::production_checks::State,
     pub doc: Arc<Document>,
     pub selection: Selection,
     pub history: History,
@@ -483,6 +484,7 @@ impl DocState {
             import_losses: vec![],
             last_perspective: None,
             production_separations: Default::default(),
+            production_checks: Default::default(),
         }
     }
     /// Unsaved changes: the document differs from the saved one (selection changes don't count).

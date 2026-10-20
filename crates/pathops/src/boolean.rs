@@ -657,6 +657,23 @@ pub fn try_boolean(a: &PathData, a_rule: FillRule, b: &PathData, b_rule: FillRul
     Ok(all_contours_to_path(&c, &tidy))
 }
 
+/// Numerical sweep resolution used by measurement Booleans. This is not a
+/// certified topology or Hausdorff enclosure of the resulting arrangement.
+pub fn measurement_boolean_epsilon(a: &PathData, b: &PathData) -> Result<f64, PathOpsError> {
+    eps_for([&fill_bezpath(a), &fill_bezpath(b)])
+}
+
+/// Measurement variant: retain every sweep contour without curve refitting or sliver removal.
+/// Numerical topology resolution is still bounded by `eps_for`; callers must propagate it.
+pub fn try_boolean_for_measurement(a: &PathData, a_rule: FillRule, b: &PathData, b_rule: FillRule, op: BoolOp) -> Result<PathData, PathOpsError> {
+    let arr = Arrangement::new(vec![(fill_bezpath(a), a_rule), (fill_bezpath(b), b_rule)])?;
+    let contours = arr.contours(|m| op.apply(m[0], m[1]));
+    Ok(raw_contours_to_path(&contours, (0..contours.contours().count()).map(ContourIdx)))
+}
+pub(crate) fn raw_contours_to_path(c: &Contours, indices: impl IntoIterator<Item = ContourIdx>) -> PathData {
+    PathData::new(indices.into_iter().flat_map(|i| PathData::from_bezpath(&c[i].path).subpaths).collect())
+}
+
 /// N-ary boolean: the area where `pred(inside_flags)` holds, `inside_flags[i]` telling whether a
 /// point is inside `paths[i]` under its fill rule.
 pub fn boolean_n(paths: &[(&PathData, FillRule)], pred: impl Fn(&[bool]) -> bool) -> PathData {

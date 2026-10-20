@@ -4125,3 +4125,21 @@ lighting	Light	光源
 	Unassigned	未分配
 @msg	Invalid separation context or too many entries	分色信息无效或条目过多
 @msg	Invalid or duplicate separation name/component	分色名称或组成部分无效或重复
+
+# Hybrid separation checks
+	Checks	检查
+	Configure Separation Checks	配置分色检查
+	Check Separations	检查分色
+	Cancel Separation Checks	取消分色检查
+	Separation Check Results	分色检查结果
+	Inspect Separation Finding	查看分色检查发现
+@msg	Check cancelled	检查已取消
+@msg	Check worker state unavailable	检查工作进程状态不可用
+@msg	Internal checker failure: {e}	检查器内部错误：{e}
+	Receive Separation Check Results	接收分色检查结果
+@msg	Service check export exceeds the 64 MiB upload budget	用于检查的导出文件超过 64 MiB 上传限制
+
+# Trapping SOP intent
+	Colour Trapping Intent	颜色陷印设置
+@msg	Invalid No trap region	无陷印区域无效
+@msg	No trap selection exceeds the object budget	无陷印选择超出对象数量限制

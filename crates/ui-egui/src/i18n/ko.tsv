@@ -4559,3 +4559,22 @@ lighting	Light	광원
 	Unassigned	할당되지 않음
 @msg	Invalid separation context or too many entries	잘못된 분판 정보이거나 항목이 너무 많습니다
 @msg	Invalid or duplicate separation name/component	분판 이름 또는 구성 요소가 잘못되었거나 중복됩니다
+
+# Hybrid separation checks
+	Checks	검사
+	Configure Separation Checks	색 분판 검사 설정
+	Check Separations	색 분판 검사
+	Cancel Separation Checks	색 분판 검사 취소
+	Separation Check Results	색 분판 검사 결과
+	Inspect Separation Finding	색 분판 발견 사항 확인
+@msg	Check cancelled	검사가 취소되었습니다
+@msg	Check worker state unavailable	검사 작업 상태를 사용할 수 없습니다
+@msg	Internal checker failure: {e}	검사 내부 오류: {e}
+	Receive Separation Check Results	색 분판 검사 결과 받기
+@msg	Service check export exceeds the 64 MiB upload budget	검사용 내보내기가 64 MiB 업로드 한도를 초과합니다
+@msg	Colour operand count exceeds precision reconciliation budget	색상 피연산자 수가 정밀도 검증 한도를 초과합니다
+
+# Trapping SOP intent
+	Colour Trapping Intent	색상 트래핑 지정
+@msg	Invalid No trap region	트래핑 제외 영역이 잘못되었습니다
+@msg	No trap selection exceeds the object budget	트래핑 제외 선택이 개체 수 제한을 초과합니다

@@ -4595,3 +4595,22 @@ lighting	Light	Luce
 	Unassigned	Non assegnato
 @msg	Invalid separation context or too many entries	Contesto di separazione non valido o troppe voci
 @msg	Invalid or duplicate separation name/component	Nome della separazione o componente non valido o duplicato
+
+# Hybrid separation checks
+	Checks	Controlli
+	Configure Separation Checks	Configura controlli delle separazioni
+	Check Separations	Controlla separazioni
+	Cancel Separation Checks	Annulla controlli delle separazioni
+	Separation Check Results	Risultati del controllo delle separazioni
+	Inspect Separation Finding	Esamina rilievo della separazione
+@msg	Check cancelled	Controllo annullato
+@msg	Check worker state unavailable	Stato del processo di controllo non disponibile
+@msg	Internal checker failure: {e}	Errore interno del controllo: {e}
+	Receive Separation Check Results	Ricevi i risultati del controllo delle separazioni
+@msg	Service check export exceeds the 64 MiB upload budget	L’esportazione per il controllo supera il limite di caricamento di 64 MiB
+@msg	Colour operand count exceeds precision reconciliation budget	Il numero di operandi di colore supera il limite di verifica della precisione
+
+# Trapping SOP intent
+	Colour Trapping Intent	Impostazione del trapping dei colori
+@msg	Invalid No trap region	Area senza trapping non valida
+@msg	No trap selection exceeds the object budget	La selezione senza trapping supera il limite di oggetti

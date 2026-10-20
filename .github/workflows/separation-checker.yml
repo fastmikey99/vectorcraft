@@ -1,0 +1,60 @@
+name: Separation checker worker
+on:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - ".github/workflows/separation-checker.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f
+        with:
+          toolchain: 1.97.1
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: separation-checker-musl
+      - name: Install static C linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y musl-tools
+      - name: Test the worker on its deployment target
+        run: cargo test --locked -p vectorcraft-checks --target x86_64-unknown-linux-musl
+      - name: Build static worker
+        run: cargo build --locked --release -p vectorcraft-checks --bin sep-check --target x86_64-unknown-linux-musl
+      - name: Record executable identity
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, shutil, subprocess
+          output = pathlib.Path('checker-artifact')
+          output.mkdir()
+          binary = output / 'sep-check'
+          shutil.copy2('target/x86_64-unknown-linux-musl/release/sep-check', binary)
+          headers = subprocess.check_output(['readelf', '--program-headers', str(binary)], text=True, timeout=10)
+          if 'INTERP' in headers:
+              raise SystemExit('Worker unexpectedly requires a dynamic ELF loader')
+          version = subprocess.check_output([str(binary.resolve()), '--version'], text=True, timeout=10).strip()
+          sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
+          manifest = {'sha256': sha256, 'version': version, 'commit': os.environ['GITHUB_SHA'],
+                      'target': 'x86_64-unknown-linux-musl', 'rust': '1.97.1',
+                      'cargo_lock_sha256': hashlib.sha256(pathlib.Path('Cargo.lock').read_bytes()).hexdigest()}
+          (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          (output / 'SHA256SUMS').write_text(f'{sha256}  sep-check\n')
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: separation-checker-linux-x86_64-${{ github.sha }}
+          path: checker-artifact/
+          if-no-files-found: error
+          retention-days: 30

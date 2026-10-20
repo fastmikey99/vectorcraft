@@ -43,9 +43,9 @@ fn params<'a>(dict: &Dict<'a>) -> Vec<Dict<'a>> {
     all
 }
 
-/// Would the reader's predictor fail on `params`? It reads `Colors` and `BitsPerComponent` as
-/// bytes and `Columns` as a size, multiplies the first two as bytes, divides by the length of a row
-/// and allocates one before it checks anything.
+/// Conservative predictor preflight. The reader takes `Colors` and `BitsPerComponent` as
+/// bytes and `Columns` as a size. Its current row arithmetic uses `usize`; the historical
+/// 255-bit pixel bound below remains a local support limit, not a PDF or decoder limit.
 fn bad_predictor(params: &Dict<'_>) -> bool {
     if params.get::<u8>(b"Predictor").unwrap_or(1) == 1 {
         return false;
