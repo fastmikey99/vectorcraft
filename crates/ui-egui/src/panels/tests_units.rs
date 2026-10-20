@@ -174,3 +174,18 @@ fn other_rulers_keep_their_ticks_and_labels() {
     assert_eq!([len(50.0), len(12.5), len(2.5)], [16.0, 7.0, 4.0]);
     assert_eq!(unit_ruler_label(Unit::Millimeters, 2.5, 0.5), ruler_label(2.5, 0.5));
 }
+
+#[test]
+fn an_inch_field_hints_its_length_in_millimetres() {
+    use crate::widgets::mm_hint;
+    assert_eq!(mm_hint(Unit::Inches, Some(72.0)).as_deref(), Some("25.4 mm"));
+    assert_eq!(mm_hint(Unit::Inches, Some(9.0)).as_deref(), Some("3.175 mm"), "an eighth of an inch");
+    assert_eq!(mm_hint(Unit::Inches, None), None, "a mixed selection shows no value");
+    assert_eq!(mm_hint(Unit::Inches, Some(f64::NAN)), None);
+    for u in Unit::ALL.into_iter().filter(|u| *u != Unit::Inches) {
+        assert_eq!(mm_hint(u, Some(72.0)), None, "{u:?} fields need no hint");
+    }
+    // The hint reads back as the same length.
+    let hint = mm_hint(Unit::Inches, Some(123.45)).unwrap();
+    assert!((Unit::Inches.parse(&hint).unwrap() - 123.45).abs() < 1e-3, "{hint}");
+}

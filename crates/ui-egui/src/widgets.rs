@@ -230,6 +230,12 @@ fn unit_field(
     take_dialog_focus(ui, id, &shown);
     let (mut buf, commit, resp, rect) = recessed_text(ui, id, &shown, width, 1);
     select_all_on_focus(ui, &resp, &buf);
+    // A length in inches also shows in millimetres on hover ([`mm_hint`]), never in the field's
+    // text: the field is narrow, and its text must read back in its own unit.
+    let resp = match mm_hint(unit, value) {
+        Some(hint) => resp.on_hover_text(hint),
+        None => resp,
+    };
     // ↑/↓ and the wheel step in the field's unit; a drag on its label scrubs it.
     let read = typed_unit(ui.ctx(), unit);
     let stepped = step_value(ui, &resp, &mut buf, |b| Some(unit.from_pt(read.parse(b)?)), |v| unit.format(unit.to_pt(v)));
@@ -241,6 +247,13 @@ fn unit_field(
     } else {
         stepped.or(scrubbed).map(|v| unit.to_pt(v))
     }
+}
+
+/// The hover hint of a length field in `unit` showing `value` (points): the same length in
+/// millimetres (`25.4 mm`) when the field is in inches, for people who think in millimetres
+/// reading a job in inches. Just the number and its unit, so nothing to translate.
+pub(crate) fn mm_hint(unit: Unit, value: Option<f64>) -> Option<String> {
+    (unit == Unit::Inches).then_some(value).flatten().filter(|v| v.is_finite()).map(|v| Unit::Millimeters.format(v))
 }
 
 /// A percentage typed alone (`50%`, `150 %`, `100/3%`) as that share of `value`; `None` for any
