@@ -5228,3 +5228,13 @@ imageTrace	Outline	Körvonal
 	Unassigned	Nincs hozzárendelve
 @msg	Invalid separation context or too many entries	Érvénytelen színkivonati környezet vagy túl sok bejegyzés
 @msg	Invalid or duplicate separation name/component	Érvénytelen vagy ismétlődő színkivonatnév vagy összetevő
+	Remove Soft Pixels	Lágy képpontok eltávolítása
+@msg	select one image to remove its soft pixels	jelöljön ki egy képet a lágy képpontjai eltávolításához
+@msg	the image is linked: embed it to remove its soft pixels	a kép csatolt: ágyazza be a lágy képpontjai eltávolításához
+@msg	the image's opacity mask isn't one greyscale image	a kép átlátszósági maszkja nem egyetlen szürkeárnyalatos kép
+@msg	the image has no transparency: nothing to remove	a képnek nincs átlátszósága: nincs mit eltávolítani
+@msg	the image's pixels couldn't be written	a kép képpontjait nem sikerült kiírni
+@msg	removing soft pixels failed its check: nothing was changed	a lágy képpontok eltávolítása nem ment át az ellenőrzésen: semmi sem változott
+@msg	the image has its own transparency and an opacity mask: release the mask first	a képnek saját átlátszósága és átlátszósági maszkja is van: előbb engedje fel a maszkot
+@msg	level must be a whole number from 1 to 255	a level értéke 1 és 255 közötti egész szám kell legyen
+@msg	copies must be true or false	a copies értéke true vagy false kell legyen

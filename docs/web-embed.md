@@ -40,6 +40,8 @@ Every message is a plain object with a string `type`. VectorCraft posts only to 
 | `vectorcraft:export` | from the parent | `id` (any), `format` (string, optional), `markSaved` (boolean, optional), `selectedOnly` (boolean, optional), `imageOnly` (boolean, optional), `preserveEditing` (boolean, optional, PDF only) | Write the active document (or only the selection) as `format` (PDF without it) and send it back. |
 | `vectorcraft:place` | from the parent | `id` (any), `name` (string), `bytes` (`ArrayBuffer` or `Uint8Array`), `at` (`{x, y, width, height}`, optional) | Put this file in place of the selected object, fitted inside `at`. |
 | `vectorcraft:placed` | to the parent | `id`, `ids` (numbers) | The place with this `id` is done. |
+| `vectorcraft:solidify` | from the parent | `id` (any), `level` (whole number 1–255, optional, 128), `copies` (boolean, optional) | Remove Soft Pixels on the one selected image: every pixel fully opaque or fully clear. |
+| `vectorcraft:solidified` | to the parent | `id`, `ids` (numbers), `form` (`"alpha"` or `"mask"`), `level`, `softPixels`, `clearPixels`, `opaquePixels` (numbers) | The solidify with this `id` is done. |
 | `vectorcraft:save` | to the parent | `name` (string), `bytes` (`ArrayBuffer`, transferred), `id` (when it answers an export), `bounds` (with `selectedOnly`), `native` (`true` when the bytes are an image's own pixels) | Store this file. |
 | `vectorcraft:prefs` | both ways | `prefs` (string: JSON text) | From the editor: its preferences and workspace changed; store them. From the parent: put these on. |
 | `vectorcraft:dirty` | to the parent | `dirty` (boolean) | Unsaved changes appeared (`true`) or went away (`false`). |
@@ -105,6 +107,15 @@ placement regressions, plus Reporter's editor message tests.
 - It is one undo step: Undo brings back what it replaced. What it placed is selected.
 - The answer is `vectorcraft:placed` with the same `id` and the placed objects' `ids`, or `vectorcraft:failed` with the `error` and the `id`.
 
+**`vectorcraft:solidify`** removes the soft pixels of the one selected image in the editor, without sending its pixels anywhere (`object.image.solidifyAlpha`). `ready` says `solidify: true`; a page talking to an editor that doesn't say so keeps its own fallback.
+
+- Every alpha at or above `level` (1–255 on the 8-bit scale; 16-bit alpha is cut at `level × 257`) becomes fully opaque, every one below it fully clear. Colour samples are copied as they are (never through premultiplied colour), so soft pixels keep their exact colour values, and the pixel grid doesn't change.
+- It works on the image's own stored samples: its alpha channel (a PNG, RGBA or grey + alpha, 8 or 16 bits, keeping its colour type, depth and colour/resolution chunks; a WebP or GIF becomes a PNG), or, when the image has an opacity mask that is one greyscale image (a CMYK image read from a PDF with a soft mask), that mask's image; the CMYK samples are then untouched. `form` says which (`"alpha"` or `"mask"`).
+- The result is decoded again and checked before it is kept: every alpha is 0 or full and equals the thresholded source at every pixel, every colour sample is unchanged. If not, nothing changes and the answer is `vectorcraft:failed`.
+- With `copies: true` every other image showing the same pixels and transparency at the same printed size (the `copies` `vectorcraft:selection` counts) gets the same result; copies at other sizes keep theirs. Either way it is one undo step.
+- `ids` are the images changed. They are empty, with no undo step, when no pixel was soft (`softPixels: 0`).
+- Refused with `vectorcraft:failed` (the `error` and the `id`): nothing or several objects selected, the selection isn't an image, a linked image, an image with no transparency (`the image has no transparency: nothing to remove`), an opacity mask that isn't one greyscale image, or an image with both its own alpha and a mask. `level` that isn't a whole number from 1 to 255, or `copies` that isn't a boolean, are refused before anything runs.
+
 Together they make a "trace this image" button: export the selected image with `selectedOnly`, send the pixels to a tracing service, and place its SVG back (with no `at`) while the image is still selected.
 
 **`vectorcraft:prefs`** lets the page keep the editor's preferences and workspace (units, the panel layout, workspaces, recent fonts…) for each person rather than each browser:
@@ -125,7 +136,7 @@ The bridge reads a message only when all of these hold:
 
 1. it comes from `window.parent` (`event.source`), not from another window or frame on the site;
 2. its origin (`event.origin`) is exactly the page's own: same scheme, host and port;
-3. its `type` is `vectorcraft:open`, `vectorcraft:export` or `vectorcraft:place`.
+3. its `type` is `vectorcraft:open`, `vectorcraft:export`, `vectorcraft:place`, `vectorcraft:solidify`, `vectorcraft:prefs` or `vectorcraft:hello`.
 
 Anything else is ignored without a reply, so a page on another origin can neither open files in VectorCraft nor learn that it is there. Saves and other replies go only to `window.parent`, with the page's own origin as the target, so the browser delivers them to no other site. A same-origin parent can already script the frame directly, so the bridge gives it nothing it couldn't otherwise do; it only spares it reaching into the app's internals.
 

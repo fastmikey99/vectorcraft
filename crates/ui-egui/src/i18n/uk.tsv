@@ -4836,3 +4836,13 @@ lighting	Light	Світло
 	Unassigned	Не призначено
 @msg	Invalid separation context or too many entries	Недійсний контекст кольороподілу або забагато записів
 @msg	Invalid or duplicate separation name/component	Недійсна чи повторювана назва кольороподілу або компонент
+	Remove Soft Pixels	Вилучити м’які пікселі
+@msg	select one image to remove its soft pixels	виділіть одне зображення, щоб вилучити його м’які пікселі
+@msg	the image is linked: embed it to remove its soft pixels	зображення пов’язане: вбудуйте його, щоб вилучити його м’які пікселі
+@msg	the image's opacity mask isn't one greyscale image	маска непрозорості зображення не є одним зображенням у відтінках сірого
+@msg	the image has no transparency: nothing to remove	зображення не має прозорості: нічого вилучати
+@msg	the image's pixels couldn't be written	не вдалося записати пікселі зображення
+@msg	removing soft pixels failed its check: nothing was changed	вилучення м’яких пікселів не пройшло перевірку: нічого не змінено
+@msg	the image has its own transparency and an opacity mask: release the mask first	зображення має власну прозорість і маску непрозорості: спершу звільніть маску
+@msg	level must be a whole number from 1 to 255	level має бути цілим числом від 1 до 255
+@msg	copies must be true or false	copies має бути true або false

@@ -5148,3 +5148,13 @@ imageTrace	Outline	კონტური
 	Export Pattern Image	ნიმუშის გამოსახულების ექსპორტი
 	Replace Pattern Image	ნიმუშის გამოსახულების ჩანაცვლება
 @msg	Line weight check failed: {e}	ხაზის სისქის შემოწმება ვერ მოხერხდა: {e}
+	Remove Soft Pixels	რბილი პიქსელების მოცილება
+@msg	select one image to remove its soft pixels	აირჩიეთ ერთი გამოსახულება მისი რბილი პიქსელების მოსაცილებლად
+@msg	the image is linked: embed it to remove its soft pixels	გამოსახულება მიბმულია: ჩაშენეთ ის რბილი პიქსელების მოსაცილებლად
+@msg	the image's opacity mask isn't one greyscale image	გამოსახულების გაუმჭვირვალობის ნიღაბი არ არის ერთი ნაცრისფერი გამოსახულება
+@msg	the image has no transparency: nothing to remove	გამოსახულებას არ აქვს გამჭვირვალობა: მოსაცილებელი არაფერია
+@msg	the image's pixels couldn't be written	გამოსახულების პიქსელების ჩაწერა ვერ მოხერხდა
+@msg	removing soft pixels failed its check: nothing was changed	რბილი პიქსელების მოცილებამ შემოწმება ვერ გაიარა: არაფერი შეცვლილა
+@msg	the image has its own transparency and an opacity mask: release the mask first	გამოსახულებას აქვს საკუთარი გამჭვირვალობა და გაუმჭვირვალობის ნიღაბი: ჯერ გაათავისუფლეთ ნიღაბი
+@msg	level must be a whole number from 1 to 255	level უნდა იყოს მთელი რიცხვი 1-დან 255-მდე
+@msg	copies must be true or false	copies უნდა იყოს true ან false

@@ -2352,6 +2352,8 @@ mod tests_slices;
 #[cfg(test)]
 mod tests_smartguides;
 #[cfg(test)]
+mod tests_solidify;
+#[cfg(test)]
 mod tests_store;
 #[cfg(test)]
 mod tests_strokegeom;

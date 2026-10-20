@@ -5193,3 +5193,13 @@ effect	Points	Σημεία
 	Export Pattern Image	Εξαγωγή εικόνας μοτίβου
 	Replace Pattern Image	Αντικατάσταση εικόνας μοτίβου
 @msg	Line weight check failed: {e}	Ο έλεγχος πάχους γραμμών απέτυχε: {e}
+	Remove Soft Pixels	Αφαίρεση μαλακών εικονοστοιχείων
+@msg	select one image to remove its soft pixels	επιλέξτε μία εικόνα για να αφαιρέσετε τα μαλακά εικονοστοιχεία της
+@msg	the image is linked: embed it to remove its soft pixels	η εικόνα είναι συνδεδεμένη: ενσωματώστε την για να αφαιρέσετε τα μαλακά εικονοστοιχεία της
+@msg	the image's opacity mask isn't one greyscale image	η μάσκα αδιαφάνειας της εικόνας δεν είναι μία εικόνα σε κλίμακα του γκρι
+@msg	the image has no transparency: nothing to remove	η εικόνα δεν έχει διαφάνεια: δεν υπάρχει κάτι για αφαίρεση
+@msg	the image's pixels couldn't be written	τα εικονοστοιχεία της εικόνας δεν ήταν δυνατό να εγγραφούν
+@msg	removing soft pixels failed its check: nothing was changed	η αφαίρεση των μαλακών εικονοστοιχείων απέτυχε στον έλεγχο: δεν άλλαξε τίποτα
+@msg	the image has its own transparency and an opacity mask: release the mask first	η εικόνα έχει δική της διαφάνεια και μάσκα αδιαφάνειας: αποδεσμεύστε πρώτα τη μάσκα
+@msg	level must be a whole number from 1 to 255	το level πρέπει να είναι ακέραιος από 1 έως 255
+@msg	copies must be true or false	το copies πρέπει να είναι true ή false

@@ -5220,3 +5220,14 @@ swatch	Bright Violet	Kraftig violet
 	Pattern Images	Billeder i mønstre
 	Export Pattern Image	Eksportér billede fra mønster
 	Replace Pattern Image	Erstat billede i mønster
+	Remove Soft Pixels	Fjern bløde pixels
+@msg	select one image to remove its soft pixels	vælg ét billede for at fjerne dets bløde pixels
+@msg	the image is linked: embed it to remove its soft pixels	billedet er sammenkædet: indlejr det for at fjerne dets bløde pixels
+@msg	the image's opacity mask isn't one greyscale image	billedets opacitetsmaske er ikke ét gråtonebillede
+@msg	the image's pixels can't be read	billedets pixels kan ikke læses
+@msg	the image has no transparency: nothing to remove	billedet har ingen gennemsigtighed: intet at fjerne
+@msg	the image's pixels couldn't be written	billedets pixels kunne ikke skrives
+@msg	removing soft pixels failed its check: nothing was changed	fjernelsen af bløde pixels bestod ikke kontrollen: intet blev ændret
+@msg	the image has its own transparency and an opacity mask: release the mask first	billedet har sin egen gennemsigtighed og en opacitetsmaske: frigiv masken først
+@msg	level must be a whole number from 1 to 255	level skal være et heltal fra 1 til 255
+@msg	copies must be true or false	copies skal være true eller false

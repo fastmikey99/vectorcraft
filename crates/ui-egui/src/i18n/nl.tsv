@@ -5262,3 +5262,13 @@ swatch	Bright Violet	Felviolet
 	Pattern Images	Afbeeldingen in patronen
 	Export Pattern Image	Patroonafbeelding exporteren
 	Replace Pattern Image	Patroonafbeelding vervangen
+	Remove Soft Pixels	Zachte pixels verwijderen
+@msg	select one image to remove its soft pixels	selecteer één afbeelding om de zachte pixels ervan te verwijderen
+@msg	the image is linked: embed it to remove its soft pixels	de afbeelding is gekoppeld: sluit haar in om de zachte pixels ervan te verwijderen
+@msg	the image's opacity mask isn't one greyscale image	het dekkingmasker van de afbeelding is niet één grijswaardenafbeelding
+@msg	the image has no transparency: nothing to remove	de afbeelding heeft geen transparantie: niets te verwijderen
+@msg	the image's pixels couldn't be written	de pixels van de afbeelding konden niet worden geschreven
+@msg	removing soft pixels failed its check: nothing was changed	het verwijderen van zachte pixels doorstond de controle niet: er is niets gewijzigd
+@msg	the image has its own transparency and an opacity mask: release the mask first	de afbeelding heeft eigen transparantie en een dekkingmasker: geef eerst het masker vrij
+@msg	level must be a whole number from 1 to 255	level moet een geheel getal van 1 tot 255 zijn
+@msg	copies must be true or false	copies moet true of false zijn

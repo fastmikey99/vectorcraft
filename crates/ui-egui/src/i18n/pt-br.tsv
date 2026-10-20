@@ -5159,3 +5159,13 @@ mark-style	Japanese	Japonesas
 	Unassigned	Não atribuído
 @msg	Invalid separation context or too many entries	Contexto de separação inválido ou entradas demais
 @msg	Invalid or duplicate separation name/component	Nome de separação ou componente inválido ou duplicado
+	Remove Soft Pixels	Remover pixels suaves
+@msg	select one image to remove its soft pixels	selecione uma imagem para remover seus pixels suaves
+@msg	the image is linked: embed it to remove its soft pixels	a imagem está vinculada: incorpore-a para remover seus pixels suaves
+@msg	the image's opacity mask isn't one greyscale image	a máscara de opacidade da imagem não é uma única imagem em tons de cinza
+@msg	the image has no transparency: nothing to remove	a imagem não tem transparência: nada a remover
+@msg	the image's pixels couldn't be written	não foi possível gravar os pixels da imagem
+@msg	removing soft pixels failed its check: nothing was changed	a remoção de pixels suaves falhou na verificação: nada foi alterado
+@msg	the image has its own transparency and an opacity mask: release the mask first	a imagem tem transparência própria e uma máscara de opacidade: libere a máscara primeiro
+@msg	level must be a whole number from 1 to 255	level deve ser um número inteiro de 1 a 255
+@msg	copies must be true or false	copies deve ser true ou false

@@ -4856,3 +4856,13 @@ lighting	Light	Luce
 	Unassigned	Non assegnato
 @msg	Invalid separation context or too many entries	Contesto di separazione non valido o troppe voci
 @msg	Invalid or duplicate separation name/component	Nome della separazione o componente non valido o duplicato
+	Remove Soft Pixels	Rimuovi pixel sfumati
+@msg	select one image to remove its soft pixels	seleziona un’immagine per rimuoverne i pixel sfumati
+@msg	the image is linked: embed it to remove its soft pixels	l’immagine è collegata: incorporala per rimuoverne i pixel sfumati
+@msg	the image's opacity mask isn't one greyscale image	la maschera di opacità dell’immagine non è una singola immagine in scala di grigi
+@msg	the image has no transparency: nothing to remove	l’immagine non ha trasparenza: niente da rimuovere
+@msg	the image's pixels couldn't be written	non è stato possibile scrivere i pixel dell’immagine
+@msg	removing soft pixels failed its check: nothing was changed	la rimozione dei pixel sfumati non ha superato il controllo: non è stato modificato nulla
+@msg	the image has its own transparency and an opacity mask: release the mask first	l’immagine ha una propria trasparenza e una maschera di opacità: rilascia prima la maschera
+@msg	level must be a whole number from 1 to 255	level deve essere un numero intero da 1 a 255
+@msg	copies must be true or false	copies deve essere true o false

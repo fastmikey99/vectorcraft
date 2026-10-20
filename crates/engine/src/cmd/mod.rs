@@ -76,6 +76,7 @@ mod select;
 pub(crate) mod shaper;
 pub mod shortcutset;
 pub(crate) mod slices;
+pub(crate) mod solidify;
 mod stroke;
 mod style;
 pub mod stylelib;
@@ -299,6 +300,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(scripts::specs());
         v.extend(cut::specs());
         v.extend(halftone::specs());
+        v.extend(solidify::specs());
         v.extend(perspgrid::specs());
         v.extend(lineweight::specs());
         v.extend(shortcutset::specs());

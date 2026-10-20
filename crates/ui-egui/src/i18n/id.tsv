@@ -5220,3 +5220,14 @@ swatch	Bright Violet	Violet cerah
 	Pattern Images	Gambar Pola
 	Export Pattern Image	Ekspor Gambar Pola
 	Replace Pattern Image	Ganti Gambar Pola
+	Remove Soft Pixels	Hapus Piksel Lembut
+@msg	select one image to remove its soft pixels	pilih satu gambar untuk menghapus piksel lembutnya
+@msg	the image is linked: embed it to remove its soft pixels	gambar ditautkan: sematkan untuk menghapus piksel lembutnya
+@msg	the image's opacity mask isn't one greyscale image	mask opasitas gambar bukan satu gambar skala abu-abu
+@msg	the image's pixels can't be read	piksel gambar tidak dapat dibaca
+@msg	the image has no transparency: nothing to remove	gambar tidak memiliki transparansi: tidak ada yang dihapus
+@msg	the image's pixels couldn't be written	piksel gambar tidak dapat ditulis
+@msg	removing soft pixels failed its check: nothing was changed	penghapusan piksel lembut gagal dalam pemeriksaan: tidak ada yang diubah
+@msg	the image has its own transparency and an opacity mask: release the mask first	gambar memiliki transparansi sendiri dan mask opasitas: lepaskan mask terlebih dahulu
+@msg	level must be a whole number from 1 to 255	level harus bilangan bulat dari 1 sampai 255
+@msg	copies must be true or false	copies harus true atau false

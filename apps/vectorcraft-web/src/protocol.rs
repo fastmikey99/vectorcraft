@@ -1,6 +1,6 @@
 //! The rules of the embedding protocol (`host`, `docs/web-embed.md`), kept free of browser types so
 //! they are tested natively: which messages the bridge reads, and what a `vectorcraft:open`, a
-//! `vectorcraft:export` or a `vectorcraft:place` must carry.
+//! `vectorcraft:export`, a `vectorcraft:place` or a `vectorcraft:solidify` must carry.
 
 /// What a `vectorcraft:open` delivers: a file to open like one picked with File › Open.
 #[derive(Debug, PartialEq, Eq)]
@@ -11,7 +11,8 @@ pub struct Open {
 }
 
 /// The messages the bridge reads.
-pub const HEARD: [&str; 5] = ["vectorcraft:open", "vectorcraft:export", "vectorcraft:place", "vectorcraft:prefs", "vectorcraft:hello"];
+pub const HEARD: [&str; 6] =
+    ["vectorcraft:open", "vectorcraft:export", "vectorcraft:place", "vectorcraft:solidify", "vectorcraft:prefs", "vectorcraft:hello"];
 
 /// The longest preferences text a page may hand over (bytes).
 pub const MAX_PREFS: usize = 1 << 20;
@@ -202,6 +203,34 @@ pub fn place_copies(name: Option<String>, bytes: Option<Vec<u8>>, at: Option<Vec
         return Err("vectorcraft:place: `copies` replaces the selected image's copies where they are: no `at`".to_string());
     }
     Ok(Place { name, bytes, at, copies })
+}
+
+/// What a `vectorcraft:solidify` asks for: the one selected image's soft pixels removed (every
+/// alpha at or above `level` made opaque, below it clear; `object.image.solidifyAlpha`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Solidify {
+    /// 1–255 on the 8-bit alpha scale (128 when the message leaves it out).
+    pub level: u8,
+    /// Also every other copy of the image: the same pixels and transparency at the same printed
+    /// size, in the same undo step.
+    pub copies: bool,
+}
+
+/// Check a `vectorcraft:solidify` the bridge accepted. Each field is `None` when the message
+/// leaves it out (or gives `undefined`), `Some(None)` when it is there but of the wrong type. The
+/// error is the text of the `vectorcraft:failed` reply.
+pub fn solidify(level: Option<Option<f64>>, copies: Option<Option<bool>>) -> Result<Solidify, String> {
+    let level = match level {
+        None => 128,
+        Some(Some(l)) if l.is_finite() && l.fract() == 0.0 && (1.0..=255.0).contains(&l) => l as u8,
+        Some(_) => return Err("vectorcraft:solidify: level must be a whole number from 1 to 255".to_string()),
+    };
+    let copies = match copies {
+        None => false,
+        Some(Some(c)) => c,
+        Some(None) => return Err("vectorcraft:solidify: copies must be a boolean".to_string()),
+    };
+    Ok(Solidify { level, copies })
 }
 
 /// Check a `vectorcraft:open`'s `units` or `strokeUnits` (`field`): left out (`None`), or a string
@@ -402,6 +431,26 @@ mod tests {
     fn refuses_an_open_without_bytes() {
         let error = open(Some("Logo.svg".into()), None).err();
         assert!(error.as_deref().is_some_and(|e| e.contains("`bytes`") && e.contains("Logo.svg")), "{error:?}");
+    }
+
+    #[test]
+    fn accepts_a_solidify_from_the_parent_on_the_same_origin() {
+        assert!(accepts(SITE, SITE, true, Some("vectorcraft:solidify")));
+        assert!(!accepts(SITE, "https://evil.example", true, Some("vectorcraft:solidify")));
+        assert!(!accepts(SITE, SITE, false, Some("vectorcraft:solidify")));
+        assert!(!accepts(SITE, SITE, true, Some("vectorcraft:solidified")), "the answer isn't heard");
+    }
+
+    #[test]
+    fn a_solidify_defaults_to_level_128_on_one_image_and_refuses_bad_fields() {
+        assert_eq!(solidify(None, None), Ok(Solidify { level: 128, copies: false }));
+        assert_eq!(solidify(Some(Some(1.0)), Some(Some(true))), Ok(Solidify { level: 1, copies: true }));
+        assert_eq!(solidify(Some(Some(255.0)), Some(Some(false))), Ok(Solidify { level: 255, copies: false }));
+        for bad in [Some(0.0), Some(256.0), Some(12.5), Some(-1.0), Some(f64::NAN), Some(f64::INFINITY), None] {
+            let e = solidify(Some(bad), None).unwrap_err();
+            assert_eq!(e, "vectorcraft:solidify: level must be a whole number from 1 to 255", "{bad:?}");
+        }
+        assert_eq!(solidify(None, Some(None)).unwrap_err(), "vectorcraft:solidify: copies must be a boolean");
     }
 
     #[test]

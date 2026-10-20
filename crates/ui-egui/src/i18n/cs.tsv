@@ -5242,3 +5242,13 @@ mark-style	Japanese	Japonské
 	Unassigned	Nepřiřazeno
 @msg	Invalid separation context or too many entries	Neplatný kontext separace nebo příliš mnoho položek
 @msg	Invalid or duplicate separation name/component	Neplatný nebo duplicitní název separace či součásti
+	Remove Soft Pixels	Odstranit měkké pixely
+@msg	select one image to remove its soft pixels	vyberte jeden obrázek, jehož měkké pixely chcete odstranit
+@msg	the image is linked: embed it to remove its soft pixels	obrázek je propojený: vložte jej, abyste mohli odstranit jeho měkké pixely
+@msg	the image's opacity mask isn't one greyscale image	maska krytí obrázku není jeden obrázek ve stupních šedi
+@msg	the image has no transparency: nothing to remove	obrázek nemá žádnou průhlednost: není co odstranit
+@msg	the image's pixels couldn't be written	pixely obrázku nebylo možné zapsat
+@msg	removing soft pixels failed its check: nothing was changed	odstranění měkkých pixelů neprošlo kontrolou: nic nebylo změněno
+@msg	the image has its own transparency and an opacity mask: release the mask first	obrázek má vlastní průhlednost i masku krytí: nejprve masku uvolněte
+@msg	level must be a whole number from 1 to 255	level musí být celé číslo od 1 do 255
+@msg	copies must be true or false	copies musí být true nebo false

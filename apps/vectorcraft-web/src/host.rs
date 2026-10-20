@@ -31,6 +31,12 @@
 //!   onto that object's own frame through its transform (an image's pixels, rotated or mirrored as
 //!   they are), one undo step, selected. Answered with `vectorcraft:placed { id, ids }` or
 //!   `vectorcraft:failed { error, id }`.
+//! - `vectorcraft:solidify` (from the parent): `{ id?, level?, copies? }`, Remove Soft Pixels on the
+//!   one selected image (`object.image.solidifyAlpha`): every alpha at or above `level` (1–255,
+//!   default 128) opaque, below it clear, colour samples kept; with `copies`, also its copies at
+//!   the same printed size; one undo step. Answered with `vectorcraft:solidified { id, ids, form,
+//!   level, softPixels, clearPixels, opaquePixels }` or `vectorcraft:failed { error, id }`. `ready`
+//!   says `solidify: true`.
 //! - `vectorcraft:prefs` (both ways): `{ prefs }`, the preferences and workspace as JSON text. The
 //!   editor sends them when they change (the page stores them for the person signed in); the page
 //!   sends them back before opening a file, and the editor takes them on. In host mode the editor
@@ -73,6 +79,8 @@ pub struct Bridge {
     exports: Rc<RefCell<Vec<(JsValue, protocol::Export)>>>,
     /// Files the parent asked to place, run on the next frame.
     places: Rc<RefCell<Vec<(JsValue, protocol::Place)>>>,
+    /// Soft pixels the parent asked to remove, run on the next frame.
+    solidifies: Rc<RefCell<Vec<(JsValue, protocol::Solidify)>>>,
     /// Preferences the parent handed back, put on at the next frame (the last one wins).
     prefs: Rc<RefCell<Option<String>>>,
     /// The files the parent hands over (`Services::host_inbox`), which outlive graphics restarts.
@@ -97,6 +105,7 @@ impl Bridge {
             selection: Rc::default(),
             exports: Rc::default(),
             places: Rc::default(),
+            solidifies: Rc::default(),
             prefs: Rc::default(),
             inbox: Inbox::default(),
             ready: Rc::default(),
@@ -133,6 +142,7 @@ impl Bridge {
             ("selection", true.into()),
             ("rasterEffectsResolution", true.into()),
             ("units", true.into()),
+            ("solidify", true.into()),
         ]);
     }
 
@@ -140,7 +150,8 @@ impl Bridge {
         self.send(&[("type", "vectorcraft:failed".into()), ("error", error.into())]);
     }
 
-    /// The refusal of the `vectorcraft:export` or `vectorcraft:place` with this `id`.
+    /// The refusal of the `vectorcraft:export`, `vectorcraft:place` or `vectorcraft:solidify` with
+    /// this `id`.
     fn post_export_failed(&self, id: &JsValue, error: &str) {
         log::warn!("refused an export for the page: {error}");
         self.send(&[("type", "vectorcraft:failed".into()), ("error", error.into()), ("id", id.clone())]);
@@ -170,6 +181,25 @@ impl Bridge {
                 Ok(ids) => {
                     let ids: js_sys::Array = ids.into_iter().map(|i| JsValue::from_f64(i as f64)).collect();
                     self.send(&[("type", "vectorcraft:placed".into()), ("id", id), ("ids", ids.into())]);
+                }
+                Err(error) => self.post_export_failed(&id, &error),
+            }
+        }
+        let asked = std::mem::take(&mut *self.solidifies.borrow_mut());
+        for (id, request) in asked {
+            match crate::operations::solidify(app, &request) {
+                Ok(done) => {
+                    let ids: js_sys::Array = done.ids.into_iter().map(|i| JsValue::from_f64(i as f64)).collect();
+                    self.send(&[
+                        ("type", "vectorcraft:solidified".into()),
+                        ("id", id),
+                        ("ids", ids.into()),
+                        ("form", done.form.as_str().into()),
+                        ("level", (done.level as f64).into()),
+                        ("softPixels", (done.soft as f64).into()),
+                        ("clearPixels", (done.clear as f64).into()),
+                        ("opaquePixels", (done.opaque as f64).into()),
+                    ]);
                 }
                 Err(error) => self.post_export_failed(&id, &error),
             }
@@ -311,6 +341,21 @@ impl Bridge {
                 match protocol::place_copies(string(&data, "name"), bytes(&data), rect(&data, "at"), copies.and_then(|v| v.as_bool())) {
                     Ok(place) => {
                         bridge.places.borrow_mut().push((id, place));
+                        wake();
+                    }
+                    Err(error) => bridge.post_export_failed(&id, &error),
+                }
+                return;
+            }
+            if string(&data, "type").as_deref() == Some("vectorcraft:solidify") {
+                let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
+                // A field left out is `None`; one that is there but of the wrong type is `Some(None)`.
+                let given = |key: &str| js_sys::Reflect::get(&data, &JsValue::from_str(key)).ok().filter(|v| !v.is_undefined());
+                let level = given("level").map(|v| v.as_f64());
+                let copies = given("copies").map(|v| v.as_bool());
+                match protocol::solidify(level, copies) {
+                    Ok(request) => {
+                        bridge.solidifies.borrow_mut().push((id, request));
                         wake();
                     }
                     Err(error) => bridge.post_export_failed(&id, &error),

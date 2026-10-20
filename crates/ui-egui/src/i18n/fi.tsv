@@ -5205,3 +5205,13 @@ mark-style	Japanese	Japanilainen
 	Export Pattern Image	Vie kuviokuva
 	Replace Pattern Image	Korvaa kuviokuva
 @msg	Line weight check failed: {e}	Viivanpaksuuden tarkistus epäonnistui: {e}
+	Remove Soft Pixels	Poista pehmeät pikselit
+@msg	select one image to remove its soft pixels	valitse yksi kuva, jonka pehmeät pikselit poistetaan
+@msg	the image is linked: embed it to remove its soft pixels	kuva on linkitetty: upota se, jotta sen pehmeät pikselit voi poistaa
+@msg	the image's opacity mask isn't one greyscale image	kuvan peittävyysmaski ei ole yksi harmaasävykuva
+@msg	the image has no transparency: nothing to remove	kuvassa ei ole läpinäkyvyyttä: ei mitään poistettavaa
+@msg	the image's pixels couldn't be written	kuvan pikseleitä ei voitu kirjoittaa
+@msg	removing soft pixels failed its check: nothing was changed	pehmeiden pikselien poisto ei läpäissyt tarkistusta: mitään ei muutettu
+@msg	the image has its own transparency and an opacity mask: release the mask first	kuvalla on oma läpinäkyvyys ja peittävyysmaski: vapauta maski ensin
+@msg	level must be a whole number from 1 to 255	level on oltava kokonaisluku väliltä 1–255
+@msg	copies must be true or false	copies on oltava true tai false

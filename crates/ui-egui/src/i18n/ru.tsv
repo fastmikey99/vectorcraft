@@ -4852,3 +4852,13 @@ lighting	Light	Свет
 	Unassigned	Не назначено
 @msg	Invalid separation context or too many entries	Недопустимый контекст цветоделения или слишком много записей
 @msg	Invalid or duplicate separation name/component	Недопустимое или повторяющееся имя цветоделения либо компонент
+	Remove Soft Pixels	Удалить мягкие пиксели
+@msg	select one image to remove its soft pixels	выделите одно изображение, чтобы удалить его мягкие пиксели
+@msg	the image is linked: embed it to remove its soft pixels	изображение связано: внедрите его, чтобы удалить его мягкие пиксели
+@msg	the image's opacity mask isn't one greyscale image	маска непрозрачности изображения не является одним изображением в оттенках серого
+@msg	the image has no transparency: nothing to remove	у изображения нет прозрачности: удалять нечего
+@msg	the image's pixels couldn't be written	не удалось записать пиксели изображения
+@msg	removing soft pixels failed its check: nothing was changed	удаление мягких пикселей не прошло проверку: ничего не изменено
+@msg	the image has its own transparency and an opacity mask: release the mask first	у изображения есть собственная прозрачность и маска непрозрачности: сначала освободите маску
+@msg	level must be a whole number from 1 to 255	level должен быть целым числом от 1 до 255
+@msg	copies must be true or false	copies должен быть true или false

@@ -4873,3 +4873,13 @@ lighting	Light	光源
 	Unassigned	未指派
 @msg	Invalid separation context or too many entries	分色資訊無效或項目過多
 @msg	Invalid or duplicate separation name/component	分色名稱或組成部分無效或重複
+	Remove Soft Pixels	移除軟像素
+@msg	select one image to remove its soft pixels	選取一個影像以移除其軟像素
+@msg	the image is linked: embed it to remove its soft pixels	影像為連結影像：嵌入後才能移除其軟像素
+@msg	the image's opacity mask isn't one greyscale image	影像的不透明度遮色片不是單一灰階影像
+@msg	the image has no transparency: nothing to remove	影像沒有透明度：沒有可移除的內容
+@msg	the image's pixels couldn't be written	無法寫入影像的像素
+@msg	removing soft pixels failed its check: nothing was changed	移除軟像素未通過檢查：未做任何變更
+@msg	the image has its own transparency and an opacity mask: release the mask first	影像同時有自身的透明度和不透明度遮色片：請先釋放遮色片
+@msg	level must be a whole number from 1 to 255	level 必須是 1 到 255 之間的整數
+@msg	copies must be true or false	copies 必須是 true 或 false
