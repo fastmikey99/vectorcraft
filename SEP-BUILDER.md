@@ -5,11 +5,16 @@ not a production separation builder or PAL player. No parity score is claimed.
 
 `sep.trap {"blackThreshold": 0.7}` replaces the bottom `Auto Trap-1` layer from exactly
 one top-level `Artwork` layer, in one undo step. The K threshold is required: the example
-is an experimental value, not an approved production setting.
+is the accepted K-coverage rule; the command remains a prototype.
 
 The command uses the same VectorCraft separation renderer as headless screenshots,
-at 600 dpi with antialiasing off. It finds the outside of the complete artwork,
-extends the nearest art pixel's process and spot ink samples by 0.2 mm, traces the
+at 600 dpi with antialiasing off. Opaque vector fills, stroke outlines and clips
+are united with pathops and rasterised once, preventing internal raster seams
+from becoming bands while retaining real blank counters. Transparency and live
+effects use renderer occupancy with a one-pixel closing fallback. Band distance
+is measured from occupied pixel cells, avoiding a half-pixel width shortfall.
+Colour samples always come from the original rendered art. The command extends
+the nearest art pixel's process and spot ink samples by 0.2 mm, traces the
 pixel edges, then spreads and chokes the clip by 0.01 mm with miter joins (limit 4).
 The output is a clip and a process/DeviceN image with a matching opacity mask;
 PDF export retains the spot channels and SMask. Trap overprint is off.
@@ -33,14 +38,16 @@ exterior is the complement of the art union, including blank enclosed openings;
 ink-to-ink edges never receive a band.
 No page trap-ticket `/Properties` are written by this prototype.
 
-The expanded local edge study supports K coverage as a useful experimental
-classifier, but does not identify the trap ticket's parameter semantics uniquely.
+The expanded local edge study supports the accepted K coverage rule, but does
+not identify the trap ticket's parameter semantics uniquely. High-K spot
+alternate behaviour remains unvalidated.
 The no-ink tolerance removes a major false band and K coverage retains trapped
 dark chromatic inks. Residual exposed coloured fragments still produce a band
 in a shipped no-trap control. No size filter, file exception or additional
 production rule was introduced to hide that mismatch. Per-file results and
 customer data remain outside the public repository.
 
-Synthetic tests cover exterior geometry, nearest excluded ownership, white and
+Synthetic tests cover vector union, small counters, clips, seam closing,
+pixel-cell distance, nearest excluded ownership, white and
 rich black, PAL epsilon boundaries, specialty-input rejection, spot alternates, spot-plane preservation, PDF DeviceN/SMask export,
 replacement, undo and cancellation. There are no customer fixtures.

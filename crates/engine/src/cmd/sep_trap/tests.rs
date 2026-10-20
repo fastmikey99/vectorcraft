@@ -23,8 +23,8 @@ fn external_only_and_nearest_excluded_feature() {
     art[4 * 9 + 4] = false;
     let mut allowed = art.clone();
     allowed[2 * 9 + 4] = false;
-    let band = pixels::band(&art, &allowed, 9, 9, 2.0).unwrap();
-    assert!(band[4 * 9 + 4].is_some(), "blank counter is outside the art union");
+    let band = pixels::band(&art, &allowed, &pixels::close_union(&art, 9, 9), 9, 9, 2.0).unwrap();
+    assert_eq!(band[4 * 9 + 4], None, "one-pixel hole is sealed before finding external edges");
     assert_eq!(band[4 * 9 + 3], None, "ink-to-ink interior is never trapped");
     assert_eq!(band[9 + 4], None, "nearest excluded art wins over nearby eligible art");
     assert_eq!(band[9 + 3], Some(2 * 9 + 3));
@@ -61,8 +61,8 @@ fn replacement_undo_and_pdf_mask() {
 
 #[test]
 fn invalid_grid_rejected() {
-    assert!(pixels::band(&[], &[], 0, 0, 4.0).is_err());
-    assert!(pixels::band(&[true], &[true], 1, 1, f64::NAN).is_err());
+    assert!(pixels::band(&[], &[], &[], 0, 0, 4.0).is_err());
+    assert!(pixels::band(&[true], &[true], &[true], 1, 1, f64::NAN).is_err());
 }
 
 #[test]
@@ -159,4 +159,97 @@ fn spot_tint_uses_pal_epsilon_and_black_uses_the_alternate() {
         }
         assert_eq!(s.execute(C, &json!({"blackThreshold":0.7})).unwrap()["pixels"].as_u64().unwrap() > 0, expected);
     }
+}
+
+#[test]
+fn union_closing_seals_seams_but_retains_counters_and_colour_ownership() {
+    let (w, h) = (25, 21);
+    let mut art = vec![false; w * h];
+    for y in 3..18 {
+        for x in 3..22 {
+            art[y * w + x] = true;
+        }
+    }
+    // Adjacent painted pieces have a one-pixel hairline gap.
+    for y in 3..18 {
+        art[y * w + 8] = false;
+    }
+    // A real counter remains part of the external art boundary.
+    for y in 7..14 {
+        for x in 12..19 {
+            art[y * w + x] = false;
+        }
+    }
+    let mut allowed = art.clone();
+    for y in 3..18 {
+        allowed[y * w + 21] = false;
+    }
+    let band = pixels::band(&art, &allowed, &pixels::close_union(&art, w, h), w, h, 2.0).unwrap();
+    for y in 3..18 {
+        assert_eq!(band[y * w + 8], None);
+    }
+    assert!(band[7 * w + 14].is_some());
+    assert_eq!(band[10 * w + 15], None, "counter centre exceeds the trap radius");
+    assert_eq!(band[10 * w + 22], None, "excluded outer edge keeps nearest ownership");
+    assert!(band[10 * w + 2].is_some());
+    for source in band.iter().flatten() {
+        assert!(art[*source as usize], "never sample a fabricated seam pixel");
+    }
+}
+
+#[test]
+fn trap_width_is_measured_from_pixel_cells_not_sample_centres() {
+    let mut art = vec![false; 15 * 15];
+    art[7 * 15 + 7] = true;
+    let band = pixels::band(&art, &art, &art, 15, 15, 0.2 * 600.0 / 25.4).unwrap();
+    assert_eq!(band[7 * 15 + 12], Some(7 * 15 + 7), "fifth centre is only 4.5 pixels beyond the cell edge");
+    assert_eq!(band[7 * 15 + 13], None, "sixth centre exceeds 0.2 mm");
+    assert_eq!(band[11 * 15 + 11], None, "corners use Euclidean distance, not square dilation");
+    let narrower = pixels::band(&art, &art, &art, 15, 15, 4.0).unwrap();
+    assert_eq!(narrower[7 * 15 + 12], None);
+}
+
+#[test]
+fn vector_occupancy_unites_adjacent_fills_and_preserves_small_counters() {
+    use vectorcraft_geom::FillRule;
+    let mut s = session(Color::cmyk(1.0, 0.0, 0.0, 0.0));
+    let d = Arc::make_mut(&mut s.doc_mut().unwrap().doc);
+    let layer = d.layers[0].id;
+    let n = Node::path(d.alloc_id(), shapes::rectangle(Rect::new(25.0, 5.0, 30.0, 25.0)), Appearance::default_art());
+    // Remove the default stroke: this case measures fill union only.
+    let mut n = n;
+    n.appearance = Appearance::basic(Paint::solid(Color::WHITE), Paint::None, 0.0).into();
+    d.insert(Some(layer), 1, n).unwrap();
+    let path = union::artwork(d).unwrap().unwrap();
+    assert!((vectorcraft_pathops::area(&path, FillRule::NonZero) - 500.0).abs() < 1e-6);
+
+    let mut s = session(Color::cmyk(1.0, 0.0, 0.0, 0.0));
+    let d = Arc::make_mut(&mut s.doc_mut().unwrap().doc);
+    let n = Arc::make_mut(&mut Arc::make_mut(&mut d.layers[0]).children_mut().unwrap()[0]);
+    if let NodeKind::Path { path, rule, .. } = &mut n.kind {
+        path.subpaths.extend(shapes::rectangle(Rect::new(10.0, 10.0, 10.05, 10.05)).subpaths);
+        *rule = FillRule::EvenOdd;
+    }
+    let path = union::artwork(d).unwrap().unwrap();
+    assert!((vectorcraft_pathops::area(&path, FillRule::NonZero) - 399.9975).abs() < 1e-6, "vector counters survive below one pixel");
+}
+
+#[test]
+fn vector_occupancy_obeys_clips_and_leaves_transparency_to_the_renderer() {
+    use vectorcraft_geom::FillRule;
+    let mut d = Document::new(30.0, 30.0);
+    let layer = d.layers[0].id;
+    let clip = Node::path(d.alloc_id(), shapes::rectangle(Rect::new(0.0, 0.0, 10.0, 10.0)), Appearance::default());
+    let fill =
+        Node::path(d.alloc_id(), shapes::rectangle(Rect::new(5.0, 5.0, 15.0, 15.0)), Appearance::basic(Paint::solid(Color::BLACK), Paint::None, 0.0));
+    let mut group = Node::group(d.alloc_id(), vec![Arc::new(clip), Arc::new(fill)]);
+    if let NodeKind::Group { clip, .. } = &mut group.kind {
+        *clip = true;
+    }
+    let id = group.id;
+    d.insert(Some(layer), 0, group).unwrap();
+    let path = union::artwork(&d).unwrap().unwrap();
+    assert!((vectorcraft_pathops::area(&path, FillRule::NonZero) - 25.0).abs() < 1e-6);
+    d.node_mut(id).unwrap().opacity = 0.5;
+    assert!(union::artwork(&d).unwrap().is_none());
 }

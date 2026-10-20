@@ -1,5 +1,5 @@
-//! Experimental external-edge trap. The K threshold is supplied by the caller: it is a measurement
-//! parameter, not an approved production rule. Uses the same plate renderer as headless screenshots.
+//! Experimental external-edge trap. The explicit K threshold supports measurement; 0.7 is the
+//! accepted separation rule. Uses the same plate renderer as headless screenshots.
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -14,6 +14,7 @@ use crate::Result;
 mod pixels;
 #[cfg(test)]
 mod tests;
+mod union;
 
 const C: &str = "sep.trap";
 const SCALE: f64 = 600.0 / 72.0;
@@ -26,7 +27,7 @@ pub fn specs() -> Vec<CommandSpec> {
         "Trap…",
         [],
         None,
-        "{blackThreshold: K coverage 0..1 (required experimental setting)} replace Auto Trap-1 from Artwork only: 600 dpi, 0.2 mm outward external band, nearest art ink samples, 0.01 mm spread/choke. No approved production threshold; vector art only → {pixels, width, height, blackThreshold, seconds}",
+        "{blackThreshold: K coverage 0..1 (required experimental setting)} replace Auto Trap-1 from Artwork only: 600 dpi, 0.2 mm outward external band, nearest art ink samples, 0.01 mm spread/choke. Accepted K threshold: 0.7; vector art only → {pixels, width, height, blackThreshold, seconds}",
         has_doc,
         run
     )]
@@ -173,8 +174,24 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let allowed: Vec<_> = eligible_rgba.pixels.as_chunks::<4>().0.iter().map(|[red, _, _, _]| *red >= 128).collect();
     drop(rgba);
     drop(eligible_rgba);
+    log::debug!("trap: vector union");
+    let union = if let Some(path) = union::artwork(&source)? {
+        let mut silhouette = source.clone();
+        let shape = Node::path(silhouette.alloc_id(), path, Appearance::basic(Paint::solid(Color::BLACK), Paint::None, 0.0));
+        silhouette.layers = vec![Arc::new(shape)];
+        silhouette.drop_lookup_cache();
+        let rgba = renderer.render_region_with(&silhouette, region, SCALE, &options(None));
+        if rgba.pixels.len() != n * 4 {
+            return Err(bad(C, "incomplete art union render"));
+        }
+        rgba.pixels.as_chunks::<4>().0.iter().map(|[_, _, _, a]| *a >= 128).collect()
+    } else {
+        log::debug!("trap: renderer occupancy with one-pixel seam closing");
+        pixels::close_union(&occupied, w as usize, h as usize)
+    };
+    crate::cancel::check()?;
     log::debug!("trap: nearest features");
-    let nearest = pixels::band(&occupied, &allowed, w as usize, h as usize, 0.2 * 600.0 / 25.4)?;
+    let nearest = pixels::band(&occupied, &allowed, &union, w as usize, h as usize, 0.2 * 600.0 / 25.4)?;
     let mask: Vec<_> = nearest.iter().map(Option::is_some).collect();
     let count = mask.iter().filter(|&&v| v).count();
     let existing: Vec<_> = doc.layers.iter().filter(|l| l.name.as_deref() == Some("Auto Trap-1")).map(|l| l.id).collect();

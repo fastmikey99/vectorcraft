@@ -1,20 +1,53 @@
 //! Bounded exact nearest-feature transform: only distances inside the fixed trap radius matter.
-//! Every unpainted pixel is outside the art union, including blank counters. Ink-to-ink edges
-//! remain inside the union and never receive a band.
+//! Occupancy comes from the vector union (or a closed renderer mask). Colour samples always
+//! come from the original art, and neither representation can receive ink-to-ink bands.
 use super::{C, Result, bad};
 
-pub(super) fn band(occupied: &[bool], eligible: &[bool], w: usize, h: usize, radius: f64) -> Result<Vec<Option<u32>>> {
+/// Separable 3×3 dilation followed by erosion. Only occupancy is closed: newly filled seam
+/// pixels never become colour samples. Keep original edge pixels when the grid clips the kernel.
+pub(super) fn close_union(occupied: &[bool], w: usize, h: usize) -> Vec<bool> {
+    let axis = |input: &[bool], vertical: bool, dilate: bool| -> Vec<bool> {
+        let (step, limit) = if vertical { (w, h) } else { (1, w) };
+        input
+            .iter()
+            .enumerate()
+            .map(|(i, &center)| {
+                let coordinate = if vertical { i / w } else { i % w };
+                let before = coordinate > 0 && input.get(i - step) == Some(&true);
+                let after = coordinate + 1 < limit && input.get(i + step) == Some(&true);
+                if dilate { before || center || after } else { before && center && after }
+            })
+            .collect()
+    };
+    let horizontal = axis(occupied, false, true);
+    let dilated = axis(&horizontal, true, true);
+    drop(horizontal);
+    let horizontal = axis(&dilated, false, false);
+    drop(dilated);
+    let mut closed = axis(&horizontal, true, false);
+    for (pixel, &original) in closed.iter_mut().zip(occupied) {
+        *pixel |= original;
+    }
+    closed
+}
+
+pub(super) fn band(occupied: &[bool], eligible: &[bool], union: &[bool], w: usize, h: usize, radius: f64) -> Result<Vec<Option<u32>>> {
     let n = w.checked_mul(h).filter(|&n| n <= super::MAX_PIXELS && n > 0).ok_or_else(|| bad(C, "invalid trap grid"))?;
-    if occupied.len() != n || eligible.len() != n || !(0.0..=8.0).contains(&radius) {
+    if occupied.len() != n || eligible.len() != n || union.len() != n || !(0.0..=8.0).contains(&radius) {
         return Err(bad(C, "invalid trap samples"));
     }
-    let outside: Vec<_> = occupied.iter().map(|&on| !on).collect();
+    let outside: Vec<_> = union.iter().zip(occupied).map(|(&united, &sampled)| !united && !sampled).collect();
     let r = radius.ceil() as i32;
     let mut offsets = Vec::new();
     for dy in -r..=r {
         for dx in -r..=r {
             let distance = dx * dx + dy * dy;
-            if f64::from(distance) <= radius * radius {
+            // Occupied samples represent unit pixel cells, not dimensionless points.
+            // Test the destination centre against the nearest point of the source cell;
+            // centre-to-centre distance would shorten the outward band by half a pixel.
+            let edge_x = (f64::from(dx.abs()) - 0.5).max(0.0);
+            let edge_y = (f64::from(dy.abs()) - 0.5).max(0.0);
+            if edge_x * edge_x + edge_y * edge_y <= radius * radius {
                 offsets.push((distance, dx, dy));
             }
         }
@@ -28,7 +61,7 @@ pub(super) fn band(occupied: &[bool], eligible: &[bool], w: usize, h: usize, rad
         let (x, y) = ((i % w) as i32, (i / w) as i32);
         let edge = [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dy)| {
             let (sx, sy) = (x + dx, y + dy);
-            sx >= 0 && sy >= 0 && sx < w as i32 && sy < h as i32 && outside.get(sy as usize * w + sx as usize) == Some(&true)
+            sx >= 0 && sy >= 0 && sx < w as i32 && sy < h as i32 && occupied.get(sy as usize * w + sx as usize) == Some(&false)
         });
         if !edge {
             continue;
