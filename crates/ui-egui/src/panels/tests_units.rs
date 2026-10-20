@@ -143,3 +143,34 @@ fn new_document_cards_follow_the_chosen_units() {
     assert!(shows(&t, "288 × 432 px") && !shows(&t, "101.6 × 152.4 mm"), "Postcard in px: {t:?}");
     assert_eq!(app.ui.dialog.as_ref().unwrap().fields["preset"], json!("Postcard"));
 }
+
+#[test]
+fn inch_rulers_tick_halves_quarters_eighths_and_sixteenths() {
+    use crate::canvas::{ruler_tick_length, unit_ruler_label};
+    // At 100%: labels every inch, ticks every sixteenth, the half longest and the sixteenths shortest.
+    let (step, minor) = (Unit::Inches.ruler_step(1.0), Unit::Inches.ruler_tick_step(1.0));
+    let len = |v: f64| ruler_tick_length(Unit::Inches, v, step, minor);
+    assert_eq!([len(2.0), len(2.5), len(2.25), len(2.125), len(2.0625)], [16.0, 8.0, 6.0, 4.5, 3.0]);
+    assert_eq!([len(2.75), len(2.375), len(2.9375)], [6.0, 4.5, 3.0]);
+    // Zoomed out with labels every 4 in, the whole inches between them stand out over the halves.
+    let (step, minor) = (Unit::Inches.ruler_step(0.25), Unit::Inches.ruler_tick_step(0.25));
+    let len = |v: f64| ruler_tick_length(Unit::Inches, v, step, minor);
+    assert_eq!([len(8.0), len(9.0), len(9.5), len(9.25)], [16.0, 10.0, 8.0, 6.0]);
+    // Labels stay decimal: whole inches whole, halves and quarters as decimals.
+    assert_eq!(unit_ruler_label(Unit::Inches, 3.0000001, 1.0), "3");
+    assert_eq!(unit_ruler_label(Unit::Inches, 0.5, 0.5), "0.5");
+    assert_eq!(unit_ruler_label(Unit::Inches, 1.25, 0.25), "1.25");
+    assert_eq!(unit_ruler_label(Unit::Inches, 0.375, 0.125), "0.375");
+    assert_eq!(unit_ruler_label(Unit::Inches, -0.00001, 1.0), "0");
+    assert_eq!(unit_ruler_label(Unit::Inches, -2.0, 2.0), "-2");
+}
+
+#[test]
+fn other_rulers_keep_their_ticks_and_labels() {
+    use crate::canvas::{ruler_label, ruler_tick_length, unit_ruler_label};
+    let (step, minor) = (Unit::Millimeters.ruler_step(1.0), Unit::Millimeters.ruler_tick_step(1.0));
+    assert_eq!((step, minor), (25.0, 2.5));
+    let len = |v: f64| ruler_tick_length(Unit::Millimeters, v, step, minor);
+    assert_eq!([len(50.0), len(12.5), len(2.5)], [16.0, 7.0, 4.0]);
+    assert_eq!(unit_ruler_label(Unit::Millimeters, 2.5, 0.5), ruler_label(2.5, 0.5));
+}

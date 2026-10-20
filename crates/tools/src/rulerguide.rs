@@ -663,8 +663,9 @@ mod tests {
                 2.0,
                 Point::new(inch(0.01), inch(0.03)),
                 Point::new(inch(3.07), inch(3.27)),
-                Point::new(inch(3.06), inch(3.28)),
-                inch(0.05),
+                // Inch ticks are binary fractions: sixteenths at 200%.
+                Point::new(inch(3.0725), inch(3.28)),
+                inch(0.0625),
             ),
         ]
     }
