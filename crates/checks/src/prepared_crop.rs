@@ -7,6 +7,12 @@ use vectorcraft_geom::Rect;
 pub struct Clip {
     /// Reduced nonnegative numerator/positive denominator, in top-down pixel edges.
     pub edges: [[u64; 2]; 4],
+    /// Absolute per-axis source-coordinate uncertainty, distinct from manufacturing tolerance.
+    #[serde(default, skip_serializing_if = "zero_error")]
+    pub edge_error_pixels: f64,
+}
+fn zero_error(v: &f64) -> bool {
+    *v == 0.0
 }
 fn gcd(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
@@ -15,6 +21,11 @@ fn gcd(mut a: u64, mut b: u64) -> u64 {
     a
 }
 impl Clip {
+    pub(crate) fn from_rect(raw: &vectorcraft_pdf::PrintRectCrop, width: u32, height: u32) -> Result<Self, String> {
+        let result = Self { edges: raw.edges, edge_error_pixels: raw.edge_error_pixels };
+        result.validate(width, height)?;
+        Ok(result)
+    }
     pub(crate) fn from_raw(bounds: [i64; 4], m: [i64; 6], width: u32, height: u32) -> Result<Self, String> {
         if bounds.iter().chain(m.iter()).any(|n| !(-(1 << 20)..=1 << 20).contains(n))
             || m[1] != 0
@@ -41,7 +52,7 @@ impl Clip {
         let (a, b, c, d) = (x(bounds[0]), y(bounds[1]), x(bounds[2]), y(bounds[3]));
         let (a, c) = if a[0] * c[1] <= c[0] * a[1] { (a, c) } else { (c, a) };
         let (b, d) = if b[0] * d[1] <= d[0] * b[1] { (b, d) } else { (d, b) };
-        let result = Self { edges: [a, b, c, d] };
+        let result = Self { edges: [a, b, c, d], edge_error_pixels: 0.0 };
         result.validate(width, height)?;
         Ok(result)
     }
@@ -49,20 +60,28 @@ impl Clip {
         if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 1_048_576 {
             return Err("Retained crop dimensions exceed budget".into());
         }
+        if !self.edge_error_pixels.is_finite() || !(0.0..=0.000002).contains(&self.edge_error_pixels) {
+            return Err("Retained crop source-coordinate uncertainty exceeds the bounded domain".into());
+        }
         for ([n, d], extent) in self.edges.iter().zip([width, height, width, height]) {
-            if *d == 0 || *d > 1_048_576 || *n > u64::from(extent) * *d || gcd(*n, *d) != 1 {
+            if *d == 0 || *d > (1u64 << 53) - 1 || *n > (1u64 << 53) - 1 || u128::from(*n) > u128::from(extent) * u128::from(*d) || gcd(*n, *d) != 1 {
                 return Err("Retained crop fraction is noncanonical or outside the pixel grid".into());
             }
         }
         let [a, b, c, d] = self.edges;
-        if a[0] * c[1] >= c[0] * a[1] || b[0] * d[1] >= d[0] * b[1] {
+        if u128::from(a[0]) * u128::from(c[1]) >= u128::from(c[0]) * u128::from(a[1])
+            || u128::from(b[0]) * u128::from(d[1]) >= u128::from(d[0]) * u128::from(b[1])
+        {
             return Err("Empty retained crop requires separate omission accounting".into());
         }
         Ok(())
     }
     pub(crate) fn intersects(&self, x: u32, y: u32) -> bool {
         let [a, b, c, d] = self.edges;
-        a[0] < (u64::from(x) + 1) * a[1] && b[0] < (u64::from(y) + 1) * b[1] && c[0] > u64::from(x) * c[1] && d[0] > u64::from(y) * d[1]
+        u128::from(a[0]) < (u128::from(x) + 1) * u128::from(a[1])
+            && u128::from(b[0]) < (u128::from(y) + 1) * u128::from(b[1])
+            && u128::from(c[0]) > u128::from(x) * u128::from(c[1])
+            && u128::from(d[0]) > u128::from(y) * u128::from(d[1])
     }
     pub(crate) fn rect(&self) -> Rect {
         let [a, b, c, d] = self.edges.map(|[n, d]| n as f64 / d as f64);
@@ -117,9 +136,9 @@ mod tests {
             [[0, 0], [0, 1], [3, 1], [3, 1]],
             [[0, 2], [0, 1], [3, 1], [3, 1]],
             [[0, 1], [0, 1], [4, 1], [3, 1]],
-            [[0, 1], [0, 1], [1, 1_048_577], [3, 1]],
+            [[0, 1], [0, 1], [1, 1u64 << 53], [3, 1]],
         ] {
-            assert!(Clip { edges }.validate(3, 3).is_err());
+            assert!(Clip { edges, edge_error_pixels: 0.0 }.validate(3, 3).is_err());
         }
     }
 }

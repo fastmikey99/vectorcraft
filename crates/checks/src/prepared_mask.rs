@@ -87,7 +87,7 @@ impl Mask {
     pub fn geometry_error_mm(&self) -> f64 {
         let [a, b, c, d, _, _] = self.pixel_to_page_mm;
         let norm = ((a.abs() + b.abs()).max(c.abs() + d.abs()) * (a.abs() + c.abs()).max(b.abs() + d.abs())).sqrt();
-        0.00001 * norm + 0.000000001
+        (0.00001 + self.clip.as_ref().map_or(0.0, |c| 2.0 * c.edge_error_pixels)) * norm + 0.000000001
     }
     pub fn path(&self) -> Result<PathData, String> {
         use std::collections::BTreeMap;

@@ -393,6 +393,8 @@ struct State {
     matrix: Option<vectorcraft_geom::Affine>,
     exact_matrix: Option<[i64; 6]>,
     interval_matrix: Option<crate::print_clip_interval::Matrix>,
+    rect_matrix: Option<crate::print_rect_clip::Matrix>,
+    rect_clip: Option<crate::print_rect_clip::Bounds>,
     clip_context: bool,
     form_clip: Option<[i64; 4]>,
     form_clip_interior: Option<[i64; 4]>,
@@ -460,7 +462,16 @@ fn blank_tail(mut bytes: &[u8]) -> bool {
 // Space, named-ink dictionary, operand dictionary, attributes, stroke, overprint, OPM.
 type PrintSourceKey = (PrintColorSpace, Option<u32>, Option<u32>, bool, bool, bool, u8);
 
+/// Current path is not graphics state (ISO 32000-1 §8.5). W/W* is pending
+/// until a path-ending operator; unsupported subpaths cannot become rectangles.
+#[derive(Default)]
+struct AuditPath {
+    active: bool,
+    rect: Option<crate::print_rect_clip::Bounds>,
+    pending_clip: bool,
+}
 struct Walker<'w, 'p> {
+    path: AuditPath,
     ocgs: &'w mut Ocgs,
     /// The groups that are off for the interpreter (none once [`all_on`] turned them on).
     off: HashSet<ObjectIdentifier>,
@@ -614,23 +625,39 @@ impl Walker<'_, '_> {
                 containing_form_clip,
                 form_clip_interior,
                 retained_form_crop,
+                retained_rect_crop: if containing_form_clip.is_none() && form_clip_interior.is_none() && retained_form_crop.is_none() {
+                    state.rect_clip.zip(state.rect_matrix).and_then(|(bounds, matrix)| {
+                        let [width, height] = description.dimensions?;
+                        crate::print_rect_clip::pixels(bounds, matrix, width, height)
+                    })
+                } else {
+                    None
+                },
                 overprint: state.fill,
                 overprint_mode: u8::from(state.nonzero),
                 description,
             });
         }
     }
-    fn concat(&mut self, matrix: [f64; 6], exact: Option<[i64; 6]>, interval: Option<crate::print_clip_interval::Matrix>) {
+    fn concat(
+        &mut self,
+        matrix: [f64; 6],
+        exact: Option<[i64; 6]>,
+        interval: Option<crate::print_clip_interval::Matrix>,
+        rect: Option<crate::print_rect_clip::Matrix>,
+    ) {
         if self.out.print_order.is_none() {
             return;
         }
         if let Some(s) = self.states.last_mut() {
+            s.rect_matrix = s.rect_matrix.zip(rect).and_then(|(a, b)| crate::print_rect_clip::concat(a, b));
             s.exact_matrix = s.exact_matrix.zip(exact).and_then(|(a, b)| crate::print_clip::concat(a, b));
             s.interval_matrix = s.interval_matrix.zip(interval).and_then(|(a, b)| crate::print_clip_interval::concat(a, b));
             s.matrix = s
                 .matrix
                 .map(|m| m * vectorcraft_geom::Affine::new(matrix))
                 .filter(|m| m.as_coeffs().iter().all(|v| v.is_finite() && v.abs() <= 1.0e12));
+            s.rect_matrix = s.rect_matrix.filter(|m| s.matrix.is_some_and(|actual| crate::print_rect_clip::agrees(*m, actual.as_coeffs())));
             s.interval_matrix =
                 s.interval_matrix.filter(|m| s.matrix.is_some_and(|actual| crate::print_clip_interval::agrees(*m, actual.as_coeffs())));
         }
@@ -897,6 +924,7 @@ impl Walker<'_, '_> {
     }
 
     fn walk(&mut self, data: &[u8], res: &Resources<'_>, depth: u32) {
+        let outer_path = std::mem::take(&mut self.path);
         let mut iter = TypedIter::new(data);
         self.note_fonts(res);
         // The interpreter saves the state for each content stream, and restores what the stream
@@ -924,6 +952,10 @@ impl Walker<'_, '_> {
         self.graphics_floor = graphics_floor;
         self.out.cut |= !blank_tail(data.get(iter.committed()..).unwrap_or_default());
         self.states.truncate(saved);
+        if self.path.active || self.path.pending_clip {
+            self.order_issue("Unfinished Form path prevents complete clip accounting");
+        }
+        self.path = outer_path;
     }
 
     /// Scan the same stream windows as the interpreter without materializing the page.
@@ -998,6 +1030,49 @@ impl Walker<'_, '_> {
                 self.out.cut = true;
                 return;
             }
+            let path_ending = matches!(
+                &op,
+                TypedInstruction::EndPath(_)
+                    | TypedInstruction::FillPathEvenOdd(_)
+                    | TypedInstruction::FillPathNonZero(_)
+                    | TypedInstruction::FillPathNonZeroCompatibility(_)
+                    | TypedInstruction::StrokePath(_)
+                    | TypedInstruction::CloseAndStrokePath(_)
+                    | TypedInstruction::FillAndStrokeEvenOdd(_)
+                    | TypedInstruction::FillAndStrokeNonZero(_)
+                    | TypedInstruction::CloseFillAndStrokeEvenOdd(_)
+                    | TypedInstruction::CloseFillAndStrokeNonZero(_)
+            );
+            // ISO 32000-1 §8.2: only path construction/clipping and a path-ending
+            // operator are legal inside a path object. In particular q/Q/cm cannot
+            // carry an unfinished path across graphics-state changes. Interpreters
+            // disagree on malformed sequences, so never certify their geometry.
+            let path_continuation = matches!(
+                &op,
+                TypedInstruction::RectPath(_)
+                    | TypedInstruction::MoveTo(_)
+                    | TypedInstruction::LineTo(_)
+                    | TypedInstruction::CubicTo(_)
+                    | TypedInstruction::CubicStartTo(_)
+                    | TypedInstruction::CubicEndTo(_)
+                    | TypedInstruction::ClosePath(_)
+                    | TypedInstruction::ClipNonZero(_)
+                    | TypedInstruction::ClipEvenOdd(_)
+            );
+            if (self.path.active || self.path.pending_clip) && !path_ending && (!path_continuation || self.path.pending_clip) {
+                self.order_issue("Illegal operator inside an unfinished path prevents clip accounting");
+                self.path.rect = None;
+            }
+            if matches!(&op, TypedInstruction::XObject(_) | TypedInstruction::InlineImage(_)) && (self.path.active || self.path.pending_clip) {
+                self.order_issue("Image/Form interleaved with an unfinished path prevents clip accounting");
+                if let Some(s) = self.states.last_mut() {
+                    s.clip_context = true;
+                    s.form_clip = None;
+                    s.form_clip_interior = None;
+                    s.rect_clip = None;
+                }
+                self.path.rect = None;
+            }
             match op {
                 TypedInstruction::BeginMarkedContentWithProperties(bdc) => {
                     let oc = match bdc.1 {
@@ -1042,14 +1117,37 @@ impl Walker<'_, '_> {
                         .print_order
                         .as_ref()
                         .and_then(|_| crate::print_clip_interval::content_matrix(data.get(start..iter.committed()).unwrap_or_default(), numbers));
-                    self.concat(numbers.map(|n| n.as_f64()), exact, interval);
+                    let rect = self
+                        .out
+                        .print_order
+                        .as_ref()
+                        .and_then(|_| crate::print_rect_clip::content(data.get(start..iter.committed()).unwrap_or_default(), numbers, b"cm"));
+                    self.concat(numbers.map(|n| n.as_f64()), exact, interval, rect);
+                }
+                TypedInstruction::RectPath(r) => {
+                    let rect = self.state().rect_matrix.and_then(|m| {
+                        crate::print_rect_clip::rect(
+                            m,
+                            crate::print_rect_clip::content(data.get(start..iter.committed()).unwrap_or_default(), [r.0, r.1, r.2, r.3], b"re")?,
+                        )
+                    });
+                    self.path.rect = if self.path.active || self.path.pending_clip { None } else { rect };
+                    self.path.active = true;
+                }
+                TypedInstruction::MoveTo(_)
+                | TypedInstruction::LineTo(_)
+                | TypedInstruction::CubicTo(_)
+                | TypedInstruction::CubicStartTo(_)
+                | TypedInstruction::CubicEndTo(_)
+                | TypedInstruction::ClosePath(_) => {
+                    self.path.active = true;
+                    self.path.rect = None;
                 }
                 TypedInstruction::ClipNonZero(_) | TypedInstruction::ClipEvenOdd(_) => {
-                    if let Some(s) = self.states.last_mut() {
-                        s.clip_context = true;
-                        s.form_clip = None;
-                        s.form_clip_interior = None;
+                    if self.path.pending_clip || !self.path.active {
+                        self.path.rect = None;
                     }
+                    self.path.pending_clip = true;
                 }
                 TypedInstruction::SaveState(_) => self.save(),
                 TypedInstruction::RestoreState(_) => self.restore(),
@@ -1237,14 +1335,22 @@ impl Walker<'_, '_> {
                             if let Some(matrix) = d.get::<[f64; 6]>(b"Matrix") {
                                 let exact = crate::print_clip::array(d, b"Matrix").and_then(crate::print_clip::integers);
                                 let interval = self.out.print_order.as_ref().and_then(|_| crate::print_clip_interval::array(d, b"Matrix"));
-                                self.concat(matrix, exact, interval);
+                                let rect = self.out.print_order.as_ref().and_then(|_| crate::print_rect_clip::array(d, b"Matrix"));
+                                self.concat(matrix, exact, interval, rect);
                             } else if let Some(state) = self.states.last_mut() {
                                 state.matrix = None;
                                 state.exact_matrix = None;
                                 state.interval_matrix = None;
+                                state.rect_matrix = None;
                             }
                         }
                         if let Some(state) = self.states.last_mut() {
+                            let rect = state.rect_matrix.and_then(|m| crate::print_rect_clip::bbox(m, crate::print_rect_clip::array(d, b"BBox")?));
+                            state.rect_clip = if state.clip_context {
+                                state.rect_clip.zip(rect).and_then(|(a, b)| crate::print_rect_clip::intersect(a, b))
+                            } else {
+                                rect
+                            };
                             let bounds = state.exact_matrix.and_then(|m| crate::print_clip::bbox(m, crate::print_clip::array(d, b"BBox")?));
                             state.form_clip = if state.clip_context {
                                 state.form_clip.zip(bounds).and_then(|(a, b)| crate::print_clip::intersect(a, b))
@@ -1273,6 +1379,21 @@ impl Walker<'_, '_> {
                     }
                 }
                 _ => {}
+            }
+            if path_ending {
+                if self.path.pending_clip
+                    && let Some(s) = self.states.last_mut()
+                {
+                    s.rect_clip = if s.clip_context {
+                        s.rect_clip.zip(self.path.rect).and_then(|(a, b)| crate::print_rect_clip::intersect(a, b))
+                    } else {
+                        self.path.rect
+                    };
+                    s.clip_context = true;
+                    s.form_clip = None;
+                    s.form_clip_interior = None;
+                }
+                self.path = AuditPath::default();
             }
             if let Some((operands, stroke)) = colour {
                 let gray = self.state().spaces[usize::from(stroke)] == PrintColorSpace::DeviceGray;
@@ -1445,6 +1566,7 @@ fn walk_page<'w, 'p>(
 ) -> Walker<'w, 'p> {
     let off = if all_on { HashSet::new() } else { ocgs.off.clone() };
     let mut w = Walker {
+        path: AuditPath::default(),
         ocgs,
         off,
         xref: page.xref(),
@@ -1464,6 +1586,7 @@ fn walk_page<'w, 'p>(
             matrix: Some(vectorcraft_geom::Affine::IDENTITY),
             exact_matrix: Some(crate::print_clip::IDENTITY),
             interval_matrix: Some(crate::print_clip_interval::IDENTITY),
+            rect_matrix: Some(crate::print_rect_clip::IDENTITY),
             ..Default::default()
         }],
         graphics_floor: 1,
@@ -1476,6 +1599,9 @@ fn walk_page<'w, 'p>(
         colour_index: HashMap::new(),
     };
     w.page(page);
+    if w.path.active || w.path.pending_clip {
+        w.order_issue("Unfinished page path prevents complete clip accounting");
+    }
     if !w.layers.is_empty() {
         w.order_issue("Unbalanced marked content cannot establish print order");
     }

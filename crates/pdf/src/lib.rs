@@ -73,6 +73,7 @@ mod print_clip_interval;
 mod print_color;
 mod print_image;
 mod print_order;
+mod print_rect_clip;
 mod production_info;
 mod settings;
 mod streams;
@@ -88,7 +89,7 @@ pub use pages::{PageInfo, PdfInfo, has_illustrator_data, illustrator_data, info,
 pub use post::{THUMBNAIL_SIZE, Thumbnail};
 pub use presets::*;
 pub use print::*;
-pub use print_image::{PrintImageDescription, PrintImageUse, PrintRenderingIntent};
+pub use print_image::{PrintImageDescription, PrintImageUse, PrintRectCrop, PrintRenderingIntent};
 pub use print_order::{PrintColorSpace, PrintOrder, PrintPaintSource, print_order};
 pub use production_info::{ProductionInfo, ProductionIntent, ProductionPage, production_info};
 pub use settings::*;

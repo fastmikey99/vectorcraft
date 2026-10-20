@@ -1137,3 +1137,9 @@ Codex review, full CI, native/WASI/Reporter replay and independent transformed d
 A separately approved crop boundary now retains exact rational pixel edges, partial-cell samples and original replay for bounded axis-aligned integer Form/image transforms. Reporter explicitly exposes that decision. Source continuity compares samples/grid and visible crop geometry; boundary uncertainty cannot hide independently proven defects.
 
 Codex review and a focused closure, full CI, native/WASI/Reporter replay and independent crop controls support this bounded extension. Decimal/path clips, ICC originals and broader production qualification remain open; headline readiness estimates are unchanged.
+
+## HC43 — Decimal rectangular path crops (2026-10-20)
+
+Complete single-rectangle paths now retain bounded exact decimal crop edges, PDF path lifecycle and source-cell visibility. Parsing/arithmetic error is propagated separately from acceptance tolerance. Existing witness identities retain precedence; unknown paths and unsupported contexts remain unresolved.
+
+Codex review/closure, complete CI and native/WASI/worker/independent-render qualification support this bounded extension. ICC/profile preservation, larger images and the complete production qualification remain open. Headline readiness estimates are unchanged.

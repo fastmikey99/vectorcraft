@@ -51,7 +51,12 @@ fn decimal_forms_capture_only_proven_inner_rectangles() {
         assert!(image.containing_form_clip.is_none(), "{name}");
         assert_eq!(image.form_clip_interior.is_some(), eligible, "{name}: {image:?}");
         let capture = crate::prepare::capture(&bytes, "decimal-clip-test".into(), "synthetic".into()).unwrap();
-        assert_eq!(capture.raster_sources.len(), usize::from(eligible), "{name}: {:?}", capture.diagnostics);
+        let retained = matches!(
+            name,
+            "decimal-crop" | "decimal-touch" | "insufficient-inner-margin" | "unknown-outer-path" | "unknown-inner-path" | "nested-decimal-crop"
+        );
+        assert_eq!(image.retained_rect_crop.is_some(), retained, "{name}");
+        assert_eq!(capture.raster_sources.len(), usize::from(eligible || retained), "{name}: {:?}", capture.diagnostics);
         if eligible {
             assert_eq!(capture.raster_sources["page-0-image-0"].mask.source_sha256, crate::digest(image).unwrap());
         }
@@ -60,7 +65,7 @@ fn decimal_forms_capture_only_proven_inner_rectangles() {
             std::fs::write(dir.join(format!("{name}-raw.json")), serde_json::to_vec(&raw).unwrap()).unwrap();
             std::fs::write(dir.join(format!("{name}-capture.json")), serde_json::to_vec(&capture).unwrap()).unwrap();
         }
-        manifest.push(json!({"name":name,"eligible":eligible,"pdf_sha256":crate::sha256(&bytes)}));
+        manifest.push(json!({"name":name,"eligible":eligible || retained,"containment_eligible":eligible,"retained_rect_crop":retained,"pdf_sha256":crate::sha256(&bytes)}));
     }
     if let Some(dir) = &dir {
         std::fs::write(dir.join("cases.json"), serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();

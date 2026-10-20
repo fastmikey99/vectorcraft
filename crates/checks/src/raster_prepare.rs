@@ -72,7 +72,11 @@ pub fn capture(bytes: &[u8], draft: &mut Draft, native_images: usize, import_iss
         let size = if matches!(metadata.rotation, 90 | 270) { [y1 - y0, x1 - x0] } else { [x1 - x0, y1 - y0] };
         let page_bounds = Rect::new(0.0, 0.0, size[0], size[1]);
         for (index, image) in images.iter().enumerate() {
-            if image.clip_context && image.containing_form_clip.is_none() && image.form_clip_interior.is_none() && image.retained_form_crop.is_none()
+            if image.clip_context
+                && image.containing_form_clip.is_none()
+                && image.form_clip_interior.is_none()
+                && image.retained_form_crop.is_none()
+                && image.retained_rect_crop.is_none()
             {
                 return Err("Clipped raster preparation requires a retained and reviewed mask/clip boundary".into());
             }
@@ -109,6 +113,11 @@ pub fn capture(bytes: &[u8], draft: &mut Draft, native_images: usize, import_iss
                 .retained_form_crop
                 .map(|(bounds, matrix)| crate::prepared_crop::Clip::from_raw(bounds, matrix, samples.width, samples.height))
                 .transpose()?;
+            let clip = match (clip, &image.retained_rect_crop) {
+                (None, Some(raw)) => Some(crate::prepared_crop::Clip::from_rect(raw, samples.width, samples.height)?),
+                (Some(_), Some(_)) => return Err("Conflicting retained crop witnesses".into()),
+                (clip, None) => clip,
+            };
             let mask = Mask {
                 clip,
                 source_sha256: digest(image)?,
@@ -313,7 +322,7 @@ mod tests {
     }
     #[test]
     fn unsupported_clipping_mixed_content_and_unknown_policy_stay_unresolved() {
-        for content in ["0 0 72 72 re W n q 36 0 0 36 18 18 cm /Im Do Q", "q 36 0 0 36 18 18 cm /Im Do Q 0 0 1 1 re f"] {
+        for content in ["0 0 m 72 0 l 72 72 l h W n q 36 0 0 36 18 18 cm /Im Do Q", "q 36 0 0 36 18 18 cm /Im Do Q 0 0 1 1 re f"] {
             let capture = crate::prepare::capture(&image_in("ffffffff00ffffffff", "", content), "capture".into(), "job".into()).unwrap();
             assert!(capture.raster_sources.is_empty());
             assert!(!capture.diagnostics.is_empty());
@@ -353,40 +362,53 @@ mod tests {
     }
     #[test]
     fn original_synthetic_mask_preparation_cases_are_retained_for_cross_runtime_checks() {
-        let Ok(directory) = std::env::var("CHECK_PREP_MASK_EVIDENCE_DIR") else {
-            return;
-        };
-        let directory = std::path::Path::new(&directory);
-        std::fs::create_dir_all(directory).unwrap();
+        let directory = std::env::var_os("CHECK_PREP_MASK_EVIDENCE_DIR").map(std::path::PathBuf::from);
+        if let Some(directory) = &directory {
+            std::fs::create_dir_all(directory).unwrap();
+        }
         let cases = [
             ("ring", image("ffffffff00ffffffff"), true),
             ("opaque", image("ffffffffffffffffff"), true),
             ("empty", image("000000000000000000"), true),
             ("fractional", image("ffffffff80ffffffff"), false),
-            ("clip", image_in("ffffffff00ffffffff", "", "0 0 72 72 re W n q 36 0 0 36 18 18 cm /Im Do Q"), false),
+            ("clip", image_in("ffffffff00ffffffff", "", "0 0 72 72 re W n q 36 0 0 36 18 18 cm /Im Do Q"), true),
             ("mixed", image_in("ffffffff00ffffffff", "", "q 36 0 0 36 18 18 cm /Im Do Q 0 0 1 1 re f"), false),
             ("rotate-unit", image_in("ffffffff00ffffffff", "/Rotate 90 /UserUnit 2", "q 24 0 0 36 6 18 cm /Im Do Q"), true),
             ("mirror", image_in("ff0000000000000000", "", "q -36 0 0 36 54 18 cm /Im Do Q"), true),
         ];
         let mut manifest = vec![];
         for (name, bytes, eligible) in cases {
-            std::fs::write(directory.join(format!("{name}.pdf")), &bytes).unwrap();
+            if let Some(directory) = &directory {
+                std::fs::write(directory.join(format!("{name}.pdf")), &bytes).unwrap();
+            }
             let capture = crate::prepare::capture(&bytes, "00000000-0000-4000-8000-000000000008".into(), "synthetic-raster-job".into()).unwrap();
             assert_eq!(!capture.raster_sources.is_empty(), eligible, "{name}");
             manifest.push(json!({"name":name,"eligible":eligible,"pdf_sha256":crate::sha256(&bytes)}));
             if eligible {
                 let (id, source) = capture.raster_sources.first_key_value().unwrap();
-                let mut edits = vec![decision(id, &source.mask.source_sha256)];
-                std::fs::write(directory.join(format!("{name}-edits.json")), serde_json::to_vec(&edits).unwrap()).unwrap();
+                let mut edit = decision(id, &source.mask.source_sha256);
+                edit.value["policy"] = json!(source.mask.boundary_policy());
+                let mut edits = vec![edit];
+                let prepared = crate::prepare_edits::replay(capture.clone(), &edits).unwrap();
+                assert!(prepared.diagnostics.is_empty(), "{name}: {:?}", prepared.diagnostics);
+                assert!(prepared.baseline.approval.is_none());
+                if let Some(directory) = &directory {
+                    std::fs::write(directory.join(format!("{name}-edits.json")), serde_json::to_vec(&edits).unwrap()).unwrap();
+                }
                 if name == "ring" {
                     let mut affine = edits[0].clone();
                     affine.value = json!({"kind":"affine","regions":[id],"matrix":[-2,0,0,2,50,5],"target_page":1});
                     edits.push(affine);
-                    std::fs::write(directory.join("ring-affine-edits.json"), serde_json::to_vec(&edits).unwrap()).unwrap();
+                    crate::prepare_edits::replay(capture.clone(), &edits).unwrap();
+                    if let Some(directory) = &directory {
+                        std::fs::write(directory.join("ring-affine-edits.json"), serde_json::to_vec(&edits).unwrap()).unwrap();
+                    }
                 }
             }
         }
-        std::fs::write(directory.join("manifest.json"), serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+        if let Some(directory) = &directory {
+            std::fs::write(directory.join("manifest.json"), serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+        }
     }
 }
 

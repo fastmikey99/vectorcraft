@@ -75,7 +75,9 @@ fn exact_form_clips_preserve_census_and_refuse_unknown_or_cropping_contexts() {
         assert_eq!(uses[0].form_clip_interior.is_some(), bounded, "{name}");
         let cropped = matches!(name, "touch" | "crop" | "nested-crop" | "outer-crop");
         assert_eq!(uses[0].retained_form_crop.is_some(), cropped, "{name}");
-        let captured = eligible || bounded || cropped;
+        let rectangular = matches!(name, "path-before" | "evenodd-before" | "nested-unknown" | "unknown-across-streams");
+        assert_eq!(uses[0].retained_rect_crop.is_some(), rectangular, "{name}");
+        let captured = eligible || bounded || cropped || rectangular;
         let capture = crate::prepare::capture(&bytes, "form-clip-test".into(), "synthetic".into()).unwrap();
         assert_eq!(capture.raster_sources.len(), usize::from(captured), "{name}: {:?}", capture.diagnostics);
         assert!(!capture.diagnostics.is_empty(), "a boundary decision remains required");
@@ -85,7 +87,7 @@ fn exact_form_clips_preserve_census_and_refuse_unknown_or_cropping_contexts() {
             std::fs::write(dir.join(format!("{name}-capture.json")), serde_json::to_vec(&capture).unwrap()).unwrap();
         }
         manifest
-            .push(json!({"name":name,"eligible":captured,"exact_eligible":eligible,"bounded_eligible":bounded,"retained_crop":cropped,"pdf_sha256":crate::sha256(&bytes)}));
+            .push(json!({"name":name,"eligible":captured,"exact_eligible":eligible,"bounded_eligible":bounded,"retained_crop":cropped,"rectangular_crop":rectangular,"pdf_sha256":crate::sha256(&bytes)}));
     }
     if let Some(dir) = &directory {
         std::fs::write(dir.join("cases.json"), serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
@@ -130,7 +132,7 @@ fn malformed_graphics_restore_cannot_escape_a_form_clip() {
 fn clip_proof_survives_content_reader_windows_without_erasing_unknown_clips() {
     let padding = "q Q ".repeat(40_000);
     for unknown in [false, true] {
-        let prefix = if unknown { "0 0 72 72 re W n " } else { "" };
+        let prefix = if unknown { "0 0 m 72 0 l 72 72 l h W n " } else { "" };
         let page = format!("{prefix}{padding}/F Do");
         let bytes = fixture("0 0 72 72", "", &page, IMAGE, "0 0 60 60", IMAGE, "");
         let raw = vectorcraft_pdf::print_order(&bytes).unwrap();
@@ -201,3 +203,79 @@ fn exact_form_transforms_and_nested_bounds_match_independent_direct_placements()
 
 #[path = "raster_prepare_decimal.rs"]
 mod decimal;
+
+#[test]
+fn rectangular_path_lifecycle_retains_decimal_edges_and_refuses_unknown_intersections() {
+    let draw = IMAGE;
+    let cases = [
+        ("decimal-path", "19.125 18 20.875 36 re W n", draw, "", true),
+        ("decimal-evenodd", "19.125 18 20.875 36 re W* n", draw, "", true),
+        ("negative-extents", "40 54 -20.875 -36 re W n", draw, "", true),
+        ("current-path-not-graphics-state", "q 1 0 0 1 10 0 cm 9.125 18 20.875 36 re Q W n", draw, "", false),
+        ("path-ctm-frozen", "19.125 18 20.875 36 re q 1 0 0 1 10 0 cm Q W n", draw, "", false),
+        ("two-intersections", "19.125 18 30 36 re W n 18 18 22 36 re W* n", draw, "", true),
+        ("clip-restored", "q 19.125 18 20.875 36 re W n Q", draw, "", true),
+        ("path-stream-split", "19.125 18 20.875 36 re W", "", "n q 36 0 0 36 18 18 cm /Im Do Q", true),
+        ("path-operand-stream-split", "19.125 18", "", "20.875 36 re W n q 36 0 0 36 18 18 cm /Im Do Q", true),
+        ("decimal-transform", "0.5 0 0 0.5 0 0 cm 38.25 36 41.75 72 re W n", "q 72 0 0 72 36 36 cm /Im Do Q", "", true),
+        ("nonbinary-decimal", "19.1 18 20.8 36 re W n", draw, "", true),
+        ("sub-resolution", "19.125 18 0.000001 36 re W n", draw, "", false),
+        ("multiple-subpaths", "19.125 18 20.875 36 re 20 20 2 2 re W n", draw, "", false),
+        ("unknown-then-known", "0 0 m 70 0 l 70 70 l h W n 19.125 18 20.875 36 re W n", draw, "", false),
+        ("known-then-unknown", "19.125 18 20.875 36 re W n 0 0 m 70 0 l 70 70 l h W n", draw, "", false),
+        ("empty-path", "W n", draw, "", false),
+        ("repeated-W", "19.125 18 20.875 36 re W W* n", draw, "", false),
+        ("empty-intersection", "0 0 1 1 re W n", draw, "", false),
+        ("sheared-path", "q 1 0.1 0 1 0 0 cm 19.125 18 20.875 36 re Q W n", draw, "", false),
+        ("oversize-coordinate", "1048577 18 20 36 re W n", draw, "", false),
+        ("rounded-lexeme", "19.12500000000000001 18 20.875 36 re W n", draw, "", false),
+    ];
+    let dir = std::env::var_os("CHECK_RECT_CLIP_EVIDENCE_DIR").map(std::path::PathBuf::from);
+    if let Some(dir) = &dir {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let mut manifest = vec![];
+    for (name, prefix, paint, tail, eligible) in cases {
+        let page = format!("{prefix} {paint}");
+        let bytes = fixture("0 0 72 72", "", &page, IMAGE, "0 0 60 60", IMAGE, tail);
+        let raw = vectorcraft_pdf::print_order(&bytes).unwrap();
+        assert_eq!(raw.images.iter().map(Vec::len).sum::<usize>(), 1, "{name}");
+        let capture = crate::prepare::capture(&bytes, "path-clip".into(), "synthetic".into()).unwrap();
+        assert_eq!(!capture.raster_sources.is_empty(), eligible, "{name}: {:?}; raw={}", capture.diagnostics, serde_json::to_string(&raw).unwrap());
+        if eligible {
+            assert!(capture.baseline.approval.is_none());
+            let mask = &capture.raster_sources["page-0-image-0"].mask;
+            assert_eq!(mask.clip.is_some(), name != "clip-restored");
+            if let Some(clip) = &mask.clip {
+                assert!(clip.edge_error_pixels <= 0.000002);
+                let expected = if name == "nonbinary-decimal" { [[11, 120], [0, 1], [73, 40], [3, 1]] } else { [[3, 32], [0, 1], [11, 6], [3, 1]] };
+                assert_eq!(clip.edges, expected, "{name}");
+            }
+        }
+        if let Some(dir) = &dir {
+            std::fs::write(dir.join(format!("{name}.pdf")), &bytes).unwrap();
+            std::fs::write(dir.join(format!("{name}-raw.json")), serde_json::to_vec(&raw).unwrap()).unwrap();
+            std::fs::write(dir.join(format!("{name}-capture.json")), serde_json::to_vec(&capture).unwrap()).unwrap();
+        }
+        manifest.push(json!({"name":name,"eligible":eligible,"sha256":crate::sha256(&bytes)}));
+    }
+    if let Some(dir) = &dir {
+        std::fs::write(dir.join("cases.json"), serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn unfinished_path_cannot_leak_across_form_calls_or_certify_an_image_before_n() {
+    for (page, form) in [
+        ("19.125 18 20.875 36 re W /F Do n", IMAGE),
+        ("/F Do", "19.125 18 20.875 36 re W q 36 0 0 36 18 18 cm /Im Do Q n"),
+        ("19.125 18 20.875 36 re /F Do W n", IMAGE),
+        ("/F Do", "q 36 0 0 36 18 18 cm /Im Do Q 0 0 m"),
+    ] {
+        let bytes = fixture("0 0 72 72", "", page, form, "0 0 60 60", IMAGE, "");
+        let raw = vectorcraft_pdf::print_order(&bytes).unwrap();
+        assert!(raw.issues.iter().any(|s| s.contains("path")), "{page} / {form}");
+        let captured = crate::prepare::capture(&bytes, "interleaving".into(), "synthetic".into()).unwrap();
+        assert!(captured.raster_sources.is_empty());
+    }
+}

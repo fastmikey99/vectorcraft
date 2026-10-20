@@ -37,7 +37,7 @@ fn retained_form_containment_resolves_source_continuity_without_waiving_defects(
         ("form-shift-defect", "0 0 72 72", "", SAMPLES, "36 0 0 36 19 18", Status::Fail),
         ("form-cropped", "18 18 40 54", "", SAMPLES, MATRIX, Status::Incomplete),
         ("form-touching", "18 18 54 54", "", SAMPLES, MATRIX, Status::Pass),
-        ("form-path-unknown", "0 0 72 72", "0 0 72 72 re W n", SAMPLES, MATRIX, Status::Incomplete),
+        ("form-path-unknown", "0 0 72 72", "0 0 72 72 re W n", SAMPLES, MATRIX, Status::Pass),
         ("form-rounded-matrix", "0 0 72 72", "", SAMPLES, "36.0000000000000000001 0 0 36 18 18", Status::Incomplete),
     ] {
         let bytes = form(samples, bbox, prefix, matrix);
@@ -122,8 +122,8 @@ fn decimal_containment_keeps_full_source_and_defect_obligations() {
         ("decimal-form-tone-defect", ".25 .25 71.75 71.75", "", "1120406080a0c0e0ff", MATRIX, Status::Fail),
         ("decimal-form-shift-defect", ".25 .25 71.75 71.75", "", SAMPLES, "36 0 0 36 18.25 18.25", Status::Fail),
         ("decimal-form-cropped", "18.25 18.25 40.25 54.25", "", SAMPLES, MATRIX, Status::Incomplete),
-        ("decimal-form-near-edge", "17.99 17.99 54.01 54.01", "", SAMPLES, MATRIX, Status::Incomplete),
-        ("decimal-form-path", ".25 .25 71.75 71.75", "0 0 72 72 re W n", SAMPLES, MATRIX, Status::Incomplete),
+        ("decimal-form-near-edge", "17.99 17.99 54.01 54.01", "", SAMPLES, MATRIX, Status::Pass),
+        ("decimal-form-path", ".25 .25 71.75 71.75", "0 0 72 72 re W n", SAMPLES, MATRIX, Status::Pass),
         ("decimal-form-precision", ".25 .25 71.750000000000000001 71.75", "", SAMPLES, MATRIX, Status::Incomplete),
     ] {
         let bytes = form(samples, bbox, prefix, matrix);
@@ -157,8 +157,8 @@ fn retained_crop_compares_partial_cell_tones_hidden_samples_and_boundary() {
         ("crop-right-edge-defect", "19 18 41 54", SAMPLES, MATRIX, Status::Fail),
         ("crop-shift-defect", "19 18 40 54", SAMPLES, "36 0 0 36 19 18", Status::Fail),
         ("crop-reflected", "19 18 40 54", "402000a08060ffe0c0", "-36 0 0 36 54 18", Status::Pass),
-        ("crop-unknown-path", "19 18 40 54", SAMPLES, MATRIX, Status::Incomplete),
-        ("crop-decimal-unqualified", "19.25 18 40 54", SAMPLES, MATRIX, Status::Incomplete),
+        ("crop-unknown-path", "19 18 40 54", SAMPLES, MATRIX, Status::Pass),
+        ("crop-decimal-unqualified", "19.25 18 40 54", SAMPLES, MATRIX, Status::Fail),
         ("crop-grid-changed", "19 18 52 54", SAMPLES, MATRIX, Status::Incomplete),
     ] {
         let prefix = if name == "crop-unknown-path" { "0 0 144 144 re W n" } else { "" };
@@ -264,6 +264,90 @@ fn crop_boundary_refusal_never_hides_proven_sample_or_route_failure() {
         assert!(finding.observed["retained_crop_boundary"]["reason"].as_str().unwrap().contains("touch"));
         if want == Status::Fail {
             assert_eq!(report.status, Status::Fail);
+        }
+    }
+}
+
+#[test]
+fn decimal_path_and_form_crops_reconcile_visible_samples_and_boundaries() {
+    let source = form(SAMPLES, "0 0 144 144", "19.125 18 20.875 36 re W n", MATRIX);
+    for (name, bbox, prefix, samples, matrix, expected) in [
+        ("rect-identical", "0 0 144 144", "19.125 18 20.875 36 re W n", SAMPLES, MATRIX, Status::Pass),
+        ("rect-form-equivalent", "19.125 18 40 54", "", SAMPLES, MATRIX, Status::Pass),
+        ("rect-evenodd-equivalent", "0 0 144 144", "19.125 18 20.875 36 re W* n", SAMPLES, MATRIX, Status::Pass),
+        ("rect-negative-extent", "0 0 144 144", "40 54 -20.875 -36 re W n", SAMPLES, MATRIX, Status::Pass),
+        ("rect-hidden-tone", "0 0 144 144", "19.125 18 20.875 36 re W n", "002011608011c0e011", MATRIX, Status::Pass),
+        ("rect-visible-tone", "0 0 144 144", "19.125 18 20.875 36 re W n", "1120406080a0c0e0ff", MATRIX, Status::Fail),
+        ("rect-left-defect", "0 0 144 144", "20.125 18 19.875 36 re W n", SAMPLES, MATRIX, Status::Fail),
+        ("rect-right-defect", "0 0 144 144", "19.125 18 21.875 36 re W n", SAMPLES, MATRIX, Status::Fail),
+        ("rect-reflection", "0 0 144 144", "19.125 18 20.875 36 re W n", "402000a08060ffe0c0", "-36 0 0 36 54 18", Status::Pass),
+        ("rect-shift-defect", "0 0 144 144", "19.125 18 20.875 36 re W n", SAMPLES, "36 0 0 36 19 18", Status::Fail),
+        ("rect-unknown-subpath", "0 0 144 144", "19.125 18 20.875 36 re 20 20 2 2 re W n", SAMPLES, MATRIX, Status::Incomplete),
+        ("rect-rounded-operand", "0 0 144 144", "19.12500000000000001 18 20.875 36 re W n", SAMPLES, MATRIX, Status::Incomplete),
+    ] {
+        let bytes = form(samples, bbox, prefix, matrix);
+        let r = request_for_original(&source, &bytes, &[]);
+        check_source(name, &r, &bytes, &source, expected);
+    }
+    let source = form(SAMPLES, "0 0 144 144", "19.1 18 20.8 36 re W n", MATRIX);
+    let bytes = form(SAMPLES, "19.1 18 39.9 54", "", MATRIX);
+    let r = request_for_original(&source, &bytes, &[]);
+    check_source("rect-nonbinary-decimal-equivalent", &r, &bytes, &source, Status::Pass);
+    let mut no_tolerance = r.clone();
+    no_tolerance.acceptance.remove("geometry_tolerance_mm");
+    no_tolerance.identity.measurement_sha256 = crate::digest(&no_tolerance.acceptance).unwrap();
+    check_source("rect-unapproved-tolerance", &no_tolerance, &bytes, &source, Status::Incomplete);
+}
+
+#[test]
+#[ignore = "requires an explicitly configured independent Ghostscript binary"]
+fn decimal_path_lifecycle_matches_independent_form_samples() {
+    let Ok(binary) = std::env::var("CHECK_GS_BINARY") else { return };
+    let base = std::env::var_os("CHECK_FEATURE_EVIDENCE_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let reference = form(SAMPLES, "19.125 18 40 54", "", MATRIX);
+    for (name, prefix, samples, matrix, same) in [
+        ("decimal-path", "19.125 18 20.875 36 re W n", SAMPLES, MATRIX, true),
+        ("evenodd", "19.125 18 20.875 36 re W* n", SAMPLES, MATRIX, true),
+        ("negative-extents", "40 54 -20.875 -36 re W n", SAMPLES, MATRIX, true),
+        ("path-outlives-q", "q 1 0 0 1 10 0 cm 9.125 18 20.875 36 re Q W n", SAMPLES, MATRIX, false),
+        ("hidden-tone", "19.125 18 20.875 36 re W n", "002011608011c0e011", MATRIX, true),
+        ("visible-tone", "19.125 18 20.875 36 re W n", "1120406080a0c0e0ff", MATRIX, false),
+        ("left-edge", "20.125 18 19.875 36 re W n", SAMPLES, MATRIX, false),
+        ("right-edge", "19.125 18 21.875 36 re W n", SAMPLES, MATRIX, false),
+    ] {
+        let bytes = form(samples, "0 0 144 144", prefix, matrix);
+        for dpi in [72, 144] {
+            let config = crate::independent::Configuration {
+                binary: binary.clone().into(),
+                binary_sha256: crate::sha256(&std::fs::read(&binary).unwrap()),
+                version: "10.07.1".into(),
+                dpi,
+                timeout_ms: 10000,
+                max_output_bytes: 16 * 1024 * 1024,
+                qualification_sha256: None,
+            };
+            let mut signatures = vec![];
+            let mut renders = vec![];
+            for (role, pdf) in [("form", &reference), ("path", &bytes)] {
+                let output = base.join(format!("rect-crop-{stamp}-{name}-{dpi}-{role}"));
+                let render = crate::independent::render(&config, pdf, &output).unwrap();
+                assert!(!render.qualified && render.diagnostics.is_empty());
+                signatures.push(
+                    render
+                        .planes
+                        .iter()
+                        .map(|p| {
+                            let pixels = image::open(&p.path).unwrap();
+                            assert_eq!(pixels.color(), image::ColorType::L8);
+                            ((p.page, p.name.clone()), (p.width, p.height, crate::sha256(pixels.as_bytes())))
+                        })
+                        .collect::<std::collections::BTreeMap<_, _>>(),
+                );
+                renders.push(render);
+            }
+            assert_eq!(signatures[0] == signatures[1], same, "{name}/{dpi}");
+            std::fs::write(base.join(format!("rect-crop-{stamp}-{name}-{dpi}.json")),serde_json::to_vec_pretty(&json!({"engine":crate::ENGINE_VERSION,"name":name,"dpi":dpi,"samples_equal":same,"renders":renders,"configuration":config,"pdf_sha256":{"form":crate::sha256(&reference),"path":crate::sha256(&bytes)}})).unwrap()).unwrap();
         }
     }
 }

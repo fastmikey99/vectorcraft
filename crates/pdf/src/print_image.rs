@@ -29,6 +29,12 @@ impl PrintRenderingIntent {
     }
 }
 pub(crate) const MAX_IMAGES: usize = 4096;
+/// Exact top-down pixel crop, with separately bounded parsing/arithmetic error.
+#[derive(Clone, Debug, Serialize)]
+pub struct PrintRectCrop {
+    pub edges: [[u64; 2]; 4],
+    pub edge_error_pixels: f64,
+}
 #[derive(Clone, Debug, Serialize)]
 pub struct PrintImageUse {
     /// Decoded source-space samples; unresolved compositing remains separately reported.
@@ -68,6 +74,10 @@ pub struct PrintImageUse {
     /// Only emitted when neither existing containment witness is available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retained_form_crop: Option<([i64; 4], [i64; 6])>,
+    /// Complete rectangular path/Form intersection. Existing witnesses above take
+    /// priority so previously captured source identities do not change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retained_rect_crop: Option<PrintRectCrop>,
     pub overprint: bool,
     pub overprint_mode: u8,
     pub description: PrintImageDescription,
