@@ -5252,3 +5252,5 @@ mark-style	Japanese	Japonské
 @msg	the image has its own transparency and an opacity mask: release the mask first	obrázek má vlastní průhlednost i masku krytí: nejprve masku uvolněte
 @msg	level must be a whole number from 1 to 255	level musí být celé číslo od 1 do 255
 @msg	copies must be true or false	copies musí být true nebo false
+@msg	the image's opacity mask has its own transparency: release it first	maska krytí obrázku má vlastní průhlednost: nejprve ji uvolněte
+@msg	id must name an image	id musí označovat obrázek

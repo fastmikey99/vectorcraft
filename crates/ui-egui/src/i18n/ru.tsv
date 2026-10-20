@@ -4862,3 +4862,5 @@ lighting	Light	Свет
 @msg	the image has its own transparency and an opacity mask: release the mask first	у изображения есть собственная прозрачность и маска непрозрачности: сначала освободите маску
 @msg	level must be a whole number from 1 to 255	level должен быть целым числом от 1 до 255
 @msg	copies must be true or false	copies должен быть true или false
+@msg	the image's opacity mask has its own transparency: release it first	у маски непрозрачности изображения есть собственная прозрачность: сначала освободите её
+@msg	id must name an image	id должен указывать на изображение

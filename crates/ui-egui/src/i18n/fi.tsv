@@ -5215,3 +5215,5 @@ mark-style	Japanese	Japanilainen
 @msg	the image has its own transparency and an opacity mask: release the mask first	kuvalla on oma läpinäkyvyys ja peittävyysmaski: vapauta maski ensin
 @msg	level must be a whole number from 1 to 255	level on oltava kokonaisluku väliltä 1–255
 @msg	copies must be true or false	copies on oltava true tai false
+@msg	the image's opacity mask has its own transparency: release it first	kuvan peittävyysmaskilla on oma läpinäkyvyys: vapauta se ensin
+@msg	id must name an image	id:n on nimettävä kuva

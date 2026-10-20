@@ -5251,3 +5251,5 @@ theme	Appearance	Apparence
 @msg	the image has its own transparency and an opacity mask: release the mask first	l’image a sa propre transparence et un masque d’opacité : libérez d’abord le masque
 @msg	level must be a whole number from 1 to 255	level doit être un nombre entier de 1 à 255
 @msg	copies must be true or false	copies doit valoir true ou false
+@msg	the image's opacity mask has its own transparency: release it first	le masque d’opacité de l’image a sa propre transparence : libérez-le d’abord
+@msg	id must name an image	id doit désigner une image

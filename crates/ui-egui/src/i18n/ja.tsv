@@ -4906,3 +4906,5 @@ lighting	Light	ライト
 @msg	the image has its own transparency and an opacity mask: release the mask first	画像に独自の透明部分と不透明マスクがあります: 先にマスクを解除してください
 @msg	level must be a whole number from 1 to 255	level は 1 から 255 の整数でなければなりません
 @msg	copies must be true or false	copies は true または false でなければなりません
+@msg	the image's opacity mask has its own transparency: release it first	画像の不透明マスクに独自の透明部分があります: 先に解除してください
+@msg	id must name an image	id は画像を指定する必要があります

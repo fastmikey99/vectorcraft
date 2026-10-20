@@ -8,12 +8,14 @@
 //!   and depth, keeping the source PNG's colour and resolution chunks (`iCCP`, `sRGB`, `gAMA`,
 //!   `cHRM`, `cICP`, `pHYs`).
 //! - **A greyscale opacity mask**: the image's opacity mask is one embedded greyscale image (8 or
-//!   16 bits), which is how a PDF image with a soft mask is read when its colour samples are CMYK
+//!   16 bits) drawn as it is (no opacity, blend mode, effects or mask of its own), which is how a PDF image with a soft mask is read when its colour samples are CMYK
 //!   (the inks stay as they are, see the PDF importer's `alpha_mask`). The mask's image is the one
 //!   thresholded (its `invert` honoured); the colour image isn't touched at all.
 //!
 //! An image with neither (a JPEG, a CMYK TIFF without a mask) has nothing to remove and is
-//! refused. Alpha at or above `level` becomes opaque, below it clear. Colour samples are copied as
+//! refused. An image whose own alpha is not fully opaque everywhere and that also has a mask is
+//! refused (the two would combine); own alpha that is fully opaque plus a mask thresholds the mask,
+//! which is then the whole effective transparency. Alpha at or above `level` becomes opaque, below it clear. Colour samples are copied as
 //! they are, never through premultiplied colour, so soft pixels keep their exact colour values.
 //! The result is decoded again and checked against the source before it is kept: every alpha 0 or
 //! full, equal to the thresholded source at every pixel, every colour sample unchanged.
@@ -36,7 +38,7 @@ pub fn specs() -> Vec<CommandSpec> {
         "Remove Soft Pixels",
         [],
         None,
-        "{id?: image (default: the one selected object), level?: 1–255 (128: alpha at or above it becomes opaque, below it clear), copies?: bool (default false; true: also every other image showing the same pixels and transparency at the same printed size)} every pixel of one embedded image fully opaque or fully clear: its own alpha channel, or the greyscale image of its opacity mask; colour samples and the pixel grid are kept exactly, the result is checked against the source before it is kept; one undo step → {id, ids (the images changed, in document order; empty when no pixel was soft), form: \"alpha\"|\"mask\", width, height (of the samples thresholded), level, softPixels (alpha 1–254 before), clearPixels, opaquePixels (after)}",
+        "{id?: image id (absent: the one selected object; any other id that doesn't name an image is refused), level?: 1–255 (128: alpha at or above it becomes opaque, below it clear), copies?: bool (default false; true: also every other image showing the same pixels and transparency at the same printed size)} every pixel of one embedded image fully opaque or fully clear: its own alpha channel, or the greyscale image of its opacity mask; colour samples and the pixel grid are kept exactly, the result is checked against the source before it is kept; one undo step → {id, ids (the images changed, in document order; empty when no pixel was soft), form: \"alpha\"|\"mask\", width, height (of the samples thresholded), level, softPixels (alpha 1–254 before), clearPixels, opaquePixels (after)}",
         has_doc,
         solidify
     )]
@@ -56,13 +58,31 @@ enum Form {
     Mask { key: String, invert: bool },
 }
 
-/// The opacity mask in force on `n`: its image's key and `invert` when it is one embedded image;
-/// `Err` when it is other art; `None` without one (or when it is disabled).
-fn mask_image(n: &Node) -> Option<std::result::Result<(String, bool), ()>> {
+/// Why an opacity mask can't be thresholded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MaskRefusal {
+    /// Its art isn't one embedded image.
+    NotOneImage,
+    /// Its image has transparency of its own (opacity, a blend mode, effects, appearance items or
+    /// an opacity mask of its own), which would leave the effective transparency soft.
+    Transparent,
+}
+
+/// The opacity mask in force on `n`: its image's key and `invert` when it is one embedded image
+/// drawn as it is; `Err` otherwise; `None` without one (or when it is disabled).
+fn mask_image(n: &Node) -> Option<std::result::Result<(String, bool), MaskRefusal>> {
     let m = n.extras().mask.as_deref().filter(|m| !m.disabled)?;
-    Some(match &m.art.kind {
-        NodeKind::Image(im) if im.link.is_none() && m.art.opacity >= 1.0 => Ok((im.key.clone(), m.invert)),
-        _ => Err(()),
+    let art = &m.art;
+    Some(match &art.kind {
+        NodeKind::Image(im) if im.link.is_none() => {
+            let plain = art.opacity >= 1.0
+                && art.blend == vectorcraft_color::BlendMode::Normal
+                && art.appearance.effects.is_empty()
+                && art.appearance.items.is_empty()
+                && art.extras().mask.is_none();
+            if plain { Ok((im.key.clone(), m.invert)) } else { Err(MaskRefusal::Transparent) }
+        }
+        _ => Err(MaskRefusal::NotOneImage),
     })
 }
 
@@ -77,7 +97,10 @@ fn form_of(n: &Node) -> Result<(&ImageObject, Form)> {
     let form = match mask_image(n) {
         None => Form::Alpha,
         Some(Ok((key, invert))) => Form::Mask { key, invert },
-        Some(Err(())) => return Err(EngineError::Other("the image's opacity mask isn't one greyscale image".into())),
+        Some(Err(MaskRefusal::NotOneImage)) => return Err(EngineError::Other("the image's opacity mask isn't one greyscale image".into())),
+        Some(Err(MaskRefusal::Transparent)) => {
+            return Err(EngineError::Other("the image's opacity mask has its own transparency: release it first".into()));
+        }
     };
     Ok((im, form))
 }
@@ -341,9 +364,16 @@ fn solidify(s: &mut Session, p: &Value) -> Result<Value> {
         Some(v) => v.as_bool().ok_or_else(|| bad(C, "copies must be true or false"))?,
     };
     let st = s.doc()?;
-    let id = match id_param(p, "id") {
-        Some(id) => id,
-        None => match st.selection.objects.as_slice() {
+    // Only an absent id (or null) takes the selection: any other id must name an image.
+    let id = match p.get("id") {
+        Some(v) if !v.is_null() => {
+            let id = v.as_u64().map(vectorcraft_doc::NodeId).ok_or_else(|| bad(C, "id must name an image"))?;
+            if !matches!(st.doc.node(id).map(|n| &n.kind), Some(NodeKind::Image(_))) {
+                return Err(bad(C, "id must name an image"));
+            }
+            id
+        }
+        _ => match st.selection.objects.as_slice() {
             [id] => *id,
             _ => return Err(EngineError::Other("select one image to remove its soft pixels".into())),
         },

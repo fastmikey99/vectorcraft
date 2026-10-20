@@ -5158,3 +5158,5 @@ imageTrace	Outline	კონტური
 @msg	the image has its own transparency and an opacity mask: release the mask first	გამოსახულებას აქვს საკუთარი გამჭვირვალობა და გაუმჭვირვალობის ნიღაბი: ჯერ გაათავისუფლეთ ნიღაბი
 @msg	level must be a whole number from 1 to 255	level უნდა იყოს მთელი რიცხვი 1-დან 255-მდე
 @msg	copies must be true or false	copies უნდა იყოს true ან false
+@msg	the image's opacity mask has its own transparency: release it first	გამოსახულების გაუმჭვირვალობის ნიღაბს აქვს საკუთარი გამჭვირვალობა: ჯერ გაათავისუფლეთ ის
+@msg	id must name an image	id უნდა მიუთითებდეს გამოსახულებაზე

@@ -4846,3 +4846,5 @@ theme	Appearance	Giao diện
 @msg	the image has its own transparency and an opacity mask: release the mask first	hình ảnh có độ trong suốt riêng và mặt nạ độ mờ: hãy giải phóng mặt nạ trước
 @msg	level must be a whole number from 1 to 255	level phải là số nguyên từ 1 đến 255
 @msg	copies must be true or false	copies phải là true hoặc false
+@msg	the image's opacity mask has its own transparency: release it first	mặt nạ độ mờ của hình ảnh có độ trong suốt riêng: hãy giải phóng nó trước
+@msg	id must name an image	id phải chỉ định một hình ảnh

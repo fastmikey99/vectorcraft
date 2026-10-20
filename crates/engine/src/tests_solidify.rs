@@ -223,7 +223,7 @@ fn only_one_embedded_image_is_taken() {
     // By id, without a selection.
     assert_eq!(s.execute(C, &json!({"id": ids[1].0})).unwrap()["ids"], json!([ids[1].0]));
     let r = s.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 10, "height": 10})).unwrap();
-    assert!(s.execute(C, &json!({"id": r["id"]})).unwrap_err().to_string().contains("select one image"));
+    assert!(s.execute(C, &json!({"id": r["id"]})).unwrap_err().to_string().contains("id must name an image"));
     assert!(s.execute(C, &json!({"id": 999_999})).is_err());
     // A linked image.
     let id = ids[0];
@@ -376,4 +376,78 @@ fn the_check_catches_a_result_that_isnt_the_threshold() {
     soft.get_pixel_mut(4, 0).0[3] = 200;
     assert!(!crate::cmd::solidify::check(&src, &DynamicImage::ImageRgba8(soft), 128, None), "a soft alpha left");
     assert!(!crate::cmd::solidify::check(&src, &DynamicImage::ImageRgba16(good.to_rgba16()), 128, None), "another colour type");
+}
+
+#[test]
+fn an_id_given_must_name_an_image_and_never_falls_back_to_the_selection() {
+    let (mut s, ids) = session_with(png(DynamicImage::ImageRgba8(rgba_row())), (7, 1), &[1.0]);
+    select(&mut s, ids[0]);
+    let rect = s.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 10, "height": 10})).unwrap()["id"].clone();
+    select(&mut s, ids[0]);
+    let before = s.doc().unwrap().doc.clone();
+    let undo = s.doc().unwrap().history.undo.len();
+    for bad in [json!("invalid"), json!(-1), json!(0), json!(1.5), json!(999_999), json!(true), json!([ids[0].0]), rect] {
+        let e = s.execute(C, &json!({"id": bad})).unwrap_err().to_string();
+        assert!(e.contains("id must name an image"), "{bad}: {e}");
+        assert_eq!(s.doc().unwrap().history.undo.len(), undo, "{bad}: nothing changed");
+        assert_eq!(*s.doc().unwrap().doc, *before, "{bad}: the selected image is left alone");
+    }
+    // Absent (or null): the selection.
+    assert_eq!(s.execute(C, &json!({"id": null})).unwrap()["ids"], json!([ids[0].0]));
+}
+
+#[test]
+fn a_mask_whose_image_has_transparency_of_its_own_is_refused() {
+    let cases: [fn(&mut Document, &mut Node); 4] = [
+        |_, art| art.opacity = 0.5,
+        |_, art| art.blend = vectorcraft_color::BlendMode::Multiply,
+        |d, art| {
+            let inner = image_node(d, "mask", (7, 1), 0.0, 1.0);
+            art.extras_mut().mask = Some(Box::new(OpacityMask::new(inner, true)));
+        },
+        |d, art| {
+            // Even a disabled mask of the mask's own.
+            let inner = image_node(d, "mask", (7, 1), 0.0, 1.0);
+            let mut m = OpacityMask::new(inner, true);
+            m.disabled = true;
+            art.extras_mut().mask = Some(Box::new(m));
+        },
+    ];
+    for (i, change) in cases.iter().enumerate() {
+        let (mut s, ids, _) = masked_session(ALPHAS.to_vec(), 7, 1, false, 1);
+        let id = ids[0];
+        s.edit("t", |d, _| {
+            let mut art = (*d.node(id).unwrap().extras().mask.as_ref().unwrap().art).clone();
+            change(d, &mut art);
+            d.node_mut(id).unwrap().extras_mut().mask.as_deref_mut().unwrap().art = Arc::new(art);
+            Ok(())
+        })
+        .unwrap();
+        select(&mut s, id);
+        let before = s.doc().unwrap().doc.clone();
+        let e = s.execute(C, &json!({})).unwrap_err().to_string();
+        assert!(e.contains("the image's opacity mask has its own transparency: release it first"), "case {i}: {e}");
+        assert_eq!(*s.doc().unwrap().doc, *before, "case {i}");
+    }
+}
+
+#[test]
+fn fully_opaque_own_alpha_under_a_mask_thresholds_the_mask() {
+    let opaque = png(DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(7, 1, image::Rgba([1, 2, 3, 255]))));
+    let (mut s, ids) = session_with(opaque, (7, 1), &[1.0]);
+    let id = ids[0];
+    s.edit("t", |d, _| {
+        d.images.insert(
+            "mask".into(),
+            ImageBlob::new("image/png", png(DynamicImage::ImageLuma8(image::GrayImage::from_raw(7, 1, ALPHAS.to_vec()).unwrap()))),
+        );
+        let art = image_node(d, "mask", (7, 1), 0.0, 1.0);
+        d.node_mut(id).unwrap().extras_mut().mask = Some(Box::new(OpacityMask::new(art, true)));
+        Ok(())
+    })
+    .unwrap();
+    select(&mut s, id);
+    let r = s.execute(C, &json!({})).unwrap();
+    assert_eq!((r["form"].clone(), counts(&r)), (json!("mask"), (5, 3, 4)));
+    assert_eq!(key_of(&s, id), "src");
 }

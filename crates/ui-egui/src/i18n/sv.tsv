@@ -5207,3 +5207,5 @@ theme	Appearance	Utseende
 @msg	the image has its own transparency and an opacity mask: release the mask first	bilden har egen genomskinlighet och en opacitetsmask: frigör masken först
 @msg	level must be a whole number from 1 to 255	level måste vara ett heltal från 1 till 255
 @msg	copies must be true or false	copies måste vara true eller false
+@msg	the image's opacity mask has its own transparency: release it first	bildens opacitetsmask har egen genomskinlighet: frigör den först
+@msg	id must name an image	id måste ange en bild

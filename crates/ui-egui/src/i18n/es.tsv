@@ -5194,3 +5194,5 @@ mark-style	Japanese	Japonesas
 @msg	the image has its own transparency and an opacity mask: release the mask first	la imagen tiene transparencia propia y una máscara de opacidad: libere primero la máscara
 @msg	level must be a whole number from 1 to 255	level debe ser un número entero de 1 a 255
 @msg	copies must be true or false	copies debe ser true o false
+@msg	the image's opacity mask has its own transparency: release it first	la máscara de opacidad de la imagen tiene transparencia propia: libérela primero
+@msg	id must name an image	id debe indicar una imagen

@@ -4883,3 +4883,5 @@ lighting	Light	光源
 @msg	the image has its own transparency and an opacity mask: release the mask first	影像同時有自身的透明度和不透明度遮色片：請先釋放遮色片
 @msg	level must be a whole number from 1 to 255	level 必須是 1 到 255 之間的整數
 @msg	copies must be true or false	copies 必須是 true 或 false
+@msg	the image's opacity mask has its own transparency: release it first	影像的不透明度遮色片有自身的透明度：請先釋放它
+@msg	id must name an image	id 必須指定一個影像

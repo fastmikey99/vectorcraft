@@ -5203,3 +5203,5 @@ effect	Points	Σημεία
 @msg	the image has its own transparency and an opacity mask: release the mask first	η εικόνα έχει δική της διαφάνεια και μάσκα αδιαφάνειας: αποδεσμεύστε πρώτα τη μάσκα
 @msg	level must be a whole number from 1 to 255	το level πρέπει να είναι ακέραιος από 1 έως 255
 @msg	copies must be true or false	το copies πρέπει να είναι true ή false
+@msg	the image's opacity mask has its own transparency: release it first	η μάσκα αδιαφάνειας της εικόνας έχει δική της διαφάνεια: αποδεσμεύστε την πρώτα
+@msg	id must name an image	το id πρέπει να ορίζει μια εικόνα

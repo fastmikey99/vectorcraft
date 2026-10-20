@@ -5214,3 +5214,5 @@ theme	Appearance	Външен вид
 @msg	the image has its own transparency and an opacity mask: release the mask first	изображението има собствена прозрачност и маска за непрозрачност: първо освободете маската
 @msg	level must be a whole number from 1 to 255	level трябва да е цяло число от 1 до 255
 @msg	copies must be true or false	copies трябва да е true или false
+@msg	the image's opacity mask has its own transparency: release it first	маската за непрозрачност на изображението има собствена прозрачност: първо я освободете
+@msg	id must name an image	id трябва да посочва изображение

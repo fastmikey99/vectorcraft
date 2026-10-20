@@ -5238,3 +5238,5 @@ imageTrace	Outline	Körvonal
 @msg	the image has its own transparency and an opacity mask: release the mask first	a képnek saját átlátszósága és átlátszósági maszkja is van: előbb engedje fel a maszkot
 @msg	level must be a whole number from 1 to 255	a level értéke 1 és 255 közötti egész szám kell legyen
 @msg	copies must be true or false	a copies értéke true vagy false kell legyen
+@msg	the image's opacity mask has its own transparency: release it first	a kép átlátszósági maszkjának saját átlátszósága van: előbb engedje fel
+@msg	id must name an image	az id értékének egy képet kell megadnia
