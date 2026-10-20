@@ -5197,6 +5197,18 @@ theme	Appearance	Utseende
 	Export Pattern Image	Exportera mönsterbild
 	Replace Pattern Image	Ersätt mönsterbild
 @msg	Line weight check failed: {e}	Kontrollen av linjetjocklek misslyckades: {e}
+	Remove Soft Pixels	Ta bort mjuka pixlar
+@msg	select one image to remove its soft pixels	markera en bild för att ta bort dess mjuka pixlar
+@msg	the image is linked: embed it to remove its soft pixels	bilden är länkad: bädda in den för att ta bort dess mjuka pixlar
+@msg	the image's opacity mask isn't one greyscale image	bildens opacitetsmask är inte en enda gråskalebild
+@msg	the image has no transparency: nothing to remove	bilden har ingen genomskinlighet: inget att ta bort
+@msg	the image's pixels couldn't be written	bildens pixlar kunde inte skrivas
+@msg	removing soft pixels failed its check: nothing was changed	borttagningen av mjuka pixlar klarade inte kontrollen: inget ändrades
+@msg	the image has its own transparency and an opacity mask: release the mask first	bilden har egen genomskinlighet och en opacitetsmask: frigör masken först
+@msg	level must be a whole number from 1 to 255	level måste vara ett heltal från 1 till 255
+@msg	copies must be true or false	copies måste vara true eller false
+@msg	the image's opacity mask has its own transparency: release it first	bildens opacitetsmask har egen genomskinlighet: frigör den först
+@msg	id must name an image	id måste ange en bild
 	Run Separation Action Lists	Kör åtgärdslistor för färgseparation
 @msg	PAL XML nesting exceeds 32 levels	PAL XML-nästling överskrider 32 nivåer
 @msg	PAL action has no Type	PAL-åtgärden saknar Type

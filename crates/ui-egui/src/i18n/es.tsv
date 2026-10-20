@@ -5184,6 +5184,18 @@ mark-style	Japanese	Japonesas
 	Unassigned	Sin asignar
 @msg	Invalid separation context or too many entries	Contexto de separación no válido o demasiadas entradas
 @msg	Invalid or duplicate separation name/component	Nombre de separación o componente no válido o duplicado
+	Remove Soft Pixels	Quitar píxeles suaves
+@msg	select one image to remove its soft pixels	seleccione una imagen para quitar sus píxeles suaves
+@msg	the image is linked: embed it to remove its soft pixels	la imagen está vinculada: incrústela para quitar sus píxeles suaves
+@msg	the image's opacity mask isn't one greyscale image	la máscara de opacidad de la imagen no es una sola imagen en escala de grises
+@msg	the image has no transparency: nothing to remove	la imagen no tiene transparencia: no hay nada que quitar
+@msg	the image's pixels couldn't be written	no se pudieron escribir los píxeles de la imagen
+@msg	removing soft pixels failed its check: nothing was changed	quitar los píxeles suaves no superó la comprobación: no se cambió nada
+@msg	the image has its own transparency and an opacity mask: release the mask first	la imagen tiene transparencia propia y una máscara de opacidad: libere primero la máscara
+@msg	level must be a whole number from 1 to 255	level debe ser un número entero de 1 a 255
+@msg	copies must be true or false	copies debe ser true o false
+@msg	the image's opacity mask has its own transparency: release it first	la máscara de opacidad de la imagen tiene transparencia propia: libérela primero
+@msg	id must name an image	id debe indicar una imagen
 	Run Separation Action Lists	Ejecutar listas de acciones de separación
 @msg	PAL XML nesting exceeds 32 levels	El anidamiento XML de PAL supera los 32 niveles
 @msg	PAL action has no Type	La acción PAL no tiene Type

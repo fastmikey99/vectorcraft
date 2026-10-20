@@ -4896,6 +4896,18 @@ lighting	Light	ライト
 	Unassigned	未割り当て
 @msg	Invalid separation context or too many entries	色分解情報が無効か、項目が多すぎます
 @msg	Invalid or duplicate separation name/component	色分解名または構成要素が無効か重複しています
+	Remove Soft Pixels	ソフトピクセルを除去
+@msg	select one image to remove its soft pixels	ソフトピクセルを除去する画像を 1 つ選択してください
+@msg	the image is linked: embed it to remove its soft pixels	画像はリンクされています: ソフトピクセルを除去するには埋め込んでください
+@msg	the image's opacity mask isn't one greyscale image	画像の不透明マスクが 1 つのグレースケール画像ではありません
+@msg	the image has no transparency: nothing to remove	画像に透明部分がありません: 除去するものはありません
+@msg	the image's pixels couldn't be written	画像のピクセルを書き込めませんでした
+@msg	removing soft pixels failed its check: nothing was changed	ソフトピクセルの除去が検証に失敗しました: 何も変更されていません
+@msg	the image has its own transparency and an opacity mask: release the mask first	画像に独自の透明部分と不透明マスクがあります: 先にマスクを解除してください
+@msg	level must be a whole number from 1 to 255	level は 1 から 255 の整数でなければなりません
+@msg	copies must be true or false	copies は true または false でなければなりません
+@msg	the image's opacity mask has its own transparency: release it first	画像の不透明マスクに独自の透明部分があります: 先に解除してください
+@msg	id must name an image	id は画像を指定する必要があります
 	Run Separation Action Lists	色分解アクションリストを実行
 @msg	PAL XML nesting exceeds 32 levels	PAL XML の入れ子が32階層を超えています
 @msg	PAL action has no Type	PAL アクションに Type がありません
