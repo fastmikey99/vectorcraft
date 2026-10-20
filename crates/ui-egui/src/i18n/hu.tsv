@@ -5228,3 +5228,12 @@ imageTrace	Outline	Körvonal
 	Unassigned	Nincs hozzárendelve
 @msg	Invalid separation context or too many entries	Érvénytelen színkivonati környezet vagy túl sok bejegyzés
 @msg	Invalid or duplicate separation name/component	Érvénytelen vagy ismétlődő színkivonatnév vagy összetevő
+	Run Separation Action Lists	Színbontási műveletlisták futtatása
+@msg	PAL XML nesting exceeds 32 levels	A PAL XML beágyazása meghaladja a 32 szintet
+@msg	PAL action has no Type	A PAL művelethez nincs Type
+@msg	PAL action nesting exceeds 32 levels	A PAL műveletek beágyazása meghaladja a 32 szintet
+@msg	PAL exceeds 4 MiB	A PAL meghaladja a 4 MiB méretet
+@msg	PAL has more than 10000 actions	A PAL több mint 10000 műveletet tartalmaz
+@msg	PAL list paths must be relative names without parent traversal	A PAL listák elérési útjának relatívnak kell lennie szülőkönyvtárak elérése nélkül
+@msg	PAL list resolves outside the action-list root	A PAL lista a műveletlisták gyökérkönyvtárán kívül található
+@msg	expected PAL ActionList Version 2.0	PAL ActionList Version 2.0 szükséges

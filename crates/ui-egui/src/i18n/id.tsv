@@ -5220,3 +5220,12 @@ swatch	Bright Violet	Violet cerah
 	Pattern Images	Gambar Pola
 	Export Pattern Image	Ekspor Gambar Pola
 	Replace Pattern Image	Ganti Gambar Pola
+	Run Separation Action Lists	Jalankan Daftar Tindakan Separasi
+@msg	PAL XML nesting exceeds 32 levels	Penumpukan XML PAL melebihi 32 tingkat
+@msg	PAL action has no Type	Tindakan PAL tidak memiliki Type
+@msg	PAL action nesting exceeds 32 levels	Penumpukan tindakan PAL melebihi 32 tingkat
+@msg	PAL exceeds 4 MiB	PAL melebihi 4 MiB
+@msg	PAL has more than 10000 actions	PAL memiliki lebih dari 10000 tindakan
+@msg	PAL list paths must be relative names without parent traversal	Jalur daftar PAL harus relatif tanpa mengakses folder induk
+@msg	PAL list resolves outside the action-list root	Daftar PAL berada di luar folder akar daftar tindakan
+@msg	expected PAL ActionList Version 2.0	diharapkan PAL ActionList Version 2.0

@@ -81,6 +81,7 @@ pub use import::{
 };
 pub use pages::{PageInfo, PdfInfo, has_illustrator_data, illustrator_data, info, is_postscript};
 pub use post::{THUMBNAIL_SIZE, Thumbnail};
+pub use preserve::{preparation_output, set_preparation_boxes};
 pub use presets::*;
 pub use print::*;
 pub use settings::*;

@@ -4819,3 +4819,12 @@ lighting	Light	광원
 	Unassigned	할당되지 않음
 @msg	Invalid separation context or too many entries	잘못된 분판 정보이거나 항목이 너무 많습니다
 @msg	Invalid or duplicate separation name/component	분판 이름 또는 구성 요소가 잘못되었거나 중복됩니다
+	Run Separation Action Lists	색 분판 작업 목록 실행
+@msg	PAL XML nesting exceeds 32 levels	PAL XML 중첩이 32단계를 초과합니다
+@msg	PAL action has no Type	PAL 작업에 Type이 없습니다
+@msg	PAL action nesting exceeds 32 levels	PAL 작업 중첩이 32단계를 초과합니다
+@msg	PAL exceeds 4 MiB	PAL이 4 MiB를 초과합니다
+@msg	PAL has more than 10000 actions	PAL에 10000개가 넘는 작업이 있습니다
+@msg	PAL list paths must be relative names without parent traversal	PAL 목록 경로는 상위 폴더에 접근하지 않는 상대 경로여야 합니다
+@msg	PAL list resolves outside the action-list root	PAL 목록이 작업 목록 루트 폴더 밖에 있습니다
+@msg	expected PAL ActionList Version 2.0	PAL ActionList Version 2.0이 필요합니다
