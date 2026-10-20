@@ -1,6 +1,7 @@
-//! Headless PAL preparation player. Separation geometry is an explicit stop boundary.
+//! Headless PAL player for preparation and vector separation geometry.
 mod actions;
 mod clean;
+mod geometry;
 mod reader;
 mod selection;
 #[cfg(test)]
@@ -16,7 +17,6 @@ use std::path::{Path, PathBuf};
 use vectorcraft_doc::{Document, NodeId};
 use vectorcraft_geom::Rect;
 
-const GEOMETRY: &[&str] = &["AddWhiteUnderPrint", "Choke", "Spread", "Shaper", "Rasterize", "SetTrapTags", "RemoveTrappingTags"];
 const MAX_STEPS: usize = 100_000;
 fn error(e: impl ToString) -> EngineError {
     EngineError::Other(e.to_string())
@@ -41,7 +41,7 @@ pub fn specs() -> Vec<CommandSpec> {
         "Run Separation Action Lists",
         [],
         None,
-        "{root?: action-list library folder (default: the reference library under the user's home), lists: [relative list names in execution order], input: PDF path, output: PDF path} run PAL preparation; returns {status, stoppedAt, traceLength, trace, layers, spots, artwork, warnings}. Trace is also written to stderr. Separation geometry or unsupported actions stop before mutation and write the document so far.",
+        "{root?: action-list library folder (default: the reference library under the user's home), lists: [relative list names in execution order], input: PDF path, output: PDF path} run PAL actions; returns {status, stoppedAt, traceLength, trace, layers, spots, artwork, warnings}. Trace is also written to stderr. Unsupported actions stop before mutation and write the document so far.",
         always,
         run
     )]
@@ -115,8 +115,7 @@ impl Player<'_> {
             // Reserve the parent trace before a nested call, preserving execution order.
             self.trace.push(json!({"list":list, "position":a.position, "action":a.kind, "params":params}));
             let before = self.ids()?.len();
-            let is_geometry = GEOMETRY.contains(&a.kind.as_str());
-            let result = if is_geometry { Err(error(format!("not implemented: {} (separation geometry)", a.kind))) } else { self.action(a) };
+            let result = self.action(a);
             let (affected, reason) = match result {
                 Ok(n) => (n, None),
                 Err(e) => (0, Some(e.to_string())),
@@ -184,8 +183,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         Some(Value::String(v)) => PathBuf::from(v),
         Some(_) => return Err(error("root must be a folder path")),
         None => PathBuf::from(
-            std::env::var_os("VECTORCRAFT_ACTION_LISTS")
-                .ok_or_else(|| error("set root, or VECTORCRAFT_ACTION_LISTS, to the action-list folder"))?,
+            std::env::var_os("VECTORCRAFT_ACTION_LISTS").ok_or_else(|| error("set root, or VECTORCRAFT_ACTION_LISTS, to the action-list folder"))?,
         ),
     };
     crate::file_access::check_read(&root.to_string_lossy()).map_err(error)?;
@@ -228,6 +226,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         clipboard_empty: true,
         messages: Vec::new(),
     };
+    player.remove_background()?;
     for list in lists {
         if let Err(e) = player.list(list, None) {
             player.stopped = Some(json!({"list":list,"reason":e.to_string()}));
@@ -249,7 +248,27 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let layers: Vec<_> = selection::layer_ids(doc)
         .into_iter()
         .filter_map(|id| doc.node(id))
-        .map(|n| json!({"name":n.name,"objects":selection::leaves(n).len()}))
+        .map(|n| {
+            let leaves = actions::leaf_targets(doc, &[n.id]);
+            let mut fills = std::collections::BTreeSet::new();
+            let mut strokes = std::collections::BTreeSet::new();
+            for id in &leaves {
+                if let Some(node) = doc.node(*id) {
+                    for item in &node.appearance.items {
+                        match item {
+                            vectorcraft_doc::AppearanceItem::Fill(f) if !f.paint.is_none() => {
+                                fills.insert(f.overprint);
+                            }
+                            vectorcraft_doc::AppearanceItem::Stroke(s) if !s.paint.is_none() => {
+                                strokes.insert(s.overprint);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            json!({"name":n.name,"objects":leaves.len(),"fillOverprint":fills,"strokeOverprint":strokes})
+        })
         .collect();
     let spots: Vec<_> = doc.swatches.iter().filter(|w| w.spot).map(|w| w.name.clone()).collect();
     let art = selection::layer_ids(doc).into_iter().find(|id| doc.node(*id).is_some_and(|n| n.name.as_deref() == Some("Artwork")));

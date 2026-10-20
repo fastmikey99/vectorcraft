@@ -100,8 +100,10 @@ pub(super) fn resolve(root: &Path, caller: Option<&Path>, name: &str) -> Result<
     }
     let folder = if relative.components().count() == 1 { caller.and_then(Path::parent).unwrap_or(root) } else { root };
     let mut path = folder.join(relative);
-    if path.extension().is_none() {
-        path.set_extension("pal");
+    if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("pal")) {
+        let mut name = path.into_os_string();
+        name.push(".pal");
+        path = PathBuf::from(name);
     }
     crate::file_access::check_read(&path.to_string_lossy())?;
     let path = path.canonicalize().map_err(|e| format!("cannot resolve PAL list: {e}"))?;

@@ -1,4 +1,4 @@
-# PAL preparation player — slice 1
+# PAL player — preparation and WE Light
 
 `sep.runActionList` runs an ordered sequence of ArtPro PAL XML action lists on a
 single-page, unrotated PDF. It is an engine command available through the CLI, MCP's command
@@ -45,24 +45,48 @@ ink resources remain independently readable.
 - Inks: `CreateSeparation`, `DeleteInk`, `ConvertToCMYK` (PDF alternate or Custom),
   `AssignDocumentProfile`. Missing profiles follow the PAL's severity; no profile
   is substituted. Unpainted spot inks are retained as PDF color-space resources.
-- Page boxes: `SetPageBoxSizeByContent` (FitAll/Both), `SetPageBoxSizeRelative`.
+- Page boxes: `SetPageBoxSizeByContent` (FitAll or FitToSelection/Both), `SetPageBoxSizeRelative`.
   PAL distances are millimetres, converted to points; output includes all five boxes.
 - `CleanObjects`: ExecuteClip, CleanUpGroupsAndClippingMasks, ContourizeText,
   OutlineStrokes. Curve intersections and stroke outlines use VectorCraft's
   existing path operations. Named groups are retained. Images remain clipped
   without resampling.
 
-The first `AddWhiteUnderPrint`, `Choke`, `Spread`, `Shaper`, `Rasterize`,
-`SetTrapTags`, or `RemoveTrappingTags` stops execution **before** that action.
-Later actions, including ink creation, are not run or anticipated. Unknown actions
-and unsupported parameter variants also stop with a reason; they are never skipped.
+## Vector separation actions
 
-This is the preparation subset used before separation geometry, not a complete PAL
-implementation. Pattern-paint separation selection, mixed process/spot flat paint,
-parameterized calls, other processing-step types, and the remaining CleanObjects
-options are not implemented. The return value reports any such stop explicitly.
+- `AddWhiteUnderPrint`: union of the selected painted footprints (including stroke
+  outlines), spread/choke in millimetres, Round/Miter/Bevel joins and miter limit.
+  `ExcludeCoveredAreas` subtracts unselected art **above** the selected art, in
+  painting order; selected objects do not knock each other out. `ExcludeWhiteObjects`
+  excludes zero-ink objects. The result is added to `White Underprint`, and only the
+  new result is selected. `UseSelectedSeparation=0` uses `Opaque White`; otherwise
+  exactly one selected ink is required. Subsequent PAL paint and overprint actions
+  determine the final ink, tint and overprint state.
+- `Choke`, `Spread`: OriginalPath, CopyInFront and CopyBehind; the resulting paths
+  are selected. A choke that removes a shape is a valid empty result.
+- `Shaper`: Unite, Intersect, Exclude, MinusFront and MinusBack, with WorkOnCopy.
+  Uses the same curve boolean and stroke outline operations as Pathfinder.
+- `CreateShapeOnSelection`: a rectangular selection bound; `SetObjectsSize`:
+  physical width/height about the selection center. `Mode=Relative` selects that
+  anchor rather than the crosshair; it is not percentage scaling. Content page
+  boxes also accept `FitToSelection`.
+- `Rasterize`, `SetTrapTags`, `RemoveTrappingTags`: empty selections are harmless;
+  nonempty selections stop explicitly. Trap processing is a separate slice.
+
+Before any PAL runs, the house preparation rule deletes objects painted with the
+spot `SupaBG`. The trace records this separately as `Preparation / DeleteBackground`.
+It is not a separation rule inferred from shipped output.
+
+Unknown actions and unsupported parameter variants stop with a reason. Pattern
+selection, mixed process/spot flat paint, parameterized calls, dynamic marks,
+nonopaque vector geometry and raster geometry remain unsupported. The result
+reports the stop explicitly; it never silently skips a nonempty unsupported action.
+Layer summaries are in painting order (bottom to top) and include observed fill
+and stroke overprint flags.
 
 Semantics reference: [Esko ArtPro+ 25.07 public user guide](https://docs.esko.com/docs/en-us/artproplus/25.07/userguide/pdf/artproplus.pdf),
-particularly Clean, the action catalogue, and separation selection. Tests generate
+particularly White Underprint (pp. 310–311), Shaper (pp. 194–195), and the action
+catalogue (Add White Underprint, p. 427; Create Shape on Selection, p. 434;
+Set Object Size, pp. 457–458). Tests generate
 small synthetic PDFs and PALs inline; no production artwork or action-library
 files are included in the repository.

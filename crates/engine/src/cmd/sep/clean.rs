@@ -99,6 +99,13 @@ pub(super) fn clean(d: &mut Document, mut n: Node, o: &Options, brushes: &[vecto
     Ok((Some(n), changed))
 }
 fn intersect(d: &mut Document, mut n: Node, clip: &PathData, rule: FillRule, brushes: &[vectorcraft_brush::Brush]) -> Result<Option<Node>> {
+    // An entirely clipped-out image/mesh has no painted footprint. Retaining it as a
+    // clip group would make later vector actions mistake invisible content for art.
+    if let (Some(bounds), Some(mask)) = (n.visual_bounds(), clip.bounds())
+        && (bounds.x1 <= mask.x0 || mask.x1 <= bounds.x0 || bounds.y1 <= mask.y0 || mask.y1 <= bounds.y0)
+    {
+        return Ok(None);
+    }
     // Clipping a stroked path's centreline changes its caps. Outline first so the intersection
     // preserves the painted region, including strokes crossing the clipping boundary.
     if let Some(mut out) = pathops::outline_strokes(d, brushes, &n) {

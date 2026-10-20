@@ -1,0 +1,279 @@
+//! PAL geometry uses the same fallible curve operations as Offset Path and Pathfinder.
+use super::super::pathops;
+use super::{Action, Element, Player, Result, actions, error, flag, number, required, selection};
+use serde_json::json;
+use std::io::Write;
+use vectorcraft_color::{Color, Paint, Swatch};
+use vectorcraft_doc::{Appearance, Document, Node, NodeKind};
+use vectorcraft_geom::{FillRule, PathData};
+use vectorcraft_pathops::{self as po, BoolOp, Join};
+
+fn combine(a: &PathData, b: &PathData, op: BoolOp) -> Result<PathData> {
+    po::try_boolean(a, FillRule::NonZero, b, FillRule::NonZero, op, po::DEFAULT_PRECISION).map_err(error)
+}
+fn offset_options(p: &Element, choke: bool) -> Result<(f64, Join, f64)> {
+    let distance = number(p, "Distance")?;
+    if !(0.0..=10_000.0).contains(&distance) {
+        return Err(error("PAL distance must be between 0 and 10000 mm"));
+    }
+    let join = match required(p, "JoinType")? {
+        "Round" => Join::Round,
+        "Miter" => Join::Miter,
+        "Bevel" => Join::Bevel,
+        v => return Err(error(format!("unsupported JoinType {v}"))),
+    };
+    let miter = if p.value("MiterLimit").is_some() { number(p, "MiterLimit")? } else { 4.0 };
+    if !(1.0..=500.0).contains(&miter) {
+        return Err(error("PAL miter limit must be between 1 and 500"));
+    }
+    Ok((distance * 72.0 / 25.4 * if choke { -1.0 } else { 1.0 }, join, miter))
+}
+fn offset(path: &PathData, options: (f64, Join, f64)) -> Result<PathData> {
+    if options.0 == 0.0 {
+        return Ok(path.clone());
+    }
+    po::try_offset_path(path, options.0, options.1, options.2).map_err(error)
+}
+
+/// Painted footprint, including outlined strokes and real clip intersections, never bounds.
+fn footprint(d: &mut Document, n: &Node, brushes: &[vectorcraft_brush::Brush]) -> Result<PathData> {
+    if !n.visible || n.opacity == 0.0 {
+        return Ok(PathData::default());
+    }
+    if n.opacity != 1.0 || n.extras().mask.is_some() || !n.appearance.effects.is_empty() {
+        return Err(error("PAL vector geometry requires opaque artwork without masks or effects"));
+    }
+    if matches!(n.kind, NodeKind::Path { clipping: true, .. } | NodeKind::Path { guide: true, .. }) {
+        return Ok(PathData::default());
+    }
+    if let NodeKind::Mesh(mesh) = &n.kind {
+        if mesh.points.iter().any(|p| p.opacity != 1.0) {
+            return Err(error("PAL vector geometry requires opaque artwork without masks or effects"));
+        }
+        return po::try_normalize(&mesh.outline(), FillRule::NonZero).map_err(error);
+    }
+    if let Some(out) = pathops::outline_strokes(d, brushes, n) {
+        return footprint(d, &out, brushes);
+    }
+    if let Some((path, rule)) = pathops::node_path(n) {
+        return if n.appearance.fill_paint().is_none() { Ok(PathData::default()) } else { po::try_normalize(&path, rule).map_err(error) };
+    }
+    if let Some(cs) = n.children() {
+        let mut path = PathData::default();
+        for c in cs.iter().skip(usize::from(n.clips())) {
+            path = combine(&path, &footprint(d, c, brushes)?, BoolOp::Union)?;
+        }
+        if n.clips()
+            && let Some(mask) = cs.first()
+        {
+            let (clip, rule) = pathops::node_path(mask).ok_or_else(|| error("PAL clip mask must be a path"))?;
+            path = po::try_boolean(&path, FillRule::NonZero, &clip, rule, BoolOp::Intersect, po::DEFAULT_PRECISION).map_err(error)?;
+        }
+        return Ok(path);
+    }
+    Err(error("PAL vector geometry cannot outline this object type"))
+}
+
+fn clipped_footprint(d: &mut Document, n: &Node, brushes: &[vectorcraft_brush::Brush]) -> Result<PathData> {
+    let mut path = footprint(d, n, brushes)?;
+    for id in d.ancestry(n.id).unwrap_or_default() {
+        if let Some(parent) = d.node(id).filter(|parent| parent.id != n.id && parent.clips()) {
+            let mask = parent.children().and_then(|cs| cs.first()).ok_or_else(|| error("PAL clip mask must be a path"))?;
+            let (clip, rule) = pathops::node_path(mask).ok_or_else(|| error("PAL clip mask must be a path"))?;
+            path = po::try_boolean(&path, FillRule::NonZero, &clip, rule, BoolOp::Intersect, po::DEFAULT_PRECISION).map_err(error)?;
+        }
+    }
+    Ok(path)
+}
+
+impl Player<'_> {
+    pub(super) fn remove_background(&mut self) -> Result<()> {
+        // The explicitly requested house preparation rule, upstream of the action lists.
+        let targets = actions::leaf_targets(self.doc()?, &selection::all_objects(self.doc()?, false));
+        let targets = targets
+            .into_iter()
+            .filter_map(|id| self.doc().ok().and_then(|d| d.node(id).map(|n| (d, n))).map(|(d, n)| (id, selection::inks(d, n))))
+            .collect::<Vec<_>>();
+        let mut ids = Vec::new();
+        for (id, inks) in targets {
+            if inks?.get("SupaBG").is_some_and(|t| *t > 0.0) {
+                ids.push(id);
+            }
+        }
+        let count = ids.len();
+        self.session.edit("Delete", |d, sel| {
+            for id in ids {
+                d.remove(id)?;
+            }
+            sel.clear();
+            Ok(())
+        })?;
+        self.trace.push(
+            json!({"list":"Preparation","position":0,"action":"DeleteBackground","params":"spot=SupaBG (house prep rule)","objectsAffected":count}),
+        );
+        writeln!(std::io::stderr(), "[Preparation #0] DeleteBackground spot=SupaBG (house prep rule) → {count} objects").map_err(error)
+    }
+
+    pub(super) fn geometry(&mut self, a: &Action) -> Result<usize> {
+        let ids = self.ids()?;
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        match a.kind.as_str() {
+            "AddWhiteUnderPrint" => self.underprint(&a.params),
+            "Choke" | "Spread" => self.resize_paths(&a.params, a.kind == "Choke"),
+            "Shaper" => self.shaper(&a.params),
+            other => Err(error(format!("not implemented for nonempty selection: {other}"))),
+        }
+    }
+
+    fn underprint(&mut self, p: &Element) -> Result<usize> {
+        let choke = match required(p, "TrappingMode")? {
+            "Choke" => true,
+            "Spread" => false,
+            v => return Err(error(format!("unsupported TrappingMode {v}"))),
+        };
+        let options = offset_options(p, choke)?;
+        let exclude = flag(p, "ExcludeCoveredAreas")?;
+        let white = flag(p, "ExcludeWhiteObjects")?;
+        if flag(p, "ExcludeDynamicMarks")? {
+            return Err(error("PAL dynamic mark exclusion is not implemented"));
+        }
+        let ink = if flag(p, "UseSelectedSeparation")? {
+            if self.inks.len() != 1 {
+                return Err(error("white underprint requires exactly one selected separation"));
+            }
+            self.inks.first().cloned().ok_or_else(|| error("missing underprint separation"))?
+        } else {
+            "Opaque White".into()
+        };
+        let selected = actions::leaf_targets(self.doc()?, &self.ids()?);
+        let all = actions::leaf_targets(self.doc()?, &selection::all_objects(self.doc()?, false));
+        let brushes = vectorcraft_brush::library(self.doc()?);
+        self.session.edit("Offset Path", |d, sel| {
+            let mut region = PathData::default();
+            for id in &all {
+                vectorcraft_doc::cancel::check().map_err(error)?;
+                let n = d.node(*id).cloned().ok_or_else(|| error("PAL object disappeared"))?;
+                // Hidden/nonprinting ancestors do not cover artwork. Locked art still does.
+                if d.ancestry(*id).is_some_and(|parents| {
+                    parents.iter().any(|i| d.node(*i).is_some_and(|n| !n.visible || matches!(n.kind, NodeKind::Layer { printable: false, .. })))
+                }) {
+                    continue;
+                }
+                let chosen = selected.contains(id) && (!white || selection::inks(d, &n)?.values().any(|t| *t > 0.0));
+                if !chosen && (!exclude || region.is_empty()) {
+                    continue;
+                }
+                let path = clipped_footprint(d, &n, &brushes)?;
+                region = combine(&region, &path, if chosen { BoolOp::Union } else { BoolOp::Difference })?;
+            }
+            let region = offset(&region, options)?;
+            sel.clear();
+            if region.is_empty() {
+                return Ok(0);
+            }
+            if ink == "Opaque White" && d.swatch(&ink).is_none() {
+                d.swatches.push(Swatch { name: ink.clone(), paint: Paint::solid(Color::rgb(1.0, 1.0, 1.0)), global: true, spot: true });
+            }
+            let paint = actions::flat_paint(d, std::slice::from_ref(&ink), 1.0, false)?;
+            let layer = selection::layer_ids(d)
+                .into_iter()
+                .find(|id| d.node(*id).is_some_and(|n| n.name.as_deref() == Some("White Underprint")))
+                .unwrap_or_else(|| d.add_layer(Some("White Underprint")));
+            let mut app = Appearance::default();
+            app.set_fill(paint);
+            app.set_stroke(Paint::None);
+            let node = Node::path(d.alloc_id(), region, app);
+            let id = node.id;
+            d.insert(Some(layer), usize::MAX, node)?;
+            sel.set([id]);
+            Ok(1)
+        })
+    }
+
+    fn resize_paths(&mut self, p: &Element, choke: bool) -> Result<usize> {
+        let options = offset_options(p, choke)?;
+        let target = required(p, "SpreadTarget")?;
+        if !matches!(target, "OriginalPath" | "CopyInFront" | "CopyBehind") {
+            return Err(error(format!("unsupported SpreadTarget {target}")));
+        }
+        let ids = actions::leaf_targets(self.doc()?, &self.ids()?);
+        self.session.edit("Offset Path", |d, sel| {
+            let mut results = Vec::new();
+            for id in &ids {
+                let n = d.node(*id).cloned().ok_or_else(|| error("PAL object disappeared"))?;
+                let (path, rule) = pathops::node_path(&n).ok_or_else(|| error("PAL spread/choke requires paths"))?;
+                let path = offset(&po::try_normalize(&path, rule).map_err(error)?, options)?;
+                let (parent, at, _) = d.position(*id).ok_or_else(|| error("PAL object position disappeared"))?;
+                if target == "OriginalPath" {
+                    d.remove(*id)?;
+                }
+                if path.is_empty() {
+                    continue;
+                }
+                let mut new = Node::path(if target == "OriginalPath" { *id } else { d.alloc_id() }, path, (*n.appearance).clone());
+                new.name = n.name.clone();
+                new.opacity = n.opacity;
+                new.blend = n.blend;
+                results.push(new.id);
+                d.insert(parent, at + usize::from(target == "CopyInFront"), new)?;
+            }
+            let count = results.len();
+            sel.set(results);
+            Ok(count)
+        })
+    }
+
+    fn shaper(&mut self, p: &Element) -> Result<usize> {
+        let operation = required(p, "Operation")?;
+        let op = match operation {
+            "Unite" => BoolOp::Union,
+            "Intersect" => BoolOp::Intersect,
+            "Exclude" => BoolOp::Xor,
+            "MinusFront" | "MinusBack" => BoolOp::Difference,
+            v => return Err(error(format!("unsupported Shaper operation {v}"))),
+        };
+        let copy = flag(p, "WorkOnCopy")?;
+        let selected = actions::roots(self.doc()?, &self.ids()?);
+        let mut ids = selection::all_objects(self.doc()?, false).into_iter().filter(|id| selected.contains(id)).collect::<Vec<_>>();
+        if operation == "MinusBack" {
+            ids.reverse();
+        }
+        let brushes = vectorcraft_brush::library(self.doc()?);
+        let active = self.session.doc()?.active_layer;
+        self.session.edit("Pathfinder", |d, sel| {
+            let mut result = None;
+            for id in &ids {
+                let n = d.node(*id).cloned().ok_or_else(|| error("PAL object disappeared"))?;
+                let path = footprint(d, &n, &brushes)?;
+                result = Some(match result {
+                    None => path,
+                    Some(ref r) => combine(r, &path, op)?,
+                });
+            }
+            let path = result.unwrap_or_default();
+            let style_id = if operation == "MinusFront" || operation == "MinusBack" { ids.first() } else { ids.last() };
+            let style = style_id.and_then(|id| d.node(*id)).cloned().ok_or_else(|| error("PAL shaper has no source"))?;
+            let leaves = actions::leaf_targets(d, &[style.id]);
+            let mut appearance = leaves.last().and_then(|id| d.node(*id)).map(|n| (*n.appearance).clone()).unwrap_or_default();
+            appearance.set_stroke(Paint::None);
+            let node = Node::path(d.alloc_id(), path.clone(), appearance);
+            let id = node.id;
+            if copy {
+                if !path.is_empty() {
+                    d.insert(active, usize::MAX, node)?;
+                }
+            } else if path.is_empty() {
+                d.remove_many(&selected)?;
+            } else {
+                d.wrap(&selected, |_| node)?;
+            }
+            sel.clear();
+            if !path.is_empty() {
+                sel.set([id]);
+            }
+            Ok(usize::from(!path.is_empty()))
+        })
+    }
+}
