@@ -3,8 +3,8 @@
 Status: experimental, 21 October 2026. This command is an isolated trap experiment,
 not a production separation builder or PAL player. No parity score is claimed.
 
-`sep.trap {"blackCutoff": 0.15}` replaces the bottom `Auto Trap-1` layer from exactly
-one top-level `Artwork` layer, in one undo step. The cutoff is required: the example
+`sep.trap {"blackThreshold": 0.7}` replaces the bottom `Auto Trap-1` layer from exactly
+one top-level `Artwork` layer, in one undo step. The K threshold is required: the example
 is an experimental value, not an approved production setting.
 
 The command uses the same VectorCraft separation renderer as headless screenshots,
@@ -14,11 +14,18 @@ pixel edges, then spreads and chokes the clip by 0.01 mm with miter joins (limit
 The output is a clip and a process/DeviceN image with a matching opacity mask;
 PDF export retains the spot channels and SMask. Trap overprint is off.
 
-Excluded paints are zero-ink white, names beginning `NEON-`, `M-`, or `NO WHP`, and
-colours at or below `blackCutoff`. The experimental luma is
-`0.2126 R + 0.7152 G + 0.0722 B`, using uncalibrated RGB (`(1-C)(1-K)` etc. for CMYK).
-Object-name exclusions inherit through groups. Excluded objects still take part
-in nearest-pixel ownership, so eligible colours cannot spread across their edges.
+Eligibility uses the PAL's `SeparationTypeRule Any / NotUsing` epsilon of 0.005:
+all process coverages and the spot tint must be below 0.5% to count as no ink.
+Black eligibility uses K coverage at or above the explicit `blackThreshold`,
+including a spot's alternate K. It does not use RGB luminance. CMYK values are
+preserved; non-CMYK alternates use the colour library's CMYK conversion.
+Excluded objects still take part in nearest-pixel ownership.
+
+PAL name matching is case-sensitive. WHP's `NO WHP` and `NO WHP OR POWDER`
+exclusions apply to underprint, not trap tags; `NO POWDER` is not a trap exclusion
+either. This isolated command does not execute those underprint actions. Metallic
+and neon names now fail explicitly as outside the experiment's scope instead of
+silently producing a partially trapped job. Neither underprint layer is edited.
 
 Limits: solid vector paints and path/group/layer/compound nodes only; 64 million
 pixels at 600 dpi. An unsupported input fails before changing the document. The
@@ -26,13 +33,14 @@ exterior is the complement of the art union, including blank enclosed openings;
 ink-to-ink edges never receive a band.
 No page trap-ticket `/Properties` are written by this prototype.
 
-The local comparison stopped at the experiment's geometry limit: four of eight
-trapped samples were within two pixels of the shipped clip at the example cutoff.
-Colour exclusions and remaining edge differences need production clarification. The white-only control produced no trap;
-the rich-black control still produced a small band. No cleanup threshold, extra
-exclusion or production rule was added to hide those differences. Customer files
-and per-file results remain outside the public repository.
+The expanded local edge study supports K coverage as a useful experimental
+classifier, but does not identify the trap ticket's parameter semantics uniquely.
+The no-ink tolerance removes a major false band and K coverage retains trapped
+dark chromatic inks. Residual exposed coloured fragments still produce a band
+in a shipped no-trap control. No size filter, file exception or additional
+production rule was introduced to hide that mismatch. Per-file results and
+customer data remain outside the public repository.
 
 Synthetic tests cover exterior geometry, nearest excluded ownership, white and
-rich black, name exclusions, spot-plane preservation, PDF DeviceN/SMask export,
+rich black, PAL epsilon boundaries, specialty-input rejection, spot alternates, spot-plane preservation, PDF DeviceN/SMask export,
 replacement, undo and cancellation. There are no customer fixtures.

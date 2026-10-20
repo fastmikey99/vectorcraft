@@ -1,4 +1,4 @@
-//! Experimental external-edge trap. The cutoff is supplied by the caller: it is a measurement
+//! Experimental external-edge trap. The K threshold is supplied by the caller: it is a measurement
 //! parameter, not an approved production rule. Uses the same plate renderer as headless screenshots.
 use std::sync::Arc;
 
@@ -26,25 +26,24 @@ pub fn specs() -> Vec<CommandSpec> {
         "Trap…",
         [],
         None,
-        "{blackCutoff: luminance 0..1 (required experimental setting)} replace Auto Trap-1 from Artwork only: 600 dpi, 0.2 mm outward external band, nearest art ink samples, 0.01 mm spread/choke. No approved production cutoff; vector art only → {pixels, width, height, blackCutoff, seconds}",
+        "{blackThreshold: K coverage 0..1 (required experimental setting)} replace Auto Trap-1 from Artwork only: 600 dpi, 0.2 mm outward external band, nearest art ink samples, 0.01 mm spread/choke. No approved production threshold; vector art only → {pixels, width, height, blackThreshold, seconds}",
         has_doc,
         run
     )]
 }
 
-fn excluded_name(name: &str) -> bool {
-    let name = name.to_ascii_uppercase();
-    name.starts_with("NEON-") || name.starts_with("M-") || name.starts_with("NO WHP")
+// NameRule is case-sensitive. These special inks are outside this experiment's scope.
+// WHP's exact NO WHP / NO WHP OR POWDER exclusions affect underprint, not trap tags.
+fn specialty_name(name: &str) -> bool {
+    name.contains("NEON") || name.starts_with("M-") || name.starts_with("DK M-")
 }
 
-/// Uncalibrated RGB luma, explicitly independent of the machine's installed colour profiles.
-fn luminance(c: &Color) -> f64 {
-    let [r, g, b] = c.to_rgb_uncalibrated();
-    0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b)
-}
+const INK_EPSILON: f32 = 0.005;
 
-fn eligibility(n: &mut Node, cutoff: f64, inherited: bool) -> Result<()> {
-    let excluded = inherited || n.name.as_deref().is_some_and(excluded_name);
+fn eligibility(n: &mut Node, doc: &Document, threshold: f32) -> Result<()> {
+    if n.name.as_deref().is_some_and(specialty_name) {
+        return Err(bad(C, "prototype does not support metallic or neon artwork"));
+    }
     if !matches!(n.kind, NodeKind::Path { .. } | NodeKind::Compound { .. } | NodeKind::Group { .. } | NodeKind::Layer { .. }) {
         return Err(bad(C, "prototype supports vector paths and groups only"));
     }
@@ -57,13 +56,25 @@ fn eligibility(n: &mut Node, cutoff: f64, inherited: bool) -> Result<()> {
         if !matches!(paint, Paint::None | Paint::Solid { .. }) {
             return Err(bad(C, "prototype eligibility requires solid vector paints"));
         }
+        if let Paint::Solid { swatch, .. } = paint
+            && swatch.as_deref().is_some_and(specialty_name)
+        {
+            return Err(bad(C, "prototype does not support metallic or neon inks"));
+        }
         vectorcraft_doc::inks::visit_paint(paint, &mut |color, swatch, tint| {
-            let luma = luminance(color);
-            let off = excluded
-                || (swatch.is_some() && *tint <= 0.0)
-                || swatch.as_deref().is_some_and(excluded_name)
-                || luma <= cutoff
-                || luma >= 1.0 - 1e-6;
+            let ink = vectorcraft_doc::inks::inks(
+                doc,
+                &vectorcraft_color::cms::active(),
+                color,
+                swatch.as_deref().map(|name| (name, *tint)),
+                Default::default(),
+            );
+            // PAL SeparationTypeRule Any / NotUsing, Epsilon 0.005. A spot's
+            // coverage is its tint; its alternate is not a process separation.
+            let no_ink = ink.cmyk.iter().all(|v| *v < INK_EPSILON) && ink.spot.as_ref().is_none_or(|(_, tint)| *tint < INK_EPSILON);
+            let alternate = swatch.as_deref().and_then(|name| vectorcraft_doc::inks::spot_color(doc, name));
+            let k = alternate.unwrap_or(*color).to_cmyk()[3];
+            let off = no_ink || k >= threshold;
             *color = if off { Color::BLACK } else { Color::WHITE };
             *swatch = None;
             *tint = 1.0;
@@ -71,7 +82,7 @@ fn eligibility(n: &mut Node, cutoff: f64, inherited: bool) -> Result<()> {
     }
     if let Some(children) = n.children_mut() {
         for child in children {
-            eligibility(Arc::make_mut(child), cutoff, excluded)?;
+            eligibility(Arc::make_mut(child), doc, threshold)?;
         }
     }
     Ok(())
@@ -121,11 +132,11 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let elapsed = || Some(started.elapsed().as_secs_f64());
     #[cfg(target_arch = "wasm32")]
     let elapsed = || None::<f64>;
-    let cutoff = p
-        .get("blackCutoff")
+    let threshold = p
+        .get("blackThreshold")
         .and_then(Value::as_f64)
         .filter(|x| (0.0..=1.0).contains(x))
-        .ok_or_else(|| bad(C, "blackCutoff must be an explicit experimental luminance in 0..1"))?;
+        .ok_or_else(|| bad(C, "blackThreshold must be an explicit experimental K coverage in 0..1"))?;
     let doc = &s.doc()?.doc;
     let art: Vec<_> = doc.layers.iter().filter(|n| n.name.as_deref() == Some("Artwork")).cloned().collect();
     if art.len() != 1 {
@@ -148,7 +159,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let mut eligible = source.clone();
     for layer in &mut eligible.layers {
-        eligibility(Arc::make_mut(layer), cutoff, false)?;
+        eligibility(Arc::make_mut(layer), &source, threshold as f32)?;
     }
     let mut renderer = Renderer::new();
     log::debug!("trap: rendering {w} x {h}");
@@ -173,7 +184,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
             d.remove_many(&existing)?;
             Ok(())
         })?;
-        return Ok(json!({"pixels":0,"width":w,"height":h,"blackCutoff":cutoff,"seconds":elapsed()}));
+        return Ok(json!({"pixels":0,"width":w,"height":h,"blackThreshold":threshold,"seconds":elapsed()}));
     }
     log::debug!("trap: tracing {count} pixels");
     let clip = outline(&mask, w as usize, h as usize, region)?;
@@ -242,5 +253,5 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         d.insert(None, 0, layer)?;
         Ok(())
     })?;
-    Ok(json!({"pixels":count,"width":w,"height":h,"blackCutoff":cutoff,"seconds":elapsed()}))
+    Ok(json!({"pixels":count,"width":w,"height":h,"blackThreshold":threshold,"seconds":elapsed()}))
 }
