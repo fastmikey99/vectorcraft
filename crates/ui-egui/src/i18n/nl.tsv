@@ -5262,3 +5262,12 @@ swatch	Bright Violet	Felviolet
 	Pattern Images	Afbeeldingen in patronen
 	Export Pattern Image	Patroonafbeelding exporteren
 	Replace Pattern Image	Patroonafbeelding vervangen
+	Run Separation Action Lists	Actielijsten voor kleurscheiding uitvoeren
+@msg	PAL XML nesting exceeds 32 levels	PAL XML-nesting overschrijdt 32 niveaus
+@msg	PAL action has no Type	PAL-actie heeft geen Type
+@msg	PAL action nesting exceeds 32 levels	Nesting van PAL-acties overschrijdt 32 niveaus
+@msg	PAL exceeds 4 MiB	PAL overschrijdt 4 MiB
+@msg	PAL has more than 10000 actions	PAL bevat meer dan 10000 acties
+@msg	PAL list paths must be relative names without parent traversal	PAL-lijstpaden moeten relatief zijn zonder toegang tot bovenliggende mappen
+@msg	PAL list resolves outside the action-list root	PAL-lijst ligt buiten de hoofdmap voor actielijsten
+@msg	expected PAL ActionList Version 2.0	PAL ActionList Version 2.0 verwacht

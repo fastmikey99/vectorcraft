@@ -5205,3 +5205,12 @@ mark-style	Japanese	Japanilainen
 	Export Pattern Image	Vie kuviokuva
 	Replace Pattern Image	Korvaa kuviokuva
 @msg	Line weight check failed: {e}	Viivanpaksuuden tarkistus epäonnistui: {e}
+	Run Separation Action Lists	Suorita värierottelun toimintoluettelot
+@msg	PAL XML nesting exceeds 32 levels	PAL XML -sisäkkäisyys ylittää 32 tasoa
+@msg	PAL action has no Type	PAL-toiminnolta puuttuu Type
+@msg	PAL action nesting exceeds 32 levels	PAL-toimintojen sisäkkäisyys ylittää 32 tasoa
+@msg	PAL exceeds 4 MiB	PAL ylittää 4 MiB
+@msg	PAL has more than 10000 actions	PAL sisältää yli 10000 toimintoa
+@msg	PAL list paths must be relative names without parent traversal	PAL-luetteloiden polkujen on oltava suhteellisia ilman siirtymistä yläkansioihin
+@msg	PAL list resolves outside the action-list root	PAL-luettelo on toimintoluetteloiden juurikansion ulkopuolella
+@msg	expected PAL ActionList Version 2.0	odotettiin PAL ActionList Version 2.0

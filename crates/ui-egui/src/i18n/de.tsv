@@ -4823,3 +4823,12 @@ effect	Soft	Weich
 	Unassigned	Nicht zugewiesen
 @msg	Invalid separation context or too many entries	Ungültiger Farbauszugskontext oder zu viele Einträge
 @msg	Invalid or duplicate separation name/component	Ungültiger oder doppelter Farbauszugsname bzw. Komponente
+	Run Separation Action Lists	Aktionslisten für Farbseparation ausführen
+@msg	PAL XML nesting exceeds 32 levels	PAL-XML-Verschachtelung überschreitet 32 Ebenen
+@msg	PAL action has no Type	PAL-Aktion hat keinen Type
+@msg	PAL action nesting exceeds 32 levels	PAL-Aktionsverschachtelung überschreitet 32 Ebenen
+@msg	PAL exceeds 4 MiB	PAL überschreitet 4 MiB
+@msg	PAL has more than 10000 actions	PAL enthält mehr als 10000 Aktionen
+@msg	PAL list paths must be relative names without parent traversal	PAL-Listenpfade müssen relativ sein und dürfen keine übergeordneten Ordner durchlaufen
+@msg	PAL list resolves outside the action-list root	PAL-Liste liegt außerhalb des Stammordners der Aktionslisten
+@msg	expected PAL ActionList Version 2.0	PAL ActionList Version 2.0 erwartet

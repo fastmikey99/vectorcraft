@@ -4852,3 +4852,12 @@ lighting	Light	Свет
 	Unassigned	Не назначено
 @msg	Invalid separation context or too many entries	Недопустимый контекст цветоделения или слишком много записей
 @msg	Invalid or duplicate separation name/component	Недопустимое или повторяющееся имя цветоделения либо компонент
+	Run Separation Action Lists	Выполнить списки действий цветоделения
+@msg	PAL XML nesting exceeds 32 levels	Вложенность PAL XML превышает 32 уровня
+@msg	PAL action has no Type	У действия PAL отсутствует Type
+@msg	PAL action nesting exceeds 32 levels	Вложенность действий PAL превышает 32 уровня
+@msg	PAL exceeds 4 MiB	PAL превышает 4 MiB
+@msg	PAL has more than 10000 actions	PAL содержит более 10000 действий
+@msg	PAL list paths must be relative names without parent traversal	Пути списков PAL должны быть относительными без перехода в родительские папки
+@msg	PAL list resolves outside the action-list root	Список PAL находится за пределами корневой папки списков действий
+@msg	expected PAL ActionList Version 2.0	ожидался PAL ActionList Version 2.0
