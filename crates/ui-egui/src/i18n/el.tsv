@@ -5193,3 +5193,12 @@ effect	Points	Σημεία
 	Export Pattern Image	Εξαγωγή εικόνας μοτίβου
 	Replace Pattern Image	Αντικατάσταση εικόνας μοτίβου
 @msg	Line weight check failed: {e}	Ο έλεγχος πάχους γραμμών απέτυχε: {e}
+	Run Separation Action Lists	Εκτέλεση λιστών ενεργειών διαχωρισμού χρωμάτων
+@msg	PAL XML nesting exceeds 32 levels	Η εμφώλευση PAL XML υπερβαίνει τα 32 επίπεδα
+@msg	PAL action has no Type	Η ενέργεια PAL δεν έχει Type
+@msg	PAL action nesting exceeds 32 levels	Η εμφώλευση ενεργειών PAL υπερβαίνει τα 32 επίπεδα
+@msg	PAL exceeds 4 MiB	Το PAL υπερβαίνει τα 4 MiB
+@msg	PAL has more than 10000 actions	Το PAL έχει περισσότερες από 10000 ενέργειες
+@msg	PAL list paths must be relative names without parent traversal	Οι διαδρομές λιστών PAL πρέπει να είναι σχετικές χωρίς πρόσβαση σε γονικούς φακέλους
+@msg	PAL list resolves outside the action-list root	Η λίστα PAL βρίσκεται εκτός του ριζικού φακέλου λιστών ενεργειών
+@msg	expected PAL ActionList Version 2.0	αναμενόταν PAL ActionList Version 2.0

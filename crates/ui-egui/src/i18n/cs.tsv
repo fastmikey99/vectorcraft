@@ -5242,3 +5242,12 @@ mark-style	Japanese	Japonské
 	Unassigned	Nepřiřazeno
 @msg	Invalid separation context or too many entries	Neplatný kontext separace nebo příliš mnoho položek
 @msg	Invalid or duplicate separation name/component	Neplatný nebo duplicitní název separace či součásti
+	Run Separation Action Lists	Spustit seznamy akcí pro separace
+@msg	PAL XML nesting exceeds 32 levels	Vnoření PAL XML přesahuje 32 úrovní
+@msg	PAL action has no Type	Akce PAL nemá Type
+@msg	PAL action nesting exceeds 32 levels	Vnoření akcí PAL přesahuje 32 úrovní
+@msg	PAL exceeds 4 MiB	PAL přesahuje 4 MiB
+@msg	PAL has more than 10000 actions	PAL má více než 10000 akcí
+@msg	PAL list paths must be relative names without parent traversal	Cesty seznamů PAL musí být relativní bez přechodu do nadřazených složek
+@msg	PAL list resolves outside the action-list root	Seznam PAL se nachází mimo kořen seznamů akcí
+@msg	expected PAL ActionList Version 2.0	očekává se PAL ActionList Version 2.0

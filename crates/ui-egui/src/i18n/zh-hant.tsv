@@ -4873,3 +4873,12 @@ lighting	Light	光源
 	Unassigned	未指派
 @msg	Invalid separation context or too many entries	分色資訊無效或項目過多
 @msg	Invalid or duplicate separation name/component	分色名稱或組成部分無效或重複
+	Run Separation Action Lists	執行分色動作清單
+@msg	PAL XML nesting exceeds 32 levels	PAL XML 巢狀層級超過32層
+@msg	PAL action has no Type	PAL 動作未提供 Type
+@msg	PAL action nesting exceeds 32 levels	PAL 動作巢狀層級超過32層
+@msg	PAL exceeds 4 MiB	PAL 超過4 MiB
+@msg	PAL has more than 10000 actions	PAL 包含超過10000個動作
+@msg	PAL list paths must be relative names without parent traversal	PAL 清單路徑必須為相對路徑且不能存取父資料夾
+@msg	PAL list resolves outside the action-list root	PAL 清單位於動作清單根資料夾之外
+@msg	expected PAL ActionList Version 2.0	需要 PAL ActionList Version 2.0
