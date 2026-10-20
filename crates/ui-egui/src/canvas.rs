@@ -1553,6 +1553,37 @@ pub(crate) fn ruler_label(v: f64, step: f64) -> String {
     if s.trim_start_matches('-').chars().all(|c| c == '0' || c == '.') { "0".into() } else { s }
 }
 
+/// [`ruler_label`] in `unit`: inch labels on binary steps (½, ¼, ⅛ in) show the decimals they
+/// need (`0.5`, `0.25`, `0.125`, `1`), whole inches as whole numbers.
+pub(crate) fn unit_ruler_label(unit: Unit, v: f64, step: f64) -> String {
+    if unit != Unit::Inches {
+        return ruler_label(v, step);
+    }
+    let s = format!("{v:.4}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s.trim_start_matches('-').chars().all(|c| c == '0' || c == '.') { "0".into() } else { s.into() }
+}
+
+/// Whether ruler value `v` is on a multiple of `every`, within a hundredth of the tick step `minor`.
+fn ruler_near(v: f64, every: f64, minor: f64) -> bool {
+    ((v / every).round() * every - v).abs() < minor * 0.01
+}
+
+/// A ruler tick's length at `v` (in `unit`), on a ruler labelled every `step` with ticks every
+/// `minor`: the labelled ones run the ruler's height. Inches are marked as a rule is: whole inches
+/// between labels, then halves, quarters, eighths and sixteenths, each shorter. Other units: the
+/// halves between labels, then the rest.
+pub(crate) fn ruler_tick_length(unit: Unit, v: f64, step: f64, minor: f64) -> f32 {
+    if ruler_near(v, step, minor) {
+        return RULER;
+    }
+    if unit == Unit::Inches {
+        const LENGTHS: [(f64, f32); 5] = [(1.0, 10.0), (0.5, 8.0), (0.25, 6.0), (0.125, 4.5), (0.0625, 3.0)];
+        return LENGTHS.iter().find(|(every, _)| ruler_near(v, *every, minor)).map_or(3.0, |(_, len)| *len);
+    }
+    if ruler_near(v, step / 2.0, minor) { 7.0 } else { 4.0 }
+}
+
 /// The rulers, numbered in `unit` (the General unit).
 /// The top ruler, the left ruler and the box where they meet.
 fn ruler_rects(full: egui::Rect) -> [egui::Rect; 3] {
@@ -1660,19 +1691,10 @@ fn rulers(ui: &Ui, full: egui::Rect, xf: &Xf, hover: Option<Point>, unit: Unit, 
     // (`per` points each).
     let per = unit.points();
     let step = unit.ruler_step(xf.zoom);
-    let minor = step / 10.0;
+    let minor = unit.ruler_tick_step(xf.zoom);
     let font = egui::FontId::proportional(9.5);
-    let near = |v: f64, every: f64| ((v / every).round() * every - v).abs() < minor * 0.01;
-    // A tick's length: the labelled ones longest, the halves between them shorter.
-    let tick = |v: f64| {
-        if near(v, step) {
-            RULER
-        } else if near(v, step / 2.0) {
-            7.0
-        } else {
-            4.0
-        }
-    };
+    let near = |v: f64, every: f64| ruler_near(v, every, minor);
+    let tick = |v: f64| ruler_tick_length(unit, v, step, minor);
     // Each ruler measures along its own edge, in the canvas's coordinates turned with the view
     // (#826): at 0° the top one reads x and the left one y. `draw` gets each tick's distance
     // (screen points) from `from` along the ruler, and its value in `unit`.
@@ -1692,7 +1714,7 @@ fn rulers(ui: &Ui, full: egui::Rect, xf: &Xf, hover: Option<Point>, unit: Unit, 
         let sx = top.left() + d;
         clip_top.line_segment([pos2(sx, top.bottom() - tick(x)), pos2(sx, top.bottom())], Stroke::new(1.0, t.ruler_tick));
         if near(x, step) {
-            clip_top.text(pos2(sx + 2.0, top.top() + 1.0), egui::Align2::LEFT_TOP, ruler_label(x, step), font.clone(), t.ruler_tick);
+            clip_top.text(pos2(sx + 2.0, top.top() + 1.0), egui::Align2::LEFT_TOP, unit_ruler_label(unit, x, step), font.clone(), t.ruler_tick);
         }
     });
     let clip_left = p.with_clip_rect(left);
@@ -1701,7 +1723,7 @@ fn rulers(ui: &Ui, full: egui::Rect, xf: &Xf, hover: Option<Point>, unit: Unit, 
         clip_left.line_segment([pos2(left.right() - tick(y), sy), pos2(left.right(), sy)], Stroke::new(1.0, t.ruler_tick));
         if near(y, step) {
             // Vertical labels read top-to-bottom, one digit per line like Illustrator.
-            for (k, ch) in ruler_label(y, step).chars().enumerate() {
+            for (k, ch) in unit_ruler_label(unit, y, step).chars().enumerate() {
                 clip_left.text(
                     pos2(left.left() + 4.0, sy + 2.0 + k as f32 * 8.5),
                     egui::Align2::LEFT_TOP,

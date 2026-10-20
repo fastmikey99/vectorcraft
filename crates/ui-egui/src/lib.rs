@@ -210,6 +210,21 @@ pub struct HostOpen {
     /// starts at 72, which writes its shadows and glows too coarse for print. Raised on open, not
     /// an edit (the document stays unmodified).
     pub raster_effects_ppi: Option<u32>,
+    /// The General unit the opened document shows in (rulers, positions, sizes), whatever units the
+    /// file was saved with. A display choice, not an edit (the document stays unmodified), and not
+    /// a preference: the person's Preferences ▸ Units ▸ General is left as it was.
+    pub units: Option<vectorcraft_doc::Unit>,
+    /// The Stroke unit (weights, dashes) while this document is open, instead of Preferences ▸
+    /// Units ▸ Stroke, which is left as it was. `None`: the preference.
+    pub stroke_units: Option<vectorcraft_doc::Unit>,
+}
+/// A page's units for the document its open makes ([`VectorcraftApp::apply_host_units`]).
+#[derive(Debug)]
+struct HostUnits {
+    general: Option<vectorcraft_doc::Unit>,
+    stroke: Option<vectorcraft_doc::Unit>,
+    /// The documents open before it.
+    before: Vec<u64>,
 }
 pub type HostInbox = Arc<Mutex<Vec<HostOpen>>>;
 pub type HostOpenResult = Box<dyn Fn(Result<(), String>)>;
@@ -458,6 +473,9 @@ pub struct VectorcraftApp {
     /// A page's raster-effects floor (ppi) waiting for the document its open makes, and the documents
     /// open before it: a PDF with several pages opens after the Import PDF dialog, frames later.
     raster_floor: Option<(f64, Vec<u64>)>,
+    /// A page's General and Stroke units waiting for the document its open makes, and the documents
+    /// open before it, as [`Self::raster_floor`] waits ([`Self::apply_host_units`]).
+    host_units: Option<HostUnits>,
     /// Windows and Linux: the window has no OS decorations, so the app bar is the title bar (drag,
     /// double-click to maximize, caption buttons) and invisible edge zones resize the window.
     pub custom_titlebar: bool,
@@ -575,6 +593,7 @@ impl VectorcraftApp {
             clipboard_publishing: Default::default(),
             pending_url: None,
             raster_floor: None,
+            host_units: None,
             control_rx: None,
             pending_screenshots: vec![],
             queued_screenshots: vec![],
@@ -1104,7 +1123,7 @@ impl VectorcraftApp {
                 io::report_open_error(self, &name, &e);
             }
         }
-        for HostOpen { name, bytes, print_production, separations, raster_effects_ppi } in handed {
+        for HostOpen { name, bytes, print_production, separations, raster_effects_ppi, units, stroke_units } in handed {
             if let Some(c) = &separations
                 && let Err(e) = c.validate()
             {
@@ -1116,6 +1135,9 @@ impl VectorcraftApp {
             let before: Vec<u64> = self.session.documents().iter().map(|d| d.uid).collect();
             // Applied to the document this open makes, now or after a dialog ([`Self::apply_raster_floor`]).
             self.raster_floor = raster_effects_ppi.filter(|p| (1..=2400).contains(p)).map(|p| (f64::from(p), before.clone()));
+            // Every open from the page sets the units for its job: one that names no Stroke unit
+            // goes back to the preference ([`Self::apply_host_units`]).
+            self.host_units = Some(HostUnits { general: units, stroke: stroke_units, before: before.clone() });
             let opened = if print_production {
                 io::open_document(self, &name, &bytes, None, &serde_json::json!({"printProduction": true}))
             } else {
@@ -1146,6 +1168,7 @@ impl VectorcraftApp {
             }
         }
         self.apply_raster_floor();
+        self.apply_host_units();
         if self.services.single_document {
             self.keep_one_document();
         }
@@ -1171,6 +1194,28 @@ impl VectorcraftApp {
                 if clean {
                     st.mark_saved();
                 }
+            }
+        }
+    }
+
+    /// Show the document a page's open made in the page's General unit, and strokes in its Stroke
+    /// unit, through the display path Preferences ▸ Units uses: no edit, no undo step, the document
+    /// as clean as it arrived, and the person's stored preferences untouched (the page keeps them
+    /// per person). A native document saved in other units shows in the page's too. Waits, frame by
+    /// frame, while that document is still behind a dialog.
+    fn apply_host_units(&mut self) {
+        let Some(pending) = &self.host_units else { return };
+        let new: Vec<u64> = self.session.documents().iter().map(|d| d.uid).filter(|u| !pending.before.contains(u)).collect();
+        if new.is_empty() {
+            return;
+        }
+        let (general, stroke) = (pending.general, pending.stroke);
+        self.host_units = None;
+        self.session.set_stroke_unit_override(stroke);
+        let Some(units) = general else { return };
+        for uid in new {
+            if let Some(st) = self.session.document_mut(uid) {
+                st.show_in_units(units);
             }
         }
     }

@@ -204,6 +204,18 @@ pub fn place_copies(name: Option<String>, bytes: Option<Vec<u8>>, at: Option<Vec
     Ok(Place { name, bytes, at, copies })
 }
 
+/// Check a `vectorcraft:open`'s `units` or `strokeUnits` (`field`): left out (`None`), or a string
+/// naming a unit as Preferences ▸ Units name them: its key, label or suffix in any case
+/// (`inches`, `Millimeters`, `mm`, `in`; [`vectorcraft_doc::Unit::named`]). `Some(None)` is a value
+/// that isn't a string. The error is the text of the `vectorcraft:failed` reply.
+pub fn open_unit(field: &str, given: Option<Option<String>>) -> Result<Option<vectorcraft_doc::Unit>, String> {
+    let Some(given) = given else { return Ok(None) };
+    match given.as_deref().and_then(vectorcraft_doc::Unit::named) {
+        Some(unit) => Ok(Some(unit)),
+        None => Err(format!("vectorcraft:open: {field} must name a unit, such as inches or millimeters")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,5 +402,25 @@ mod tests {
     fn refuses_an_open_without_bytes() {
         let error = open(Some("Logo.svg".into()), None).err();
         assert!(error.as_deref().is_some_and(|e| e.contains("`bytes`") && e.contains("Logo.svg")), "{error:?}");
+    }
+
+    #[test]
+    fn reads_the_units_an_open_names_and_refuses_a_bad_one() {
+        use vectorcraft_doc::Unit;
+        assert_eq!(open_unit("units", None), Ok(None), "left out: the file's or the person's units");
+        for (given, unit) in [
+            ("inches", Unit::Inches),
+            ("Inches", Unit::Inches),
+            ("in", Unit::Inches),
+            ("millimeters", Unit::Millimeters),
+            ("mm", Unit::Millimeters),
+            ("points", Unit::Points),
+        ] {
+            assert_eq!(open_unit("units", Some(Some(given.into()))), Ok(Some(unit)), "{given}");
+        }
+        for bad in [Some("furlongs".to_string()), Some(String::new()), None] {
+            let e = open_unit("strokeUnits", Some(bad.clone())).unwrap_err();
+            assert!(e.starts_with("vectorcraft:open: strokeUnits must name a unit"), "{bad:?}: {e}");
+        }
     }
 }

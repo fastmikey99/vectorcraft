@@ -212,16 +212,31 @@ impl Unit {
             Unit::Feet => "Feet",
         }
     }
-    /// The rulers' label step at `zoom` (screen pixels per point), in this unit: the first of
-    /// 1, 2, 5 × 10ⁿ that puts labels at least 50 pixels apart. Ticks mark every tenth of it.
+    /// The rulers' label step at `zoom` (screen pixels per point), in this unit: the first step
+    /// that puts labels at least 50 pixels apart. Inches halve and double (⅛, ¼, ½, 1, 2, 4 … in);
+    /// other units take 1, 2, 5 × 10ⁿ. Ticks: [`Self::ruler_tick_step`].
     pub fn ruler_step(self, zoom: f64) -> f64 {
         const STEPS: [f64; 19] =
             [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0];
-        STEPS.iter().copied().find(|s| s * self.points() * zoom >= 50.0).unwrap_or(10000.0)
+        let fits = |s: &f64| s * self.points() * zoom >= 50.0;
+        if self == Unit::Inches {
+            return INCH_STEPS.iter().copied().filter(|s| *s >= INCH_LABEL_MIN).find(fits).unwrap_or(INCH_STEP_MAX);
+        }
+        STEPS.iter().copied().find(fits).unwrap_or(10000.0)
     }
-    /// `v` (points) on the nearest ruler tick at `zoom` ([`Self::ruler_step`]).
+    /// The rulers' tick step at `zoom`, in this unit: a tenth of [`Self::ruler_step`], or for
+    /// inches the finest binary fraction (down to 1/16 in) whose ticks are at least 4 pixels
+    /// apart, as a rule in inches is marked: halves, quarters, eighths, sixteenths.
+    pub fn ruler_tick_step(self, zoom: f64) -> f64 {
+        let step = self.ruler_step(zoom);
+        if self == Unit::Inches {
+            return INCH_STEPS.iter().copied().take_while(|s| *s <= step).find(|s| s * self.points() * zoom >= 4.0).unwrap_or(step);
+        }
+        step / 10.0
+    }
+    /// `v` (points) on the nearest ruler tick at `zoom` ([`Self::ruler_tick_step`]).
     pub fn snap_to_ruler_tick(self, v: f64, zoom: f64) -> f64 {
-        let tick = self.ruler_step(zoom) / 10.0 * self.points();
+        let tick = self.ruler_tick_step(zoom) * self.points();
         (v / tick).round() * tick
     }
     pub fn from_pt(self, v: f64) -> f64 {
@@ -287,6 +302,22 @@ impl Unit {
         format!("{:.2} {}", self.from_pt(pt), self.suffix())
     }
 }
+
+/// The inch rulers' steps: binary fractions and multiples of an inch, 1/16 in to 65536 in.
+const INCH_STEPS: [f64; 21] = {
+    let mut steps = [0.0; 21];
+    let mut i = 0;
+    while i < steps.len() {
+        // 2^(i-4): 1/16, 1/8 … 1, 2 … 65536.
+        steps[i] = (1u64 << i) as f64 / 16.0;
+        i += 1;
+    }
+    steps
+};
+/// The finest inch label step (⅛ in): finer steps only tick.
+const INCH_LABEL_MIN: f64 = 0.125;
+/// The coarsest inch step.
+const INCH_STEP_MAX: f64 = 65536.0;
 
 fn parse_measure(s: &str, default: Unit) -> Option<f64> {
     let s = s.trim();

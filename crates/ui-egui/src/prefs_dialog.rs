@@ -19,6 +19,14 @@ pub const UI_FIELDS: &[(&str, &str, &str)] = &[
     ("__taskBar", "General", "Enable Contextual Task Bar"),
 ];
 
+/// The Units preferences OK stores only when changed in the dialog.
+const UNIT_KEYS: [&str; 2] = ["unitsGeneral", "unitsStroke"];
+
+/// The dialog field keeping `key`'s value as the dialog opened (UI-only, never sent).
+fn shown_key(key: &str) -> String {
+    format!("__shown_{key}")
+}
+
 pub fn open(app: &mut VectorcraftApp, category: Option<&str>) {
     // One field per preference key or group (the flattener presets have commands of their own).
     let mut fields: Map<String, Value> = app.session.prefs.to_json().as_object().cloned().unwrap_or_default();
@@ -26,6 +34,14 @@ pub fn open(app: &mut VectorcraftApp, category: Option<&str>) {
     // Units ▸ General shows (and OK sets) the open document's units.
     if let Some(st) = app.session.active() {
         fields.insert("unitsGeneral".into(), json!(st.doc.units.key()));
+    }
+    // The units as the dialog opened, so OK stores them only when the person changed them: the
+    // General unit shown can be an embedding page's choice for its job, which the person's
+    // stored preferences must not keep ([`confirm`]).
+    for key in UNIT_KEYS {
+        if let Some(v) = fields.get(key).cloned() {
+            fields.insert(shown_key(key), v);
+        }
     }
     let cat = category.and_then(|c| PREF_CATEGORIES.iter().find(|x| x.eq_ignore_ascii_case(c))).copied().unwrap_or(PREF_CATEGORIES[0]);
     fields.insert("__category".into(), json!(cat));
@@ -38,7 +54,14 @@ pub fn open(app: &mut VectorcraftApp, category: Option<&str>) {
 /// OK: validate and apply every preference in the dialog (nothing changes on error).
 pub fn confirm(app: &mut VectorcraftApp) -> Result<Value, String> {
     let Some(d) = app.ui.dialog.clone() else { return Err("no dialog open".into()) };
-    let values: Map<String, Value> = d.fields.iter().filter(|(k, _)| !k.starts_with("__")).map(|(k, v)| (k.clone(), v.clone())).collect();
+    let values: Map<String, Value> = d
+        .fields
+        .iter()
+        .filter(|(k, _)| !k.starts_with("__"))
+        // A unit left as the dialog showed it isn't the person's choice: the stored preference stays.
+        .filter(|(k, v)| !UNIT_KEYS.contains(&k.as_str()) || d.fields.get(&shown_key(k)) != Some(*v))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     app.run("prefs.set", json!({ "values": values }))?;
     app.ui.view.smart_guides = d.fields.get("__smartGuides").and_then(Value::as_bool).unwrap_or(app.ui.view.smart_guides);
     app.ui.view.snap_to_grid = d.fields.get("__snapToGrid").and_then(Value::as_bool).unwrap_or(app.ui.view.snap_to_grid);

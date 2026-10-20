@@ -19,6 +19,10 @@
 //!   raster-effects resolution is raised to at least that, without marking it changed (a file read
 //!   from a PDF starts at 72 ppi; shadows and glows are written at it). `ready` says
 //!   `rasterEffectsResolution: true`.
+//! - `vectorcraft:open` may carry `units` and `strokeUnits` (unit names such as `inches` or
+//!   `millimeters`): the opened document's General unit and the Stroke unit while it is open,
+//!   shown without marking it changed, adding an undo step or changing the person's preferences.
+//!   `ready` says `units: true`.
 //! - `vectorcraft:selection` (to the parent): `{ image, copies, otherSizes }` whenever it changes:
 //!   whether exactly one image is selected, and how many other copies of it (same pixels) the
 //!   document holds at the same printed size and at other sizes. `ready` says `selection: true`.
@@ -128,6 +132,7 @@ impl Bridge {
             ("productionSeparations", true.into()),
             ("selection", true.into()),
             ("rasterEffectsResolution", true.into()),
+            ("units", true.into()),
         ]);
     }
 
@@ -331,6 +336,25 @@ impl Bridge {
                             }
                         }
                     };
+                    // A field left out is `None`; one that is there but not a string is `Some(None)`.
+                    let given = |key: &str| {
+                        let v = js_sys::Reflect::get(&data, &JsValue::from_str(key)).unwrap_or(JsValue::UNDEFINED);
+                        (!v.is_undefined()).then(|| v.as_string())
+                    };
+                    let units = match protocol::open_unit("units", given("units")) {
+                        Ok(u) => u,
+                        Err(e) => {
+                            bridge.post_failed(&e);
+                            return;
+                        }
+                    };
+                    let stroke_units = match protocol::open_unit("strokeUnits", given("strokeUnits")) {
+                        Ok(u) => u,
+                        Err(e) => {
+                            bridge.post_failed(&e);
+                            return;
+                        }
+                    };
                     let value = js_sys::Reflect::get(&data, &JsValue::from_str("separations")).unwrap_or(JsValue::UNDEFINED);
                     let separations = if value.is_undefined() {
                         None
@@ -358,6 +382,8 @@ impl Bridge {
                         print_production: flag.as_bool().unwrap_or(false),
                         separations,
                         raster_effects_ppi,
+                        units,
+                        stroke_units,
                     });
                     wake();
                 }

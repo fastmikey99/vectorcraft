@@ -613,7 +613,12 @@ fn set(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(e) = s.prefs.keep_folders(&mut next).into_iter().next() {
         return Err(EngineError::Other(e));
     }
+    let stroke_before = s.prefs.units_stroke.clone();
     s.apply_prefs(next);
+    // A Stroke unit the person picks ends the one an embedding page chose for its job.
+    if s.prefs.units_stroke != stroke_before {
+        s.set_stroke_unit_override(None);
+    }
     // Units ▸ General is also the open document's units (as Document Setup sets them).
     if values.contains_key("unitsGeneral") && s.active().is_some() {
         let units = s.default_units();
