@@ -73,6 +73,7 @@ mod recolor;
 pub mod recovery;
 pub mod scripts;
 mod select;
+mod sep_trap;
 pub(crate) mod shaper;
 pub mod shortcutset;
 pub(crate) mod slices;
@@ -299,6 +300,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(scripts::specs());
         v.extend(cut::specs());
         v.extend(halftone::specs());
+        v.extend(sep_trap::specs());
         v.extend(perspgrid::specs());
         v.extend(lineweight::specs());
         v.extend(shortcutset::specs());
