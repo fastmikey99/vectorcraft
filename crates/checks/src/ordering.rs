@@ -265,6 +265,81 @@ pub fn check(request: &Request, bytes: &[u8], census: &crate::pdf::Census, repor
     Ok(())
 }
 
+/// Reconcile clean vector pages independently of images on other pages. This is
+/// local paint order for a print measurement, not document-wide certification.
+pub(crate) fn reconcile_practical_pages(bytes: &[u8], c: &mut crate::pdf::Census) {
+    use std::collections::{BTreeMap, VecDeque};
+    c.reconciled_pages.clear();
+    if c.paint_order_verified
+        && !c.budget_exhausted
+        && c.unresolved.is_empty()
+        && c.unresolved_layers.is_empty()
+        && c.unaccounted_objects.is_empty()
+        && c.image_objects == 0
+    {
+        c.reconciled_pages.extend(0..c.pages);
+        return;
+    }
+    if c.budget_exhausted || c.unresolved.iter().any(|s| !s.to_ascii_lowercase().contains(": image requires direct composited content census")) {
+        return;
+    }
+    let Ok(order) = vectorcraft_pdf::print_order(bytes) else { return };
+    if order.issues.iter().any(|s| {
+        !matches!(
+            s.as_str(),
+            "Image sample, mask and compositing coverage requires independent reconciliation"
+                | "Duplicate PDF layer names cannot establish unique routing"
+        )
+    }) {
+        return;
+    }
+    c.paint_sources = order.sources.clone();
+    let mut offset = 0usize;
+    for (page, events) in order.pages.iter().enumerate() {
+        let base = offset;
+        offset = offset.saturating_add(events.len());
+        if order.images.get(page).is_none_or(|a| !a.is_empty()) {
+            continue;
+        }
+        let mut groups: BTreeMap<&str, VecDeque<usize>> = BTreeMap::new();
+        let mut valid = true;
+        for (i, p) in c.paints.iter().enumerate().filter(|(_, p)| p.page == Some(page)) {
+            if p.geometry_mm.is_none() || (c.image_objects == 0 && c.unresolved_layers.contains(&p.layer)) {
+                valid = false;
+                break;
+            }
+            groups.entry(&p.layer).or_default().push_back(i);
+        }
+        let mut mapping = vec![];
+        for (position, layer) in events.iter().enumerate() {
+            let name = layer.and_then(|i| order.layers.get(i)).map(String::as_str).unwrap_or("");
+            let index = groups.get_mut(name).and_then(VecDeque::pop_front);
+            let source_index = order.source_indices.get(page).and_then(|a| a.get(position)).copied();
+            match index.zip(source_index).and_then(|(i, s)| Some((i, s, c.paints.get(i)?, order.sources.get(s)?))) {
+                Some((i, s, p, source))
+                    if p.stroke == source.stroke && p.overprint == source.overprint && u8::from(!p.overprint_zero) == source.overprint_mode =>
+                {
+                    mapping.push((i, s, base + position))
+                }
+                _ => {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+        if !valid || groups.values().any(|a| !a.is_empty()) {
+            continue;
+        }
+        for (i, source, position) in mapping {
+            if let Some(p) = c.paints.get_mut(i) {
+                p.source_space = Some(source);
+                p.order = position;
+            }
+        }
+        c.reconciled_pages.insert(page);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,6 +1,6 @@
 //! Layer labels locate candidates; named inks and recipe output roles identify them.
 //! Will's 2026-10-19 clarification: White Underprint numbering is a fingerprint,
-//! not a production constraint. Explicit layer_order remains independent of it.
+//! not a production constraint. layer_order is an authoring convention, not press order.
 use crate::{pdf::PaintedObject, recipe::FileLink};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -49,6 +49,12 @@ pub(crate) fn paint_matches(link: &FileLink, paint: &PaintedObject) -> bool {
 /// Multiple contributors to one ink/role remain possible, without proving each
 /// contribution. A label fingerprint cannot distinguish conflicting roles.
 pub(crate) fn ambiguous(links: &[&FileLink], paint: &PaintedObject) -> bool {
+    ambiguous_mode(links, paint, true)
+}
+pub(crate) fn ambiguous_print_role(links: &[&FileLink], paint: &PaintedObject) -> bool {
+    ambiguous_mode(links, paint, false)
+}
+fn ambiguous_mode(links: &[&FileLink], paint: &PaintedObject, include_authoring_order: bool) -> bool {
     let mut candidates = links.iter().filter(|link| paint_matches(link, paint));
     let Some(first) = candidates.next() else { return false };
     candidates.any(|other| {
@@ -56,7 +62,7 @@ pub(crate) fn ambiguous(links: &[&FileLink], paint: &PaintedObject) -> bool {
             || other.name_mode != first.name_mode
             || other.separation_name != first.separation_name
             || other.overprint != first.overprint
-            || other.layer_order != first.layer_order
+            || (include_authoring_order && other.layer_order != first.layer_order)
     })
 }
 

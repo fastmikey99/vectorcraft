@@ -5,7 +5,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use vectorcraft_checks::{Report, Request, Status, Validity, digest, sha256};
+use vectorcraft_checks::{Report, Request, Validity, digest, sha256};
 use vectorcraft_doc::Document;
 
 #[derive(Debug)]
@@ -46,6 +46,9 @@ pub struct State {
     pub error: Option<String>,
 }
 impl State {
+    pub fn is_stale(&self, doc: &Arc<Document>) -> bool {
+        self.validity(doc) == Validity::Stale
+    }
     pub fn validity(&self, doc: &Arc<Document>) -> Validity {
         if (self.next_run == 0 && self.checked_document.is_none()) || self.checked_document.as_ref().is_some_and(|checked| Arc::ptr_eq(checked, doc))
         {
@@ -119,8 +122,7 @@ fn configure(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let request: Request =
         serde_json::from_value(p.get("request").cloned().unwrap_or(Value::Null)).map_err(|e| bad("production.checks.configure", e.to_string()))?;
-    let mut report = vectorcraft_checks::begin(&request).map_err(|e| bad("production.checks.configure", e))?;
-    vectorcraft_checks::preparation::check_inputs(&request, &mut report).map_err(|e| bad("production.checks.configure", e))?;
+    let report = vectorcraft_checks::print_quality::begin(&request).map_err(|e| bad("production.checks.configure", e))?;
     let origin_run_id = request.run_id.clone();
     // Dropping a previous pending state cancels it; its completion has no route into this state.
     s.doc_mut()?.production_checks = State { request: Some(request), report: Some(report), origin_run_id, ..Default::default() };
@@ -130,24 +132,18 @@ fn work(
     mut request: Request,
     doc: Arc<Document>,
     options: Value,
-    import_losses: Vec<String>,
+    _import_losses: Vec<String>,
     cancelled: &AtomicBool,
 ) -> std::result::Result<Completion, String> {
     let checkpoint = || if cancelled.load(Ordering::Acquire) { Err("Check cancelled".to_string()) } else { Ok(()) };
     checkpoint()?;
-    let (bytes, warnings) = super::fileio::pdf::encode("production.checks.run", &doc, &options).map_err(|e| e.to_string())?;
+    let (bytes, _warnings) = super::fileio::pdf::encode("production.checks.run", &doc, &options).map_err(|e| e.to_string())?;
     checkpoint()?;
     request.identity.document_sha256 = digest(&*doc)?;
     request.identity.pdf_sha256 = sha256(&bytes);
     request.identity.engine_version = vectorcraft_checks::ENGINE_VERSION.into();
-    let mut report = vectorcraft_checks::pdf::check(&request, &bytes)?;
+    let report = vectorcraft_checks::print_quality::check(&request, &bytes)?;
     checkpoint()?;
-    if !warnings.is_empty() {
-        report.record("global/export", Status::Incomplete, "PDF export emitted diagnostics", json!(warnings), vec![])?;
-    }
-    if !import_losses.is_empty() {
-        report.record("global/integrity", Status::Incomplete, "Original import diagnostics remain unresolved", json!(import_losses), vec![])?;
-    }
     Ok(Completion { request, report, document: doc })
 }
 fn run(s: &mut Session, p: &Value) -> Result<Value> {
@@ -156,8 +152,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     if s.doc()?.production_checks.running() {
         return Err(bad(C, "A check is already running; cancel it before starting another"));
     }
-    let mut request =
-        s.doc()?.production_checks.request.clone().ok_or_else(|| bad(C, "Choose a published recipe and preparation baseline through Reporter"))?;
+    let mut request = s.doc()?.production_checks.request.clone().ok_or_else(|| bad(C, "Choose the process recipe and Dark/Light in Reporter"))?;
     let doc = s.doc()?.doc.clone();
     let import_losses = s.doc()?.import_losses.clone();
     let options = p.get("pdfOptions").cloned().unwrap_or_else(|| json!({}));
@@ -168,7 +163,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     state.next_run = state.next_run.checked_add(1).ok_or_else(|| bad(C, "Check sequence exhausted; reconfigure the check"))?;
     request.run_id = format!("{}:local:{}", state.origin_run_id, state.next_run);
     state.request = Some(request.clone());
-    state.report = Some(vectorcraft_checks::begin(&request).map_err(|e| bad(C, e))?);
+    state.report = Some(vectorcraft_checks::print_quality::begin(&request).map_err(|e| bad(C, e))?);
     // The browser host transfers one exact export to its service; editing can continue.
     if cfg!(target_arch = "wasm32") || p.get("service").and_then(Value::as_bool) == Some(true) {
         let sequence = NEXT_REMOTE
@@ -242,7 +237,7 @@ pub fn take_remote_export(s: &mut Session) -> std::result::Result<Option<(String
             // separately detects editor changes while the service is running.
             pending.request.identity.document_sha256 = hash;
             state.request = Some(pending.request.clone());
-            state.report = Some(vectorcraft_checks::begin(&pending.request)?);
+            state.report = Some(vectorcraft_checks::print_quality::begin(&pending.request)?);
             Ok(Some((remote.token, bytes)))
         }
         Err(error) => {
@@ -262,21 +257,12 @@ fn complete(s: &mut Session, p: &Value) -> Result<Value> {
         if let Some(error) = p.get("error").and_then(Value::as_str) {
             return Err(error.chars().take(4000).collect());
         }
-        let mut report: Report = serde_json::from_value(p.get("report").cloned().unwrap_or(Value::Null)).map_err(|e| e.to_string())?;
+        let report: Report = serde_json::from_value(p.get("report").cloned().unwrap_or(Value::Null)).map_err(|e| e.to_string())?;
         let mut request = remote.request.clone();
         // The service owns persistent run UUIDs. Correlation is this one-use token;
         // every immutable input and the entire denominator must still match.
         request.run_id = report.run_id.clone();
-        vectorcraft_checks::validate_report(&request, &report)?;
-        if !remote.diagnostics.is_empty() && report.findings.iter().any(|f| f.obligation.key == "global/export" && f.status != Status::Fail) {
-            report.record(
-                "global/export",
-                Status::Incomplete,
-                "Snapshot import/export diagnostics remain unresolved",
-                json!(remote.diagnostics),
-                vec![],
-            )?;
-        }
+        vectorcraft_checks::print_quality::validate_report(&request, &report)?;
         Ok((request, report))
     })();
     let state = &mut s.doc_mut()?.production_checks;
@@ -366,7 +352,7 @@ fn select(s: &mut Session, p: &Value) -> Result<Value> {
 }
 pub type CheckRequest = Request;
 pub fn validate_request(request: &Request) -> std::result::Result<(), String> {
-    vectorcraft_checks::enumerate(request).map(|_| ())
+    vectorcraft_checks::print_quality::enumerate(request).map(|_| ())
 }
 
 #[cfg(test)]
@@ -405,7 +391,11 @@ mod tests {
         assert!(st.production_checks.error.is_none(), "{:?}", st.production_checks.error);
         assert!(Arc::ptr_eq(&current, &st.doc));
         assert_eq!(st.production_checks.validity(&st.doc), Validity::Stale);
-        vectorcraft_checks::validate_report(st.production_checks.request.as_ref().unwrap(), st.production_checks.report.as_ref().unwrap()).unwrap();
+        vectorcraft_checks::print_quality::validate_report(
+            st.production_checks.request.as_ref().unwrap(),
+            st.production_checks.report.as_ref().unwrap(),
+        )
+        .unwrap();
         let result = s.execute("production.checks.list", &json!({})).unwrap();
         assert_eq!(result["report"]["validity"], "stale");
         assert_ne!(result["report"]["status"], "pass");
@@ -419,8 +409,11 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         s.doc_mut().unwrap().production_checks.pending = Some(Arc::new(Pending { result: result.clone(), cancelled: cancelled.clone() }));
         s.execute("production.checks.cancel", &json!({})).unwrap();
-        *result.lock().unwrap() =
-            Some(Ok(Completion { report: vectorcraft_checks::begin(&request).unwrap(), request: request.clone(), document: doc.clone() }));
+        *result.lock().unwrap() = Some(Ok(Completion {
+            report: vectorcraft_checks::print_quality::begin(&request).unwrap(),
+            request: request.clone(),
+            document: doc.clone(),
+        }));
         poll_pending(&mut s);
         assert!(cancelled.load(Ordering::Acquire));
         assert!(s.doc().unwrap().production_checks.checked_document.is_none());
@@ -449,15 +442,15 @@ mod tests {
         let mut s = session();
         let st = s.doc_mut().unwrap();
         st.production_checks.checked_document = Some(st.doc.clone());
-        st.production_checks.selected = Some("global/fidelity".into());
-        st.production_checks.report.as_mut().unwrap().findings.iter_mut().find(|f| f.obligation.key == "global/fidelity").unwrap().location =
+        st.production_checks.selected = Some("print/dimensions".into());
+        st.production_checks.report.as_mut().unwrap().findings.iter_mut().find(|f| f.obligation.key == "print/dimensions").unwrap().location =
             Some(vectorcraft_checks::Location { page: 0, bounds_mm: Some([1.0, 2.0, 3.0, 4.0]), object_ids: vec![999] });
         let (_, rect) = st.production_checks.selected_rect(&st.doc).unwrap();
         assert!((rect.width() - 2.0 * 72.0 / 25.4).abs() < 1e-10);
         s.execute("shape.rectangle", &json!({"x":1,"y":1,"width":1,"height":1})).unwrap();
         let st = s.doc().unwrap();
         assert!(st.production_checks.selected_rect(&st.doc).is_none());
-        let finding = s.execute("production.checks.select", &json!({"key":"global/fidelity"})).unwrap();
+        let finding = s.execute("production.checks.select", &json!({"key":"print/dimensions"})).unwrap();
         assert_eq!(finding["stale"], true);
         assert!(finding["location"].is_null());
     }
@@ -471,7 +464,7 @@ mod tests {
         let mut request = s.doc().unwrap().production_checks.request.clone().unwrap();
         request.run_id = "persisted-service-run".into();
         assert_eq!(request.identity.pdf_sha256, sha256(&bytes));
-        let report = vectorcraft_checks::pdf::check(&request, &bytes).unwrap();
+        let report = vectorcraft_checks::print_quality::check(&request, &bytes).unwrap();
         s.execute("shape.rectangle", &json!({"x":20,"y":20,"width":10,"height":10})).unwrap();
         let edited = s.doc().unwrap().doc.clone();
         let result = s.execute("production.checks.complete", &json!({"token":token,"report":report})).unwrap();
@@ -486,7 +479,7 @@ mod tests {
         s.execute("production.checks.run", &json!({"service":true})).unwrap();
         let (old, bytes) = take_remote_export(&mut s).unwrap().unwrap();
         let request = s.doc().unwrap().production_checks.request.clone().unwrap();
-        let report = vectorcraft_checks::pdf::check(&request, &bytes).unwrap();
+        let report = vectorcraft_checks::print_quality::check(&request, &bytes).unwrap();
         s.execute("production.checks.cancel", &json!({})).unwrap();
         assert_eq!(s.execute("production.checks.complete", &json!({"token":old,"report":report})).unwrap()["accepted"], false);
         s.execute("production.checks.configure", &json!({"request":request})).unwrap();

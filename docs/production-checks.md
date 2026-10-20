@@ -1,5 +1,22 @@
 # Recipe-driven production checks
 
+## Current scope — print quality (20 October 2026)
+
+Mike removed document certification, editor/export preservation, independent renderer comparison, recipe publication, source approval and exact-version eligibility from the operator checker. The older certification plan and evidence below are historical, superseded where they conflict with this scope.
+
+The active CLI and editor now use `checks::print_quality`; Reporter offers a process recipe and Dark/Light selector without preparing or approving customer artwork. Results answer print questions: technical inks and routes, PMS/custom names when the job supplies them, physical plate presence, overprint and actual coverage, ordered artwork dimensions, spreads/chokes, white/blocker relationships, and printable detail/gaps. White Underprint numeric suffixes remain nonbinding hints. Removed checks do not contribute to the active catalogue or aggregate verdict. An original PDF is optional supporting material, not a gate.
+
+PDF Layers-panel order, actual PDF drawing sequence and physical manufacturing sequence are distinct. `layer_order` is a preferred authoring/display convention, not an unconditional constraint on an existing sep. Sequence differences alone do not create a print failure or an unresolved-order gate. Actual drawing positions remain optional observations; supported physical-coverage checks detect required ink removed by knockout, clipping or zero-tint paint. Independently confirmed press settings are unchanged. Reporter code does not establish that downstream Switch/PitStop extraction is order-independent.
+
+Results group as **Passes**, **Needs fixing**, and **Can’t yet check**. Partial measurements remain visible, including nominal targets and boundary-gap intervals. No manufacturing tolerance or minimum feature size is invented. A recipe discrepancy is not by itself proof that a previously produced sep prints badly: the report states the setting and the recipe interpretation to review.
+
+Current measurement limits: curved/raster minimum features and halftones; source-region selection for shared/protected edges; separately identifying contributors coalesced into one white plate; images/masks or unresolved compositing affecting a geometric question; absent ordered dimensions, custom-ink lists or manufacturing criteria. Solid rectangular spot-plate width/gap measurements and unambiguous whole-shape spread/choke comparisons are implemented. Unknown job region or Dark/Light is reported separately from candidate observations. Local runtime checks and ordinary request correlation remain engineering safeguards; there is no independent-renderer approval receipt.
+
+Local qualification completed: all nine CI gates, 263 checker tests, 42 real-file runs and eight Reporter/native agreements. [Validation and Codex review dispositions](print-quality-qualification-20261020.md).
+
+Qualification uses supplied PA Sharp and Esko output examples, with four customer originals treated only as supporting files, plus wrong-ink/wrong-choke and partial-interpretation regression controls. The private real-file scoreboard is retained locally; no customer artwork is committed. No merge or deployment is included.
+
+
 Status: 20 October 2026, implementation in progress. This is not a qualified production-release checker. Existing parity scores and estimates are unchanged.
 
 `vectorcraft-checks` provides a shared, headless Rust contract and measurement core. The editor exposes it through `production.checks.configure`, `production.checks.run`, cancellation and finding selection. The Checks panel shows the full obligation denominator, expected and measured evidence, unresolved work, validity and page-local finding locations. Preview visibility cannot change a request's obligations.

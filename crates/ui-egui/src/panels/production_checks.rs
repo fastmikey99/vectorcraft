@@ -9,7 +9,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         return;
     };
     let state = st.production_checks.clone();
-    let validity = state.validity(&st.doc);
+    let stale = state.is_stale(&st.doc);
     ui.horizontal(|ui| {
         let (label, command) = if state.running() { ("Cancel checks", "production.checks.cancel") } else { ("Run checks", "production.checks.run") };
         if widgets::flat_button(ui, label, 100.0).clicked()
@@ -17,7 +17,9 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         {
             app.ui.status = e;
         }
-        widgets::dim_label(ui, &format!("{validity:?}"));
+        if stale {
+            widgets::dim_label(ui, "Document edited since this check");
+        }
     });
     if state.running() {
         widgets::dim_label(ui, if state.cancelling() { "Cancelling…" } else { "Checking a document snapshot…" });
@@ -26,7 +28,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         ui.label(error);
     }
     let Some(report) = state.report else {
-        widgets::dim_label(ui, "Choose a recipe and preparation baseline in Reporter to configure checks.");
+        widgets::dim_label(ui, "Choose the process recipe and Dark/Light in Reporter.");
         return;
     };
     ui.label(format!(
@@ -36,10 +38,10 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
         report.coverage.total - report.coverage.not_applicable
     ));
     ui.label(format!(
-        "{} passed · {} failed · {} incomplete · {} not applicable",
+        "{} passes · {} needs fixing · {} cannot yet check · {} not applicable",
         report.coverage.passed, report.coverage.failed, report.coverage.incomplete, report.coverage.not_applicable
     ));
-    widgets::dim_label(ui, "Local findings are provisional. Final Pass requires verification of the saved PDF.");
+    widgets::dim_label(ui, "Checks describe the selected PDF and recipe. Unmeasured print questions are listed individually.");
     let mut groups = std::collections::BTreeMap::<String, Vec<_>>::new();
     for finding in &report.findings {
         groups.entry(finding.obligation.area.clone()).or_default().push(finding);
@@ -98,7 +100,7 @@ mod tests {
         assert!(frame(&mut app).iter().any(|s| s == "No document open."));
         app.session.execute("file.new", &json!({"width":100,"height":100})).unwrap();
         let texts = frame(&mut app);
-        assert!(texts.iter().any(|s| s.contains("preparation baseline")));
+        assert!(texts.iter().any(|s| s.contains("process recipe and Dark/Light")));
         assert!(texts.iter().any(|s| s == "Run checks"));
     }
     #[test]
@@ -117,7 +119,7 @@ mod tests {
         );
         let texts = frame(&mut app);
         assert!(texts.iter().any(|s| s.contains("1 / 2 applicable checks evaluated")), "{texts:?}");
-        assert!(texts.iter().any(|s| s.contains("1 failed") && s.contains("1 incomplete")), "{texts:?}");
-        assert!(texts.iter().any(|s| s.contains("Local findings are provisional")), "{texts:?}");
+        assert!(texts.iter().any(|s| s.contains("1 needs fixing") && s.contains("1 cannot yet check")), "{texts:?}");
+        assert!(texts.iter().any(|s| s.contains("Unmeasured print questions")), "{texts:?}");
     }
 }

@@ -24,6 +24,8 @@ pub mod prepare;
 pub mod prepare_edits;
 mod prepared_crop;
 pub mod prepared_mask;
+mod print_detail;
+pub mod print_quality;
 pub mod program;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod raster;
@@ -369,13 +371,12 @@ impl Report {
 /// Validate a returned result against a locally re-enumerated denominator. Transport never
 /// trusts a service's totals, claimed applicability, omitted obligations or stale run identity.
 pub fn validate_report(request: &Request, report: &Report) -> Result<(), String> {
-    if report.validity != Validity::Provisional {
-        return Err("Local checker cannot assert final validity".into());
-    }
+    validate_report_against(request, report, enumerate(request)?)
+}
+pub(crate) fn validate_report_against(request: &Request, report: &Report, expected: Vec<Obligation>) -> Result<(), String> {
     if report.contract_version != CONTRACT_VERSION || report.run_id != request.run_id || report.identity != request.identity {
         return Err("Result does not match this request".into());
     }
-    let expected = enumerate(request)?;
     let keys: BTreeSet<_> = report.findings.iter().map(|f| &f.obligation.key).collect();
     if keys.len() != report.findings.len() || keys.len() != expected.len() {
         return Err("Incomplete or duplicated result denominator".into());

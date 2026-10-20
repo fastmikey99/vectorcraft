@@ -54,6 +54,7 @@ pub struct FileLink {
     pub pdf_layer: String,
     pub destination: String,
     pub overprint: bool,
+    /// Preferred PDF authoring/display convention; not a physical press sequence or legacy-file defect rule.
     pub layer_order: u32,
     pub object_group: String,
     pub alternate_colour: String,

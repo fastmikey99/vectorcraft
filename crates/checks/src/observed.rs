@@ -356,7 +356,7 @@ fn check(r: &Request, c: &Census, prelude: Option<&crate::observed_images::Prelu
                 json!({"required":required,"name":plate.get("name"),"destination":plate.get("destination"),"contributing_layers":objects.iter().map(|p|p.layer.as_str()).collect::<BTreeSet<_>>(),"objects":objects.len(),"routed_objects":routed_count,"unmodified_nonempty_paint":surviving}),evidence(r))?;
         }
     }
-    relationships(r, c, &survival, report)?;
+    relationships(r, c, &survival, report, false)?;
     let absent: Vec<_> = report.findings.iter().filter(|f| f.status == Status::NotApplicable).map(|f| f.obligation.key.clone()).collect();
     for key in absent {
         let targets = if let Some(link_key) = key.strip_prefix("file/").and_then(|k| k.strip_suffix("/contribution")) {
@@ -400,7 +400,11 @@ fn check(r: &Request, c: &Census, prelude: Option<&crate::observed_images::Prelu
 
 // A named combined rule can be recovered from a whole shared output, while its
 // individual coalesced contributors cannot. No content is invented from absence.
+#[cfg(test)]
 fn anchor<'a>(r: &Request, c: &'a Census, survival: &Survival, key: &str) -> Result<Vec<&'a PaintedObject>, String> {
+    anchor_mode(r, c, survival, key, false)
+}
+fn anchor_mode<'a>(r: &Request, c: &'a Census, survival: &Survival, key: &str, practical: bool) -> Result<Vec<&'a PaintedObject>, String> {
     let rule = r.recipe.rules.iter().find(|x| x.rule_key == key && r.garment.matches(&x.garment)).ok_or("Rule absent")?;
     let direct: Vec<_> = r.recipe.file_links.iter().filter(|l| r.garment.matches(&l.garment) && l.source_rule == key).collect();
     let t = r.recipe.foundation.as_ref().and_then(|f| f.get("treatments")).and_then(|t| t.get(key)).ok_or("Anchor treatment missing")?;
@@ -429,7 +433,12 @@ fn anchor<'a>(r: &Request, c: &'a Census, survival: &Survival, key: &str) -> Res
         {
             return Err("Anchor output filters its contributing coverage".into());
         }
-        if l.name_mode != "exact"
+        if (l.name_mode != "exact"
+            && !(practical
+                && l.name_mode == "source"
+                && rule.operation == "preserve"
+                && t.get("select") == Some(&json!([[]]))
+                && t.get("result") == Some(&json!("full_shape"))))
             || r.recipe
                 .file_links
                 .iter()
@@ -443,8 +452,11 @@ fn anchor<'a>(r: &Request, c: &'a Census, survival: &Survival, key: &str) -> Res
             return Err("Final plate coalesces other contributors or retains unidentified source paint".into());
         }
     }
-    if c.paints.iter().any(|p| live(p) && links.iter().any(|l| p.ink.as_ref() == l.separation_name.as_ref()) && !links.iter().any(|l| matches(l, p)))
-    {
+    if c.paints.iter().any(|p| {
+        live(p)
+            && links.iter().any(|l| l.separation_name.is_some() && p.ink.as_ref() == l.separation_name.as_ref())
+            && !links.iter().any(|l| matches(l, p))
+    }) {
         return Err("Technical ink also prints outside the anchor routes; the complete physical plate is not isolated".into());
     }
     let objects: Vec<_> = c.paints.iter().filter(|p| live(p) && links.iter().any(|l| matches(l, p))).collect();
@@ -452,10 +464,17 @@ fn anchor<'a>(r: &Request, c: &'a Census, survival: &Survival, key: &str) -> Res
         return Err("No nonempty final anchor; missing output cannot prove source absence".into());
     }
     let active: Vec<_> = r.recipe.file_links.iter().filter(|l| r.garment.matches(&l.garment)).collect();
-    if objects.iter().any(|p| crate::routes::ambiguous(&active, p)) {
+    if objects.iter().any(|p| if practical { crate::routes::ambiguous_print_role(&active, p) } else { crate::routes::ambiguous(&active, p) }) {
         return Err("Ambiguous output role cannot establish a relationship anchor".into());
     }
-    if objects.iter().any(|p| p.tint != Some(1.0) || !survival.unmodified(p)) {
+    if objects.iter().any(|p| !c.paint_order_verified && p.page.is_none_or(|page| !c.reconciled_pages.contains(&page)))
+        || objects.iter().any(|p| {
+            (c.unresolved_layers.contains(&p.layer) && !(practical && p.page.is_some_and(|page| c.reconciled_pages.contains(&page))))
+                || p.geometry_mm.is_none()
+                || p.tint != Some(1.0)
+                || !survival.unmodified(p)
+        })
+    {
         return Err("Relationship requires fully tinted technical coverage without later knockout/zero-tint interference".into());
     }
     Ok(objects)
@@ -469,10 +488,110 @@ fn gap_witness(gap: &crate::geometry::GapRange, distance: f64, tolerance: Option
     let status = if tolerance.is_some_and(|t| lower > t) { Status::Fail } else { Status::Incomplete };
     (lower, status)
 }
-fn relationships(r: &Request, c: &Census, survival: &Survival, report: &mut Report) -> Result<(), String> {
-    let tolerance =
-        r.acceptance.get("geometry_tolerance_mm").filter(|f| f.evidenced()).and_then(|f| f.value.as_f64()).filter(|n| n.is_finite() && *n >= 0.0);
-    let tolerance = if crate::digest(&r.acceptance)? == r.identity.measurement_sha256 { tolerance } else { None };
+/// Plate presence uses actual nonempty geometry and later knockout state, not just a declared colour operator.
+pub(crate) fn practical_plate_coverage(r: &Request, c: &Census, report: &mut Report) -> Result<(), String> {
+    let survival = Survival::new(c);
+    let plates: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| {
+            f.obligation.key.starts_with("print/plate/")
+                && f.status == Status::Incomplete
+                && f.observed.get("paint_events").and_then(Value::as_u64).is_some_and(|n| n > 0)
+        })
+        .map(|f| (f.obligation.key.clone(), f.obligation.expected.clone(), f.observed.clone()))
+        .collect();
+    let mut coverage_budget = crate::feature_offset::WorkBudget::new();
+    for (key, plate, mut observation) in plates {
+        let composite = plate.get("name_mode").and_then(Value::as_str) != Some("exact");
+        let members: Vec<_> = plate.get("links").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
+        let surviving = !c.budget_exhausted
+            && c.paints.iter().any(|p| {
+                let routed = if composite {
+                    r.recipe.file_links.iter().any(|l| r.garment.matches(&l.garment) && members.contains(&l.key.as_str()) && matches(l, p))
+                } else {
+                    p.ink.as_deref() == plate.get("name").and_then(Value::as_str)
+                };
+                routed
+                    && (c.paint_order_verified || p.page.is_some_and(|page| c.reconciled_pages.contains(&page)))
+                    && (!c.unresolved_layers.contains(&p.layer) || p.page.is_some_and(|page| c.reconciled_pages.contains(&page)))
+                    && positive_ink(c, p, composite)
+                    && if composite { survival.composite_unmodified(p) } else { survival.unmodified(p) }
+            });
+        // A required named plate can be proved missing after actual knockout or
+        // zero-tint painting. Do not infer loss from a preferred drawing order.
+        let coverage_empty = if !surviving && !composite && !c.budget_exhausted && c.pages > 0 && c.pages <= 16 {
+            plate.get("name").and_then(Value::as_str).and_then(|ink| {
+                (0..c.pages).try_fold(true, |empty, page| {
+                    crate::coverage::practical_solid(c, page, ink, &mut coverage_budget).ok().map(|v| empty && v.path.is_empty())
+                })
+            })
+        } else {
+            None
+        };
+        let empty = coverage_empty == Some(true) && plate.get("required") == Some(&json!(true));
+        let present = surviving || coverage_empty == Some(false);
+        observation["surviving_vector_coverage"] = json!(present);
+        observation["complete_binary_coverage_empty"] = json!(coverage_empty);
+        report.record(
+            &key,
+            if empty {
+                Status::Fail
+            } else if present {
+                Status::Pass
+            } else {
+                Status::Incomplete
+            },
+            if empty {
+                "Required physical plate has no surviving ink after clipping, knockout or zero-tint paint"
+            } else if present {
+                "Nonempty ink coverage is present on this physical plate"
+            } else {
+                "Plate paint is recorded, but clipping, images or later knockout prevent establishing surviving ink coverage"
+            },
+            observation,
+            evidence(r),
+        )?;
+    }
+    Ok(())
+}
+pub(crate) fn practical_relationships(r: &Request, c: &Census, report: &mut Report) -> Result<(), String> {
+    let mut observed_request = r.clone();
+    // A declared unfiltered preserve output provides the sep's artwork footprint.
+    // This does not assert equality with an original file or require one.
+    for rule in observed_request.recipe.rules.iter_mut().filter(|rule| matches!(rule.operation.as_str(), "spread" | "choke")) {
+        for source in &mut rule.sources {
+            if source.kind != "artwork" {
+                continue;
+            }
+            if let Some(preserve) = r.recipe.rules.iter().find(|p| {
+                r.garment.matches(&p.garment)
+                    && p.operation == "preserve"
+                    && p.protection.is_empty()
+                    && p.sources.len() == 1
+                    && p.sources.first().is_some_and(|s| s.kind == "artwork" && s.key == source.key)
+                    && r.recipe
+                        .foundation
+                        .as_ref()
+                        .and_then(|f| f.get("treatments"))
+                        .and_then(|t| t.get(&p.rule_key))
+                        .is_some_and(|t| t.get("select") == Some(&json!([[]])) && t.get("result") == Some(&json!("full_shape")))
+            }) {
+                source.kind = "rule".into();
+                source.key = preserve.rule_key.clone();
+            }
+        }
+    }
+    relationships(&observed_request, c, &Survival::new(c), report, true)
+}
+fn relationships(r: &Request, c: &Census, survival: &Survival, report: &mut Report, practical: bool) -> Result<(), String> {
+    let tolerance = r
+        .acceptance
+        .get("geometry_tolerance_mm")
+        .filter(|f| practical || f.evidenced())
+        .and_then(|f| f.value.as_f64())
+        .filter(|n| n.is_finite() && *n >= 0.0);
+    let tolerance = if practical || crate::digest(&r.acceptance)? == r.identity.measurement_sha256 { tolerance } else { None };
     for rule in r.recipe.rules.iter().filter(|x| r.garment.matches(&x.garment) && matches!(x.operation.as_str(), "spread" | "choke")) {
         let key = format!("observed/rule/{}/relationship", rule.rule_key);
         let result = (|| -> Result<(Value, f64, Status), String> {
@@ -491,8 +610,12 @@ fn relationships(r: &Request, c: &Census, survival: &Survival, report: &mut Repo
                 );
             }
             let source_key = &rule.sources.first().ok_or("Source missing")?.key;
-            let source = anchor(r, c, survival, source_key)?;
-            let target = anchor(r, c, survival, &rule.rule_key)?;
+            let source = anchor_mode(r, c, survival, source_key, practical)?;
+            let target = anchor_mode(r, c, survival, &rule.rule_key, practical)?;
+            // A supported vector page may be measured even if another page uses
+            // the same route for an image. That partial result cannot Pass the
+            // relationship across all pages; a measured defect remains a Fail.
+            let partial = practical && source.iter().chain(&target).any(|p| c.unresolved_layers.contains(&p.layer));
             let distance = rule.distance_mm.ok_or("Distance missing")?;
             if source
                 .iter()
@@ -595,15 +718,20 @@ fn relationships(r: &Request, c: &Census, survival: &Survival, report: &mut Repo
                     "target_outside_source_area_mm2":outside.to_bezpath().area().abs(),
                     "source_objects":source.iter().filter(|p|p.page==Some(page)).map(|p|p.id).collect::<Vec<_>>(),"target_objects":target.iter().filter(|p|p.page==Some(page)).map(|p|p.id).collect::<Vec<_>>() }));
             }
+            if partial && status == Status::Pass {
+                status = Status::Incomplete;
+            }
             Ok((
-                json!({"acceptance_mm":tolerance,"measurements":rows,"basis":"final-to-final relationship only; source completeness and construction history are not asserted"}),
+                json!({"acceptance_mm":tolerance,"measurements":rows,"partial_pages":partial,"basis":"final-to-final relationship only; source completeness and construction history are not asserted"}),
                 uncertainty,
                 status,
             ))
         })();
         match result {
             Ok((observed, error, status)) => {
-                let why = if tolerance.is_some() {
+                let why = if observed.get("partial_pages") == Some(&json!(true)) {
+                    "Supported vector pages measured; image or unresolved coverage on other pages prevents a complete relationship verdict"
+                } else if tolerance.is_some() {
                     "Final-to-final relationship measured with bound acceptance; original artwork fidelity remains separate"
                 } else {
                     "Final plate relationship measured against the recipe target; manufacturing acceptance tolerance is not established"

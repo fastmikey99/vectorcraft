@@ -53,6 +53,8 @@ pub struct Census {
     #[serde(skip)]
     pub(crate) page_origins_mm: Vec<[f64; 2]>,
     pub paint_order_verified: bool,
+    #[serde(skip)]
+    pub(crate) reconciled_pages: std::collections::BTreeSet<usize>,
     pub raw_audit: Option<RawPaintAudit>,
     pub raw_audit_error: Option<String>,
     pub image_objects: usize,
@@ -376,6 +378,7 @@ fn census_mode(doc: &Document, raw_images: bool) -> Census {
         image_clip_elements: 0,
         page_origins_mm: doc.artboards.iter().map(|a| [a.rect.x0 * 25.4 / 72.0, a.rect.y0 * 25.4 / 72.0]).collect(),
         paint_order_verified: false,
+        reconciled_pages: Default::default(),
         raw_audit: None,
         raw_audit_error: None,
         image_objects: 0,

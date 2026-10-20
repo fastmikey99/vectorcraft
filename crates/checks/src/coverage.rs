@@ -43,7 +43,7 @@ pub(crate) fn solid(census: &Census, page: usize, ink: &str) -> Result<Coverage,
     solid_with_budget(census, page, ink, &mut crate::feature_offset::WorkBudget::new())
 }
 pub(crate) fn solid_with_budget(census: &Census, page: usize, ink: &str, budget: &mut crate::feature_offset::WorkBudget) -> Result<Coverage, String> {
-    channel(census, page, ink, true, budget)
+    channel(census, page, ink, true, budget, false)
 }
 pub(crate) fn positive_with_budget(
     census: &Census,
@@ -51,13 +51,32 @@ pub(crate) fn positive_with_budget(
     ink: &str,
     budget: &mut crate::feature_offset::WorkBudget,
 ) -> Result<Coverage, String> {
-    channel(census, page, ink, false, budget)
+    channel(census, page, ink, false, budget, false)
 }
-fn channel(census: &Census, page: usize, ink: &str, binary: bool, budget: &mut crate::feature_offset::WorkBudget) -> Result<Coverage, String> {
+pub(crate) fn practical_solid(census: &Census, page: usize, ink: &str, budget: &mut crate::feature_offset::WorkBudget) -> Result<Coverage, String> {
+    channel(census, page, ink, true, budget, true)
+}
+fn channel(
+    census: &Census,
+    page: usize,
+    ink: &str,
+    binary: bool,
+    budget: &mut crate::feature_offset::WorkBudget,
+    practical: bool,
+) -> Result<Coverage, String> {
     if page >= census.pages || ink.is_empty() || matches!(ink, "All" | "None") {
         return Err("Physical coverage page or ink is invalid".into());
     }
-    reconciled_vector_census(census)?;
+    if practical {
+        if census.budget_exhausted || (!census.unaccounted_objects.is_empty() && !census.reconciled_pages.contains(&page)) {
+            return Err("This plate has unaccounted coverage or exceeds the measurement budget".into());
+        }
+        if !census.paint_order_verified && !census.reconciled_pages.contains(&page) {
+            return Err("This page has images or unresolved paint geometry/order".into());
+        }
+    } else {
+        reconciled_vector_census(census)?;
+    }
     let mut path = PathData::default();
     let mut construction_allowance_mm = 0.0f64;
     let mut cost = 0usize;
@@ -65,9 +84,22 @@ fn channel(census: &Census, page: usize, ink: &str, binary: bool, budget: &mut c
     let mut paint_object_ids = std::collections::BTreeSet::new();
     for paint in &census.paints {
         budget.charge(1)?;
+        if practical && paint.page != Some(page) {
+            continue;
+        }
         let source = paint.source_space.and_then(|i| census.paint_sources.get(i)).ok_or("Physical coverage source identity missing")?;
         let tones = crate::tone::source_tones(paint, source)?;
-        if tones.values().any(|t| !t.is_finite() || !(0.0..=1.0).contains(t) || (binary && ![0.0, 1.0].contains(t))) {
+        let relevant_tone = crate::tone::overpaint(&tones, ink, paint.overprint, crate::tone::skip_zero_process(paint, source));
+        if practical && relevant_tone.is_none() {
+            continue;
+        }
+        if practical && census.unresolved_layers.contains(&paint.layer) && !census.reconciled_pages.contains(&page) {
+            return Err("A contributing ink or knockout layer has unresolved coverage on this page".into());
+        }
+        if tones.values().any(|t| !t.is_finite() || !(0.0..=1.0).contains(t))
+            || (binary
+                && if practical { relevant_tone.is_some_and(|t| ![0.0, 1.0].contains(&t)) } else { tones.values().any(|t| ![0.0, 1.0].contains(t)) })
+        {
             return Err("Physical feature coverage requires binary solid ink; partial tone needs a separate approved criterion".into());
         }
         if !binary {
@@ -130,6 +162,19 @@ pub(crate) fn aggregate(parts: impl IntoIterator<Item = Coverage>, budget: &mut 
 mod tests {
     use super::*;
     use vectorcraft_geom::{Point, Shape};
+    #[test]
+    fn print_coverage_keeps_unresolved_contributors_incomplete() {
+        let bytes = crate::pdf::tests::fixture_mode(true, 1, "Exact#20ink", "", None);
+        let doc = vectorcraft_pdf::import(&bytes).unwrap();
+        let mut census = crate::pdf::census(&doc);
+        crate::ordering::try_reconcile(&bytes, &mut census).unwrap();
+        assert!(practical_solid(&census, 0, "Exact ink", &mut crate::feature_offset::WorkBudget::new()).is_ok());
+        census.unresolved_layers.insert(census.paints[0].layer.clone());
+        let error = practical_solid(&census, 0, "Exact ink", &mut crate::feature_offset::WorkBudget::new()).err().unwrap();
+        assert!(error.contains("unresolved coverage"));
+        crate::ordering::reconcile_practical_pages(&bytes, &mut census);
+        assert!(!census.reconciled_pages.contains(&0));
+    }
     fn coverage(extra: &str, mode: u8, ink: &str) -> Result<Coverage, String> {
         let bytes = crate::pdf::tests::fixture_mode(true, mode, "Exact#20ink", extra, None);
         let doc = vectorcraft_pdf::import(&bytes).unwrap();

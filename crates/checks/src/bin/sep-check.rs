@@ -130,7 +130,7 @@ fn run() -> Result<(), String> {
             return Ok(());
         }
         let request: vectorcraft_checks::Request = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-        println!("{}", serde_json::to_string(&vectorcraft_checks::enumerate(&request)?).map_err(|e| e.to_string())?);
+        println!("{}", serde_json::to_string(&vectorcraft_checks::print_quality::enumerate(&request)?).map_err(|e| e.to_string())?);
         return Ok(());
     }
     let request_path = first;
@@ -147,13 +147,9 @@ fn run() -> Result<(), String> {
     }
     let request: vectorcraft_checks::Request =
         serde_json::from_slice(&fs::read(request_path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    let mut report = vectorcraft_checks::pdf::check(&request, &fs::read(pdf_path).map_err(|e| e.to_string())?)?;
-    if let Some(path) = original_path {
-        if fs::metadata(&path).map_err(|e| e.to_string())?.len() > 256 * 1024 * 1024 {
-            return Err("Original exceeds 256 MiB budget".into());
-        }
-        vectorcraft_checks::prepare::verify_into_report(&request, &fs::read(path).map_err(|e| e.to_string())?, &mut report)?;
-    }
+    let report = vectorcraft_checks::print_quality::check(&request, &fs::read(pdf_path).map_err(|e| e.to_string())?)?;
+    // Retained CLI argument for compatibility; customer artwork is optional context.
+    let _ = original_path;
     println!("{}", serde_json::to_string(&report).map_err(|e| e.to_string())?);
     Ok(())
 }
