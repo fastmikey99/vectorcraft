@@ -335,3 +335,28 @@ fn choosing_a_stroke_unit_ends_the_pages() {
     app.run("prefs.set", json!({"key": "unitsStroke", "value": "millimeters"})).unwrap();
     assert_eq!(app.session.unit(Measure::Stroke), Unit::Millimeters);
 }
+
+#[test]
+fn preferences_ok_keeps_the_persons_units_under_a_pages_job() {
+    let (mut app, _, host) = single();
+    app.session.prefs.units_general = "millimeters".into();
+    app.session.prefs.units_stroke = "points".into();
+    open_in(&host, "job.svg", SQUARE.to_vec(), Some(Unit::Inches), Some(Unit::Inches));
+    app.drain_inbox();
+    // Preferences, OK, Units untouched: the page's inches are not stored as the person's own.
+    crate::prefs_dialog::open(&mut app, None);
+    assert_eq!(app.ui.dialog.as_ref().unwrap().fields["unitsGeneral"], json!("inches"), "the dialog shows the document's units");
+    crate::prefs_dialog::confirm(&mut app).unwrap();
+    assert_eq!((app.session.prefs.units_general.as_str(), app.session.prefs.units_stroke.as_str()), ("millimeters", "points"));
+    assert_eq!(app.ui.engine_prefs["unitsGeneral"], json!("millimeters"), "nor in the prefs the editor posts to the page");
+    let st = app.session.active().unwrap();
+    assert_eq!((st.doc.units, st.is_dirty(), app.session.unit(Measure::Stroke)), (Unit::Inches, false, Unit::Inches), "the job keeps its units");
+    // A unit the person changes in the dialog is stored (and shown).
+    crate::prefs_dialog::open(&mut app, None);
+    let fields = &mut app.ui.dialog.as_mut().unwrap().fields;
+    fields.insert("unitsGeneral".into(), json!("points"));
+    fields.insert("unitsStroke".into(), json!("millimeters"));
+    crate::prefs_dialog::confirm(&mut app).unwrap();
+    assert_eq!((app.session.prefs.units_general.as_str(), app.session.prefs.units_stroke.as_str()), ("points", "millimeters"));
+    assert_eq!((app.session.general_unit(), app.session.unit(Measure::Stroke)), (Unit::Points, Unit::Millimeters));
+}

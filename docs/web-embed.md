@@ -210,6 +210,9 @@ They are display choices for this job, not edits and not preferences:
 - Neither changes the person's stored preferences, so the `vectorcraft:prefs` the
   editor sends back keep their own Units › General and Stroke (a person who works in
   millimetres is not left in inches by one US job).
+- Preferences › OK stores Units › General and Stroke only when the person changed
+  them in the dialog: pressing OK during an inches job leaves their stored units as
+  they were.
 - Every open sets them for its job: an open without `strokeUnits` shows strokes in
   the person's Stroke preference again; one without `units` opens in the file's own
   units or the preference, as before. Choosing a different Stroke unit in
