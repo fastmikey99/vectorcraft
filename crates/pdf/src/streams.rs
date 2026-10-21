@@ -249,18 +249,12 @@ fn maybe_content(dict: &Dict<'_>) -> bool {
         && ![&b"Length1"[..], b"Length2", b"Length3", b"FunctionType", b"N"].iter().any(|k| dict.contains_key(k))
 }
 
-/// Is the stream with dictionary `dict` content by what it is: a form XObject (soft masks' groups
-/// and appearance streams usually are) or a tiling pattern? Content used from elsewhere (a page's
-/// contents, a Type 3 glyph) is known by where it is used ([`crate::pages`]).
-fn content_by_kind(dict: &Dict<'_>) -> bool {
-    dict.get::<Name<'_>>(b"Subtype").is_some_and(|s| s.as_ref() == b"Form") || dict.get::<u8>(b"PatternType") == Some(1)
-}
-
 /// Would the reader fail on `stream` (or on an inline image in it, when it may be content): a
 /// predictor it can't apply, or more than its [`budget`] decoded? `used_as_content`: the file uses
-/// it as a page's contents, a Type 3 glyph, an appearance stream or a soft mask's group. Only
-/// content (that, or a form or tiling pattern) may decode past [`MAX_DECODED`]; any other stream
-/// (a colour table, a shading, a function, a font) may not, whatever its dictionary leaves out.
+/// it as content (a page's contents, a form, a tiling pattern, a Type 3 glyph, an appearance
+/// stream, a soft mask's group) and as nothing else ([`crate::pages`]). Only such a stream may
+/// decode past [`MAX_DECODED`]; any other (a colour table, a shading, a function, a font) may not,
+/// whatever its dictionary says or leaves out.
 pub(crate) fn unsafe_stream(stream: &Stream<'_>, used_as_content: bool) -> bool {
     unsafe_data(stream, true, used_as_content)
 }
@@ -272,7 +266,7 @@ fn unsafe_data(stream: &Stream<'_>, inside: bool, used_as_content: bool) -> bool
     if params(dict).iter().any(bad_predictor) {
         return true;
     }
-    let content = inside && (used_as_content || content_by_kind(dict));
+    let content = inside && used_as_content;
     // Looked through for inline images wherever it might be drawn as content.
     let scan = content || (inside && maybe_content(dict));
     match decode(&stream.raw_data(), dict, scan, content) {
@@ -433,10 +427,9 @@ mod tests {
         // table (only Length and Filter), a mesh shading, a font.
         for other in ["<< /Filter /FlateDecode >>", "<< /ShadingType 4 /BitsPerCoordinate 16 /Filter /FlateDecode >>", "<< /Length1 5 /Filter /FlateDecode >>"] {
             assert_eq!(budget(&dict(other), 100 << 20, false), MAX_DECODED, "{other}");
-            assert!(!content_by_kind(&dict(other)), "{other}");
         }
-        assert!(content_by_kind(&form));
-        assert!(content_by_kind(&dict("<< /Type /Pattern /PatternType 1 /PaintType 1 /Filter /FlateDecode >>")));
+        // A form's dictionary alone doesn't make it content: where the file uses it does.
+        assert_eq!(budget(&form, 100 << 20, false), MAX_DECODED);
         // The zeros bomb (over 500 to one) is refused as content too.
         assert!(matches!(decode(&zeros_past_the_cap(), &form, true, true), Err(TooBig)));
         // The reader agrees: content up to 512 MB, every other stream (object and cross-reference
@@ -470,10 +463,18 @@ mod tests {
         data
     }
 
-    /// A square, after 300 MiB of comments: past the cap, under the content limit (shared).
+    /// What [`content_300`] ends in: a square, then form `/F1` (when the resources have one).
+    const TAIL_300: &[u8] = b"\n0 0 10 10 re f\n/F1 Do\n";
+
+    /// 300 MiB of comments and [`TAIL_300`]: past the cap, under the content limit (shared).
     fn content_300() -> &'static [u8] {
         static DATA: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
-        DATA.get_or_init(|| ordinary_content(300, b"\n0 0 10 10 re f\n"))
+        DATA.get_or_init(|| ordinary_content(300, TAIL_300))
+    }
+
+    /// `[header] stream data endstream`.
+    fn stream_object(header: &str, data: &[u8]) -> Vec<u8> {
+        [format!("<< {header} /Length {} >>\nstream\n", data.len()).as_bytes(), data, b"\nendstream"].concat()
     }
 
     /// A one-page PDF drawing `data`: as its contents stream when `page` says so, or as the form
@@ -529,7 +530,7 @@ mod tests {
         let pdf = crate::pages::open(&page_pdf(data, false), None).unwrap();
         let form = pdf.xref().get::<Stream<'_>>(craft_pdf::syntax::object::ObjectIdentifier::new(5, 0)).unwrap();
         assert_eq!(form.decoded().unwrap().len(), MAX_DECODED);
-        assert_eq!(form.decoded_content_within(usize::MAX).unwrap().len(), (300 << 20) + 16);
+        assert_eq!(form.decoded_content_within(usize::MAX).unwrap().len(), (300 << 20) + TAIL_300.len());
     }
 
     #[test]
@@ -552,6 +553,65 @@ mod tests {
         let stream = |dict: &str| [format!("1 0 obj\n<< {dict} /Length {} >>\nstream\n", data.len()).as_bytes(), data, b"\nendstream\nendobj\n"].concat();
         assert!(unsafe_file_streams(&stream("/Type /ObjStm /N 1 /First 4 /Filter /FlateDecode")));
         assert!(unsafe_file_streams(&stream("/Type /XRef /W [1 2 1] /Filter /FlateDecode")));
+    }
+
+    #[test]
+    fn a_stream_used_as_anything_but_content_keeps_the_cap() {
+        let data = content_300();
+        let page = |res: &str| format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << {res} >> >>").into_bytes();
+        let head = [b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(), b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()];
+        let indexed = "/ColorSpace << /C0 [/Indexed /DeviceRGB 255 5 0 R] >>";
+        // An Indexed table that an unrelated dictionary names as its `Contents`.
+        let unrelated = write_pdf(
+            &[head.to_vec(), vec![page(indexed), stream_object("", b"/C0 cs 0 sc 0 0 10 10 re f"), stream_object("/Filter /FlateDecode", data), b"<< /Contents 5 0 R >>".to_vec()]].concat(),
+        );
+        // A page's contents that are also the Indexed table it draws with.
+        let shared = write_pdf(&[head.to_vec(), vec![page("/ColorSpace << /C0 [/Indexed /DeviceRGB 255 4 0 R] >>"), stream_object("/Filter /FlateDecode", data)]].concat());
+        // The same page's contents, used only as contents: read whole (the control).
+        let alone = write_pdf(&[head.to_vec(), vec![page(""), stream_object("/Filter /FlateDecode", data)]].concat());
+        for (what, pdf) in [("unrelated Contents", &unrelated), ("shared with a colour table", &shared)] {
+            let err = crate::info(pdf, None).err().map(|e| e.to_string()).unwrap_or_default();
+            assert!(err.contains("would decode to more than 256 MB"), "{what}: {err}");
+        }
+        assert!(crate::info(&alone, None).is_ok());
+    }
+
+    #[test]
+    fn forms_inside_forms_share_the_page_budget() {
+        let data = content_300();
+        let form = |res: &str| stream_object(&format!("/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << {res} >> /Filter /FlateDecode"), data);
+        let pdf = |forms: Vec<Vec<u8>>| {
+            write_pdf(
+                &[
+                    vec![
+                        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+                        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+                        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << /XObject << /F1 5 0 R >> >> >>".to_vec(),
+                        stream_object("", b"/F1 Do"),
+                    ],
+                    forms,
+                ]
+                .concat(),
+            )
+        };
+        // Two 300 MiB forms drawing each other, and one drawing another: each fits the page's
+        // 512 MiB alone, two held at once don't. The second is decoded only to what is left.
+        // (The reader doesn't follow a form's reference to itself, so a loop takes two.)
+        let looped = pdf(vec![form("/XObject << /F1 6 0 R >>"), form("/XObject << /F1 5 0 R >>")]);
+        let nested = pdf(vec![form("/XObject << /F1 6 0 R >>"), form("")]);
+        for (what, pdf) in [("drawing each other", &looped), ("drawing another", &nested)] {
+            assert!(crate::info(pdf, None).is_ok(), "{what}: each form passes the screen");
+            let err = drawn(pdf).err().map(|e| e.to_string()).unwrap_or_default();
+            assert!(err.contains("exceeds the reader's limits"), "{what}: {err}");
+            // The walk before the import stops there itself, before the interpreter does.
+            let file = crate::pages::open(pdf, None).unwrap();
+            let mut ocgs = crate::import_scan::Ocgs::read(&file);
+            let limit = file.decode_limits().max_decoded_content();
+            let scan = crate::import_scan::scan_page(&file.pages()[0], &mut ocgs, false, &mut crate::import_scan::FontNames::new(), limit);
+            assert!(scan.is_err(), "{what}: walked whole");
+        }
+        // One of them alone is drawn.
+        assert_eq!(drawn(&pdf(vec![form("")])).ok(), Some(1));
     }
 
     #[test]

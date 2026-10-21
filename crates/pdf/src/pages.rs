@@ -156,68 +156,171 @@ fn hostile(pdf: &Pdf) -> Option<&'static str> {
     None
 }
 
-/// The streams `pdf` uses as content, by where they are used from: a page's `Contents` (a stream
-/// or an array of them), a Type 3 font's `CharProcs`, an annotation's appearance streams (`AP`:
-/// `N`, `R` and `D`, each a stream or a dictionary of them) and a soft mask's group (`G`). Forms
-/// and tiling patterns say what they are themselves ([`crate::streams`]). Every object is looked
-/// at, and what each holds directly, as [`hostile`] does.
+/// The streams `pdf` uses as content and as nothing else. Content is found where the interpreter
+/// finds it, from the pages of the page tree: a page's `Contents` (a stream or an array of them);
+/// in the resources of a page (its own or inherited), a form, a tiling pattern, a Type 3 font or
+/// an appearance stream, the forms of `XObject`, the tiling patterns of `Pattern`, a Type 3
+/// font's `CharProcs` and the group (`G`) of a graphics state's soft mask; and the appearance
+/// streams (`AP`: `N`, `R` and `D`, each a stream or a dictionary of them) of a page's
+/// annotations. A stream the file also refers to from anywhere else (an Indexed colour table, a
+/// function, an unrelated dictionary's `Contents`) is not content here: it gets the ordinary
+/// limit ([`crate::streams`]).
 fn content_streams(pdf: &Pdf) -> HashSet<ObjectIdentifier> {
-    let xref = pdf.xref();
-    let mut ids = HashSet::new();
+    let mut uses = Uses { xref: pdf.xref(), seen: HashSet::new(), inherited: HashSet::new(), content: HashMap::new() };
+    for page in pdf.pages().iter() {
+        uses.page(page.raw());
+    }
+    // Every reference the file makes, from every object and what each holds directly.
+    let mut refs: HashMap<ObjectIdentifier, usize> = HashMap::new();
     let mut pending: Vec<Object<'_>> = pdf.objects().into_iter().collect();
     while let Some(o) = pending.pop() {
-        match &o {
-            Object::Array(a) => pending.extend(items(a).filter_map(direct)),
-            _ => {
-                let Some((d, _)) = dict_or_stream(&o) else { continue };
-                if let Some(c) = d.get_raw::<Object<'_>>(b"Contents") {
-                    streams_in(c, xref, 1, &mut ids);
-                }
-                if let Some(procs) = d.get::<Dict<'_>>(b"CharProcs") {
-                    values(&procs).for_each(|p| streams_in(p, xref, 0, &mut ids));
-                }
-                if let Some(ap) = d.get::<Dict<'_>>(b"AP") {
-                    for key in [&b"N"[..], b"R", b"D"] {
-                        if let Some(a) = ap.get_raw::<Object<'_>>(key) {
-                            streams_in(a, xref, 1, &mut ids);
-                        }
-                    }
-                }
-                if d.get::<Name<'_>>(b"S").is_some_and(|s| matches!(s.as_ref(), b"Luminosity" | b"Alpha"))
-                    && let Some(g) = d.get_raw::<Object<'_>>(b"G")
-                {
-                    streams_in(g, xref, 0, &mut ids);
-                }
-                pending.extend(values(d).filter_map(direct));
+        let held: Vec<MaybeRef<Object<'_>>> = match &o {
+            Object::Array(a) => items(a).collect(),
+            _ => dict_or_stream(&o).into_iter().flat_map(|(d, _)| values(d).collect::<Vec<_>>()).collect(),
+        };
+        for h in held {
+            match h {
+                MaybeRef::Ref(r) => *refs.entry(ObjectIdentifier::from(r)).or_default() += 1,
+                MaybeRef::NotRef(o) => pending.push(o),
             }
         }
     }
-    ids
+    uses.content.into_iter().filter(|(id, n)| refs.get(id) == Some(n)).map(|(id, _)| id).collect()
 }
 
-/// Add the stream `o` refers to to `ids`, or, `depth` levels in, the streams of the array or
-/// dictionary it is (or refers to).
-fn streams_in<'a>(o: MaybeRef<Object<'a>>, xref: &'a XRef, depth: usize, ids: &mut HashSet<ObjectIdentifier>) {
-    let o = match o {
-        MaybeRef::Ref(r) => {
-            let id = ObjectIdentifier::from(r);
-            match xref.get::<Object<'a>>(id) {
-                Some(Object::Stream(_)) => {
-                    ids.insert(id);
-                    return;
-                }
-                Some(o) => o,
-                None => return,
+/// The walk of [`content_streams`]: each place that holds content is looked at once, and each
+/// reference to content from one counted once.
+struct Uses<'a> {
+    xref: &'a XRef,
+    /// The objects looked at already.
+    seen: HashSet<ObjectIdentifier>,
+    /// The page tree nodes whose resources were walked for the pages that inherit them.
+    inherited: HashSet<ObjectIdentifier>,
+    /// The references to each content stream from where content is used.
+    content: HashMap<ObjectIdentifier, usize>,
+}
+
+impl<'a> Uses<'a> {
+    /// The object `o` is or refers to, the first time it is met (`None` after that).
+    fn first(&mut self, o: MaybeRef<Object<'a>>) -> Option<Object<'a>> {
+        match o {
+            MaybeRef::Ref(r) => {
+                let id = ObjectIdentifier::from(r);
+                if self.seen.insert(id) { self.xref.get::<Object<'a>>(id) } else { None }
+            }
+            MaybeRef::NotRef(o) => Some(o),
+        }
+    }
+
+    /// The dictionary `o` is or refers to, the first time it is met.
+    fn dict(&mut self, o: Option<MaybeRef<Object<'a>>>) -> Option<Dict<'a>> {
+        match self.first(o?)? {
+            Object::Dict(d) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// The stream `o` refers to, used as content from here when `kind` accepts its dictionary;
+    /// its resources are walked the first time. `false` when `o` isn't a stream.
+    fn content(&mut self, o: &MaybeRef<Object<'a>>, kind: fn(&Dict<'_>) -> bool) -> bool {
+        // (A stream is always an indirect object.)
+        let MaybeRef::Ref(r) = o else { return false };
+        let id = ObjectIdentifier::from(*r);
+        let Some(Object::Stream(s)) = self.xref.get::<Object<'a>>(id) else { return false };
+        if kind(s.dict()) {
+            *self.content.entry(id).or_default() += 1;
+            if self.seen.insert(id) {
+                self.resources(s.dict().get_raw::<Object<'a>>(b"Resources"));
             }
         }
-        MaybeRef::NotRef(o) => o,
-    };
-    let Some(depth) = depth.checked_sub(1) else { return };
-    match &o {
-        Object::Array(a) => items(a).for_each(|i| streams_in(i, xref, depth, ids)),
-        Object::Dict(d) => values(d).for_each(|v| streams_in(v, xref, depth, ids)),
-        _ => {}
+        true
     }
+
+    /// The stream `o` refers to as content, or the streams of the array (or, `in_dict`, the
+    /// dictionary of appearance states) it is or refers to.
+    fn streams(&mut self, o: Option<MaybeRef<Object<'a>>>, in_dict: bool) {
+        let Some(o) = o else { return };
+        if self.content(&o, any) {
+            return;
+        }
+        match self.first(o) {
+            Some(Object::Array(a)) if !in_dict => items(&a).for_each(|i| _ = self.content(&i, any)),
+            Some(Object::Dict(d)) if in_dict => values(&d).for_each(|v| _ = self.content(&v, any)),
+            _ => {}
+        }
+    }
+
+    fn page(&mut self, page: &Dict<'a>) {
+        if page.obj_id().is_some_and(|id| !self.seen.insert(id)) {
+            return;
+        }
+        self.streams(page.get_raw::<Object<'a>>(b"Contents"), false);
+        // Its own resources, or those of the nearest node above it (walked once for all its pages).
+        let mut node = page.clone();
+        for _ in 0..64 {
+            if let Some(res) = node.get_raw::<Object<'a>>(b"Resources") {
+                if node.obj_id() == page.obj_id() || node.obj_id().is_some_and(|id| self.inherited.insert(id)) {
+                    self.resources(Some(res));
+                }
+                break;
+            }
+            let Some(parent) = node.get::<Dict<'a>>(b"Parent") else { break };
+            node = parent;
+        }
+        let Some(Object::Array(annots)) = page.get_raw::<Object<'a>>(b"Annots").and_then(|a| self.first(a)) else { return };
+        for annot in items(&annots) {
+            let Some(annot) = self.dict(Some(annot)) else { continue };
+            let Some(ap) = self.dict(annot.get_raw::<Object<'a>>(b"AP")) else { continue };
+            for key in [&b"N"[..], b"R", b"D"] {
+                let Some(a) = ap.get_raw::<Object<'a>>(key) else { continue };
+                if !self.content(&a, any) {
+                    self.streams(Some(a), true);
+                }
+            }
+        }
+    }
+
+    fn resources(&mut self, res: Option<MaybeRef<Object<'a>>>) {
+        let Some(res) = self.dict(res) else { return };
+        if let Some(x) = self.dict(res.get_raw::<Object<'a>>(b"XObject")) {
+            values(&x).for_each(|v| _ = self.content(&v, form));
+        }
+        if let Some(p) = self.dict(res.get_raw::<Object<'a>>(b"Pattern")) {
+            values(&p).for_each(|v| _ = self.content(&v, |d| d.get::<u8>(b"PatternType") == Some(1)));
+        }
+        if let Some(fonts) = self.dict(res.get_raw::<Object<'a>>(b"Font")) {
+            for f in values(&fonts) {
+                let Some(f) = self.dict(Some(f)) else { continue };
+                if f.get::<Name<'_>>(b"Subtype").is_some_and(|s| s.as_ref() == b"Type3") {
+                    if let Some(procs) = self.dict(f.get_raw::<Object<'a>>(b"CharProcs")) {
+                        values(&procs).for_each(|v| _ = self.content(&v, any));
+                    }
+                    self.resources(f.get_raw::<Object<'a>>(b"Resources"));
+                }
+            }
+        }
+        if let Some(states) = self.dict(res.get_raw::<Object<'a>>(b"ExtGState")) {
+            for gs in values(&states) {
+                let Some(gs) = self.dict(Some(gs)) else { continue };
+                if let Some(mask) = self.dict(gs.get_raw::<Object<'a>>(b"SMask"))
+                    && let Some(g) = mask.get_raw::<Object<'a>>(b"G")
+                {
+                    self.content(&g, any);
+                }
+            }
+        }
+    }
+}
+
+/// Any stream: a page's contents, a glyph's procedure, an appearance stream or a soft mask's
+/// group is drawn as content whatever its dictionary says.
+fn any(_: &Dict<'_>) -> bool {
+    true
+}
+
+/// A form XObject.
+fn form(d: &Dict<'_>) -> bool {
+    d.get::<Name<'_>>(b"Subtype").is_some_and(|s| s.as_ref() == b"Form")
 }
 
 /// Read a PDF, decrypting it with `password` (none: the empty user password). The permissions
