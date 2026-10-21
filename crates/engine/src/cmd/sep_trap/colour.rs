@@ -22,7 +22,7 @@ fn collect(node: &Node, doc: &Document, threshold: f32, inherited: bool, out: &m
     // Coincident no-bleed and artwork outlines have different paints. Their visible
     // owner is determined by stacking, not nearest-curve ties. The renderer retains
     // that ownership (including clips) and its white eligibility prevents a band.
-    if node.name.as_deref() == Some("LIGHT NO BLEED") {
+    if matches!(node.name.as_deref(), Some("LIGHT NO BLEED" | "NO WHP NO BLEED" | "NO POWDER NO BLEED" | "NO WHP OR POWDER NO BLEED")) {
         return Ok(false);
     }
     let permission = node.extras().trap_external.unwrap_or(inherited);

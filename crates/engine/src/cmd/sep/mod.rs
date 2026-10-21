@@ -39,6 +39,13 @@ fn number(p: &Element, key: &str) -> Result<f64> {
     required(p, key)?.parse::<f64>().ok().filter(|n| n.is_finite() && n.abs() < 1e8).ok_or_else(|| error(format!("invalid PAL number {key}")))
 }
 
+fn is_trap_ticket(name: &str) -> bool {
+    matches!(
+        name.replace('\\', "/").trim_end_matches(".pal").rsplit('/').next(),
+        Some("Trapping_Supacolour_Standard" | "Trapping_Supacolour_Standard (NEW)")
+    )
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![cmd!(
         "sep.runActionList",
@@ -66,6 +73,7 @@ struct Player<'a> {
     trap_footprints: BTreeMap<NodeId, (vectorcraft_doc::Node, vectorcraft_geom::PathData)>,
     messages: Vec<String>,
     no_trap: Option<intents::NoTrap>,
+    crosshair: Option<vectorcraft_geom::Point>,
 }
 impl Player<'_> {
     fn doc(&self) -> Result<&Document> {
@@ -89,7 +97,7 @@ impl Player<'_> {
         }
         let actions = reader::read(&path).map_err(error)?;
         if caller.is_none()
-            && path.file_stem().and_then(|s| s.to_str()) == Some("Trapping_Supacolour_Standard (NEW)")
+            && is_trap_ticket(name)
             && let Some(intent) = self.no_trap.take()
         {
             self.apply_no_trap(intent)?;
@@ -201,15 +209,10 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         .ok_or_else(|| error("lists must contain 1 to 256 action-list names"))?;
     let lists = lists.iter().map(|v| v.as_str().ok_or_else(|| error("list names must be strings"))).collect::<Result<Vec<_>>>()?;
     if no_trap.is_some() {
-        let tickets: Vec<_> = lists
-            .iter()
-            .enumerate()
-            .filter(|(_, name)| name.replace('\\', "/").trim_end_matches(".pal").rsplit('/').next() == Some("Trapping_Supacolour_Standard (NEW)"))
-            .map(|(i, _)| i)
-            .collect();
+        let tickets: Vec<_> = lists.iter().enumerate().filter(|(_, name)| is_trap_ticket(name)).map(|(i, _)| i).collect();
         if tickets.len() != 1 || tickets.first().and_then(|i| lists.get(i + 1)).copied() != Some("TrapTask") {
             return Err(error(
-                "intents.noTrap requires exactly one explicit Trapping_Supacolour_Standard (NEW) list immediately followed by TrapTask",
+                "intents.noTrap requires exactly one explicit Trapping_Supacolour_Standard (optional legacy (NEW) suffix) list immediately followed by TrapTask",
             ));
         }
     }
@@ -263,17 +266,14 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         trap_footprints: BTreeMap::new(),
         messages: Vec::new(),
         no_trap,
+        crosshair: None,
     };
     player.remove_background()?;
     let intent_position = lists
         .iter()
         .position(|name| {
             let name = name.replace('\\', "/");
-            name == "MetallicIntents"
-                || name == "TrapTask"
-                || name.starts_with("(2b)")
-                || name.starts_with("(3)")
-                || name.trim_end_matches(".pal").rsplit('/').next() == Some("Trapping_Supacolour_Standard (NEW)")
+            name == "MetallicIntents" || name == "TrapTask" || name.starts_with("(2b)") || name.starts_with("(3)") || is_trap_ticket(&name)
         })
         .unwrap_or(0);
     for (position, list) in lists.into_iter().enumerate() {

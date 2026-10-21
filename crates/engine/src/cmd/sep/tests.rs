@@ -48,6 +48,7 @@ fn player(s: &mut Session) -> Player<'_> {
         trap_footprints: BTreeMap::new(),
         messages: vec![],
         no_trap: None,
+        crosshair: None,
     }
 }
 fn step(p: &mut Player<'_>, kind: &str, params: &str) -> Result<usize> {
@@ -863,7 +864,12 @@ fn move_consolidates_duplicate_named_layers_into_the_topmost_selected_layer() {
 
 #[test]
 fn combined_intents_apply_metallic_after_preparation_before_no_trap_ticket() {
-    for ticket in ["Trapping_Supacolour_Standard (NEW)", "(2b)/Trapping_Supacolour_Standard (NEW).pal"] {
+    for ticket in [
+        "Trapping_Supacolour_Standard",
+        "(2b)/Trapping_Supacolour_Standard.pal",
+        "Trapping_Supacolour_Standard (NEW)",
+        "(2b)/Trapping_Supacolour_Standard (NEW).pal",
+    ] {
         let f = Fixture::new();
         f.input();
         f.pal(
@@ -936,4 +942,95 @@ fn shared_intent_parser_rejects_unknown_keys_and_each_invalid_payload() {
     ] {
         assert!(intents::read(&json!({"intents": intents})).is_err(), "{intents}");
     }
+}
+
+#[test]
+fn crosshair_parameter_rectangle_uses_artbox_mm_and_rejects_unsupported_variants() {
+    let mut s = Session::new();
+    s.add_document(Document::new(100.0, 100.0), None);
+    let mut p = player(&mut s);
+    p.boxes.insert("ArtBox".into(), Rect::new(30.0, 40.0, 90.0, 80.0));
+    let shape = "<Shape>Rectangle</Shape><Anchor>Center</Anchor><Width>19</Width><Height>19</Height><CornerRadius>0</CornerRadius><LinkEnabled>0</LinkEnabled>";
+    assert!(step(&mut p, "CreateShapeByParameters", shape).is_err());
+    step(
+        &mut p,
+        "PositionCrosshair",
+        "<Mode>RelativePosition</Mode><Reference>ArtBox</Reference><Anchor>Center</Anchor><XOffset>2</XOffset><YOffset>-3</YOffset>",
+    )
+    .unwrap();
+    step(&mut p, "CreateShapeByParameters", shape).unwrap();
+    let ids = p.ids().unwrap();
+    let bounds = p.doc().unwrap().bounds_of(&ids, true).unwrap();
+    let mm = 72.0 / 25.4;
+    assert!((bounds.width() - 19.0 * mm).abs() < 1e-9);
+    assert!((bounds.height() - 19.0 * mm).abs() < 1e-9);
+    assert!((bounds.center().x - (60.0 + 2.0 * mm)).abs() < 1e-9);
+    assert!((bounds.center().y - (60.0 - 3.0 * mm)).abs() < 1e-9);
+    for invalid in [
+        shape.replace("<Width>19", "<Width>0"),
+        shape.replace("<LinkEnabled>0", "<LinkEnabled>1"),
+        shape.replace("<Anchor>Center", "<Anchor>TopLeft"),
+    ] {
+        assert!(step(&mut p, "CreateShapeByParameters", &invalid).is_err());
+        assert_eq!(p.ids().unwrap(), ids);
+    }
+}
+
+#[test]
+fn conditional_error_message_stops_both_detector_branches() {
+    for (select, relation, stops) in [
+        (false, "OneOrMoreObjectsSelection", true),
+        (true, "OneOrMoreObjectsSelection", false),
+        (false, "NoObjectSelection", false),
+        (true, "NoObjectSelection", true),
+    ] {
+        let f = Fixture::new();
+        f.input();
+        f.pal("main", &[
+            a("SelectAllObjects", ""),
+            if select { String::new() } else { a("InvertObjectSelection", "") },
+            a("Conditional", &format!("<Operator>None</Operator><Rule Type=\"ObjectSelectionRule\"><ObjectRelation>{relation}</ObjectRelation></Rule><Then>{}</Then>", a("ShowMessage", "<Message>synthetic guard failed</Message><Severity>Error</Severity>"))),
+            a("CreateSeparation", "<SeparationName>Later</SeparationName><PreviewRed>0</PreviewRed><PreviewGreen>0</PreviewGreen><PreviewBlue>0</PreviewBlue>"),
+        ].concat());
+        let mut s = Session::new();
+        let r = f.run(&mut s);
+        assert_eq!(r["status"], if stops { "stopped" } else { "completed" });
+        assert_eq!(r["spots"].as_array().unwrap().iter().any(|n| n == "Later"), !stops);
+        if stops {
+            assert_eq!(r["stoppedAt"]["reason"], "synthetic guard failed");
+        }
+    }
+}
+
+#[test]
+fn white_processing_step_survives_native_and_pdf_export_and_none_clears_it() {
+    let f = Fixture::new();
+    f.input();
+    f.pal(
+        "main",
+        &[
+            a("SelectAllObjects", ""),
+            a("CreateLayerOnTop", "<LayerName>Specialty</LayerName>"),
+            a("MoveObjectsToLayer", ""),
+            a("SetLayerType", "<ProcessingStep>White</ProcessingStep>"),
+        ]
+        .concat(),
+    );
+    let mut s = Session::new();
+    assert_eq!(f.run(&mut s)["status"], "completed");
+    let layer = selection::layer_ids(&s.doc().unwrap().doc)
+        .into_iter()
+        .find(|id| s.doc().unwrap().doc.node(*id).unwrap().name.as_deref() == Some("Specialty"))
+        .unwrap();
+    let n = s.doc().unwrap().doc.node(layer).unwrap();
+    assert!(n.extras().processing_white);
+    let copy: vectorcraft_doc::Node = serde_json::from_value(serde_json::to_value(n).unwrap()).unwrap();
+    assert!(copy.extras().processing_white);
+    let bytes = std::fs::read(f.0.join("output.pdf")).unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("/GTS_Metadata<</GTS_ProcStepsGroup/White>>"));
+    let mut p = player(&mut s);
+    p.layers = vec![layer];
+    step(&mut p, "SetLayerType", "<ProcessingStep>None</ProcessingStep>").unwrap();
+    assert!(!p.doc().unwrap().node(layer).unwrap().extras().processing_white);
+    assert!(step(&mut p, "SetLayerType", "<ProcessingStep>Unknown</ProcessingStep>").is_err());
 }

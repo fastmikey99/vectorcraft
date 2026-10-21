@@ -537,6 +537,8 @@ pub struct Node {
 /// them stay small ([`Node::extras`]).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NodeExtras {
+    /// ISO 19593-1 White processing-step group for a layer; does not change its paint.
+    pub processing_white: bool,
     /// External trap permission; absent inherits the enclosing object or ticket.
     /// The supported ticket uses 0.2 mm outward, no internal traps or pullback.
     pub trap_external: Option<bool>,
@@ -579,6 +581,7 @@ pub struct NodeExtras {
 
 /// No extras: what [`Node::extras`] gives for a node without any.
 static NO_EXTRAS: NodeExtras = NodeExtras {
+    processing_white: false,
     trap_external: None,
     mask: None,
     trace: None,
@@ -729,6 +732,7 @@ impl Serialize for Node {
             e.intertwine.is_none(),
             e.live_paint_gaps.is_none(),
             e.trap_external.is_none(),
+            !e.processing_white,
         ];
         let mut st = s.serialize_struct("Node", skips.iter().filter(|s| !**s).count())?;
         let mut skip = skips.into_iter();
@@ -768,6 +772,7 @@ impl Serialize for Node {
         field!("intertwine", &e.intertwine);
         field!("live_paint_gaps", &e.live_paint_gaps);
         field!("trap_external", &e.trap_external);
+        field!("processing_white", &e.processing_white);
         st.end()
     }
 }
@@ -777,6 +782,8 @@ impl Serialize for Node {
 #[derive(Deserialize)]
 #[serde(rename = "Node")]
 struct NodeWire {
+    #[serde(default)]
+    processing_white: bool,
     #[serde(default)]
     trap_external: Option<bool>,
     id: NodeId,
@@ -834,6 +841,7 @@ struct NodeWire {
 impl From<NodeWire> for Node {
     fn from(w: NodeWire) -> Self {
         let extras = NodeExtras {
+            processing_white: w.processing_white,
             trap_external: w.trap_external,
             mask: w.mask,
             trace: w.trace,

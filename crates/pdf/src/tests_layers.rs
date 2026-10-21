@@ -344,3 +344,21 @@ fn pdf_x1a_keeps_overprint() {
     let r = export(&overprinting(RED), json!({"standard": "pdfX1a", "compatibility": "1.4", "compression": {"compressText": false}}));
     assert!(r.bytes.starts_with(b"%PDF-1.3") && String::from_utf8_lossy(&r.bytes).contains("/OP true/op true/OPM 1"));
 }
+
+#[test]
+fn white_processing_step_roundtrips_public_pdf_without_changing_layer_state() {
+    let mut d = layered();
+    std::sync::Arc::make_mut(&mut d.layers[0]).extras_mut().processing_white = true;
+    let r = export(&d, json!({"createLayers": true}));
+    oc_properties(&r.bytes, None, |props, _xref| {
+        let group = props.unwrap().get::<Array<'_>>(b"OCGs").unwrap().iter::<Dict<'_>>().next().unwrap();
+        assert_eq!(group.get::<Dict<'_>>(b"GTS_Metadata").unwrap().get::<Name<'_>>(b"GTS_ProcStepsGroup").unwrap().as_ref(), b"White");
+    });
+    let opened = import(&r.bytes).unwrap();
+    assert!(opened.layers[0].extras().processing_white);
+    assert!(!opened.layers[1].extras().processing_white);
+    let states = |d: &Document| {
+        layers(d).into_iter().take(3).map(|(name, visible, printable, locked, _)| (name, visible, printable, locked)).collect::<Vec<_>>()
+    };
+    assert_eq!(states(&opened), states(&d));
+}

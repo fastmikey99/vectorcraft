@@ -63,6 +63,9 @@ impl Player<'_> {
             "Rasterize" => self.rasterize(p),
             "ShowMessage" => {
                 self.messages.push(p.children.iter().map(|e| format!("{}={}", e.name, e.text)).collect::<Vec<_>>().join(" "));
+                if p.value("Severity") == Some("Error") {
+                    return Err(error(p.value("Message").unwrap_or("PAL error message")));
+                }
                 Ok(0)
             }
             "SelectAllObjects" | "InvertObjectSelection" | "SelectObjectsInLayer" | "SelectObjectsByAttributes" => {
@@ -260,8 +263,8 @@ impl Player<'_> {
                     "Unlock" => false,
                     v => return Err(error(format!("unsupported lock state {v}"))),
                 };
-                if a.kind == "SetLayerType" && required(p, "ProcessingStep")? != "None" {
-                    return Err(error("only ProcessingStep=None is supported"));
+                if a.kind == "SetLayerType" && !matches!(required(p, "ProcessingStep")?, "None" | "White") {
+                    return Err(error("only ProcessingStep=None or White is supported"));
                 }
                 let printable = match p.value("PrintingState").or_else(|| p.value("LayerPrintingState")).unwrap_or("Printing") {
                     "Printing" | "Print" | "1" => true,
@@ -279,7 +282,7 @@ impl Player<'_> {
                                         *p = printable;
                                     }
                                 }
-                                _ => { /* Ordinary VectorCraft layers have no processing-step tag. */ }
+                                _ => n.extras_mut().processing_white = p.value("ProcessingStep") == Some("White"),
                             }
                         }
                     }
@@ -438,6 +441,47 @@ impl Player<'_> {
                     })?;
                 }
                 Ok(count)
+            }
+            "PositionCrosshair" => {
+                if required(p, "Mode")? != "RelativePosition" || required(p, "Anchor")? != "Center" {
+                    return Err(error("PAL crosshair supports RelativePosition at a page box center"));
+                }
+                let reference = self.boxes.get(required(p, "Reference")?).ok_or_else(|| error("unknown crosshair reference page box"))?;
+                let center = reference.center();
+                self.crosshair = Some(vectorcraft_geom::Point::new(
+                    center.x + number(p, "XOffset")? * 72.0 / 25.4,
+                    center.y + number(p, "YOffset")? * 72.0 / 25.4,
+                ));
+                Ok(0)
+            }
+            "CreateShapeByParameters" => {
+                if required(p, "Shape")? != "Rectangle"
+                    || required(p, "Anchor")? != "Center"
+                    || number(p, "CornerRadius")? != 0.0
+                    || flag(p, "LinkEnabled")?
+                {
+                    return Err(error("PAL parameter shape supports unlinked, square-corner rectangles at the crosshair center"));
+                }
+                let center = self.crosshair.ok_or_else(|| error("position the crosshair before creating a parameter shape"))?;
+                let width = number(p, "Width")? * 72.0 / 25.4;
+                let height = number(p, "Height")? * 72.0 / 25.4;
+                if width <= 0.0 || height <= 0.0 {
+                    return Err(error("PAL shape size must be positive"));
+                }
+                let bounds =
+                    vectorcraft_geom::Rect::new(center.x - width / 2.0, center.y - height / 2.0, center.x + width / 2.0, center.y + height / 2.0);
+                let layer = Some(self.active_layer()?);
+                self.session.edit("Rectangle", |d, sel| {
+                    let mut appearance = vectorcraft_doc::Appearance::default();
+                    appearance.set_fill(Paint::solid(Color::cmyk(0.0, 0.0, 0.0, 1.0)));
+                    appearance.set_stroke(Paint::None);
+                    let n = Node::path(d.alloc_id(), vectorcraft_geom::shapes::rectangle(bounds), appearance);
+                    let id = n.id;
+                    d.insert(layer, usize::MAX, n)?;
+                    sel.set([id]);
+                    Ok(())
+                })?;
+                Ok(1)
             }
             "CreateShapeOnSelection" => {
                 if ids.is_empty() {

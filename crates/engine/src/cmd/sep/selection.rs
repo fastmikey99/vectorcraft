@@ -129,7 +129,7 @@ pub(super) fn rule(doc: &Document, ids: &[NodeId], node: Option<&Node>, r: &Elem
     if kind == "ObjectSelectionRule" {
         return match required(r, "ObjectRelation")? {
             "OneOrMoreObjectsSelection" => Ok(!ids.is_empty()),
-            "NoObjectsSelection" => Ok(ids.is_empty()),
+            "NoObjectsSelection" | "NoObjectSelection" => Ok(ids.is_empty()),
             v => Err(error(format!("unsupported ObjectRelation {v}"))),
         };
     }

@@ -124,6 +124,9 @@ fn group_layer(
     let ocg = ocgs.list.get(g)?;
     let mut l = Node::layer(b.id(), &ocg.name, color);
     (l.visible, l.locked) = (ocg.on, ocg.locked);
+    if ocg.processing_white {
+        l.extras_mut().processing_white = true;
+    }
     let mut children = vec![];
     for &c in nesting.get(&g).into_iter().flatten() {
         if c == g {
