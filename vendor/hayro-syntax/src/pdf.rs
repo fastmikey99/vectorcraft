@@ -40,6 +40,17 @@ impl DecodeLimits {
     pub const fn max_decoded_stream(self) -> usize {
         self.max_decoded_stream
     }
+
+    /// VectorCraft patch: these limits with the content limit as the ordinary one.
+    pub(crate) const fn with_content_limit(self) -> Self {
+        Self { max_decoded_stream: self.max_decoded_content() }
+    }
+
+    /// VectorCraft patch: the maximum expanded bytes per content stream,
+    /// [`crate::filter::MAX_DECODED_CONTENT`], or the ordinary limit once that has been lowered.
+    pub const fn max_decoded_content(self) -> usize {
+        if self.max_decoded_stream < crate::filter::MAX_DECODED_STREAM { self.max_decoded_stream } else { crate::filter::MAX_DECODED_CONTENT }
+    }
 }
 
 impl Default for DecodeLimits {

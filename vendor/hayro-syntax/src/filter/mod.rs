@@ -136,8 +136,14 @@ impl Filter {
 /// limit (Flate about 1000:1), so a 2 MB page that inflated to 2 GB took the renderer past 3 GB in
 /// under a second. They never write past the limit (the buffer can still grow to under twice
 /// it). Real streams are far smaller; the same figure bounds lopdf's load-time decoding.
-// VectorCraft patch: 1 GiB, was 256 MiB (see VECTORCRAFT-PATCH.md).
-pub const MAX_DECODED_STREAM: usize = 1 << 30;
+pub const MAX_DECODED_STREAM: usize = 256 << 20;
+
+/// VectorCraft patch (see VECTORCRAFT-PATCH.md): the most bytes Flate, LZW or RunLength may
+/// produce for a content stream (a page's contents, a form, a tiling pattern or a Type 3 glyph),
+/// decoded through [`crate::object::Stream::decoded_content_within`]. It matches
+/// hayro-interpret's page content budget. Object streams, cross-reference streams and every other
+/// stream keep [`MAX_DECODED_STREAM`].
+pub const MAX_DECODED_CONTENT: usize = 512 << 20;
 
 /// PdfCraft patch: the most bytes they may produce for an image of known size, however large it
 /// says it is.

@@ -802,7 +802,8 @@ impl Walker<'_, '_> {
                         self.out.cut = true;
                         return;
                     }
-                    let Ok(data) = s.decoded() else {
+                    // As the interpreter decodes a form: up to the content limit, not the ordinary one.
+                    let Ok(data) = s.decoded_content_within(self.max_form_bytes) else {
                         self.out.cut = true;
                         return;
                     };

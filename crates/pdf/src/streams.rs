@@ -18,11 +18,13 @@ pub(crate) const MAX_DECODED: usize = 256 << 20;
 /// [`MAX_DECODED`]: 1 GB (an A0 sheet scanned at 300 ppi is 418 MB in RGB, 557 MB in CMYK).
 const MAX_IMAGE_DECODED: usize = 1 << 30;
 
-/// The most a content stream (of a page, form, pattern or glyph) may decode to when it is large
-/// already: 1 GB, at most [`MAX_RATIO`] times its encoded size. Real drawings compress 3–10
-/// times (a 22 × 180 in Inkscape page is 128 MB that decodes to 391 MB); a zip bomb expands
-/// hundreds of times, and stays at [`MAX_DECODED`].
-const MAX_CONTENT_DECODED: usize = 1 << 30;
+/// The most a stream used as content (a page's contents, a form, a tiling pattern, a Type 3
+/// glyph, an appearance stream or a soft mask's group) may decode to when it is large already:
+/// 512 MB, at most [`MAX_RATIO`] times its encoded size. That is the reader's content limit and
+/// the interpreter's budget for the content one page holds, so what passes here is read whole.
+/// Real drawings compress 3–10 times (a 22 × 180 in Inkscape page is 128 MB that decodes to
+/// 391 MB); a zip bomb expands hundreds of times, and stays at [`MAX_DECODED`].
+pub(crate) const MAX_CONTENT_DECODED: usize = craft_pdf::syntax::MAX_DECODED_CONTENT;
 
 /// The most a content stream past [`MAX_DECODED`] may expand: 32 times its encoded size.
 const MAX_RATIO: usize = 32;
@@ -188,11 +190,12 @@ fn components(dict: &Dict<'_>) -> u64 {
 
 /// The most the stream with dictionary `dict` may decode to: [`MAX_DECODED`], or for an image
 /// XObject the size its width, height, components and bits declare (each row with a predictor's
-/// tag byte), up to [`MAX_IMAGE_DECODED`]: an image's size is known before it is decoded. Content
-/// `encoded` bytes long may decode to [`MAX_RATIO`] times that, up to [`MAX_CONTENT_DECODED`].
-fn budget(dict: &Dict<'_>, encoded: usize) -> usize {
+/// tag byte), up to [`MAX_IMAGE_DECODED`]: an image's size is known before it is decoded. A
+/// stream used as `content`, `encoded` bytes long, may decode to [`MAX_RATIO`] times that, up to
+/// [`MAX_CONTENT_DECODED`].
+fn budget(dict: &Dict<'_>, encoded: usize, content: bool) -> usize {
     if dict.get::<Name<'_>>(b"Subtype").is_none_or(|s| s.as_ref() != b"Image") {
-        if maybe_content(dict) {
+        if content {
             return encoded.saturating_mul(MAX_RATIO).clamp(MAX_DECODED, MAX_CONTENT_DECODED);
         }
         return MAX_DECODED;
@@ -209,10 +212,10 @@ fn budget(dict: &Dict<'_>, encoded: usize) -> usize {
 /// `data` (of the stream with dictionary `dict`) through its filters, as far as this reads them:
 /// Flate, LZW, run-length and the ASCII encodings. Not decoded when it can't decode past its
 /// [`budget`] and `keep` doesn't ask for it, or when an image codec or damaged data comes first
-/// (an image's own decoder knows its size).
-fn decode(data: &[u8], dict: &Dict<'_>, keep: bool) -> Result<Option<Vec<u8>>, TooBig> {
+/// (an image's own decoder knows its size). `content`: the stream is used as content.
+fn decode(data: &[u8], dict: &Dict<'_>, keep: bool, content: bool) -> Result<Option<Vec<u8>>, TooBig> {
     let filters = filters(dict);
-    let max = budget(dict, data.len());
+    let max = budget(dict, data.len(), content);
     if !keep && most_after(data.len(), &filters) <= max as u128 {
         return Ok(None);
     }
@@ -246,27 +249,39 @@ fn maybe_content(dict: &Dict<'_>) -> bool {
         && ![&b"Length1"[..], b"Length2", b"Length3", b"FunctionType", b"N"].iter().any(|k| dict.contains_key(k))
 }
 
-/// Would the reader fail on `stream` (or on an inline image in it, when it is content): a
-/// predictor it can't apply, or more than its [`budget`] decoded?
-pub(crate) fn unsafe_stream(stream: &Stream<'_>) -> bool {
-    unsafe_data(stream, true)
+/// Is the stream with dictionary `dict` content by what it is: a form XObject (soft masks' groups
+/// and appearance streams usually are) or a tiling pattern? Content used from elsewhere (a page's
+/// contents, a Type 3 glyph) is known by where it is used ([`crate::pages`]).
+fn content_by_kind(dict: &Dict<'_>) -> bool {
+    dict.get::<Name<'_>>(b"Subtype").is_some_and(|s| s.as_ref() == b"Form") || dict.get::<u8>(b"PatternType") == Some(1)
+}
+
+/// Would the reader fail on `stream` (or on an inline image in it, when it may be content): a
+/// predictor it can't apply, or more than its [`budget`] decoded? `used_as_content`: the file uses
+/// it as a page's contents, a Type 3 glyph, an appearance stream or a soft mask's group. Only
+/// content (that, or a form or tiling pattern) may decode past [`MAX_DECODED`]; any other stream
+/// (a colour table, a shading, a function, a font) may not, whatever its dictionary leaves out.
+pub(crate) fn unsafe_stream(stream: &Stream<'_>, used_as_content: bool) -> bool {
+    unsafe_data(stream, true, used_as_content)
 }
 
 /// [`unsafe_stream`], looking for inline images in it when `inside` (not in an inline image's own
 /// data: it would be read again for each inline image a hostile one nests).
-fn unsafe_data(stream: &Stream<'_>, inside: bool) -> bool {
+fn unsafe_data(stream: &Stream<'_>, inside: bool, used_as_content: bool) -> bool {
     let dict = stream.dict();
     if params(dict).iter().any(bad_predictor) {
         return true;
     }
-    let content = inside && maybe_content(dict);
-    match decode(&stream.raw_data(), dict, content) {
+    let content = inside && (used_as_content || content_by_kind(dict));
+    // Looked through for inline images wherever it might be drawn as content.
+    let scan = content || (inside && maybe_content(dict));
+    match decode(&stream.raw_data(), dict, scan, content) {
         Err(TooBig) => true,
-        Ok(Some(data)) if content && data.windows(2).any(|w| w == b"ID") => {
+        Ok(Some(data)) if scan && data.windows(2).any(|w| w == b"ID") => {
             let mut ops = TypedIter::new(&data);
             while let Some(op) = ops.next() {
                 if let TypedInstruction::InlineImage(image) = op
-                    && unsafe_data(image.0, false)
+                    && unsafe_data(image.0, false, false)
                 {
                     return true;
                 }
@@ -327,7 +342,7 @@ pub(crate) fn unsafe_file_streams(pdf: &[u8]) -> bool {
             .filter(|e| *e <= pdf.len())
             .or_else(|| find(start, b"endstream"))
             .unwrap_or(pdf.len());
-        if matches!(decode(pdf.get(start..end).unwrap_or_default(), &dict, false), Err(TooBig)) {
+        if matches!(decode(pdf.get(start..end).unwrap_or_default(), &dict, false, false), Err(TooBig)) {
             return true;
         }
     }
@@ -395,45 +410,157 @@ mod tests {
         assert!(bomb.len() < MAX_DECODED / 500);
         assert_eq!(inflate(&bomb, MAX_DECODED).map(|d| d.len()), Some(MAX_DECODED + 1));
         let d = dict("<< /Filter /FlateDecode >>");
-        assert!(matches!(decode(&bomb, &d, false), Err(TooBig)));
+        assert!(matches!(decode(&bomb, &d, false, false), Err(TooBig)));
         // Small enough that it can't get there: not decoded at all.
-        assert!(matches!(decode(&[1, 2, 3], &d, false), Ok(None)));
+        assert!(matches!(decode(&[1, 2, 3], &d, false, false), Ok(None)));
         // An image may decode to its declared size, and no further.
         let image =
             |w: u32, h: u32| format!("<< /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode >>");
-        assert!(decode(&bomb, &dict(&image(1 << 15, 1 << 14)), false).is_ok());
-        assert!(matches!(decode(&bomb, &dict(&image(16, 16)), false), Err(TooBig)));
-        assert_eq!(budget(&dict(&image(1 << 20, 1 << 20)), 0), MAX_IMAGE_DECODED);
+        assert!(decode(&bomb, &dict(&image(1 << 15, 1 << 14)), false, false).is_ok());
+        assert!(matches!(decode(&bomb, &dict(&image(16, 16)), false, false), Err(TooBig)));
+        assert_eq!(budget(&dict(&image(1 << 20, 1 << 20)), 0, false), MAX_IMAGE_DECODED);
     }
 
     #[test]
-    fn large_content_may_decode_past_the_cap_at_an_ordinary_ratio() {
+    fn only_streams_used_as_content_may_decode_past_the_cap() {
         let form = dict("<< /Type /XObject /Subtype /Form /Filter /FlateDecode >>");
         // A kilobyte asking for more than the cap is still refused.
-        assert_eq!(budget(&form, 1 << 10), MAX_DECODED);
-        // 100 MB of content may decode to 32 times that, up to 1 GB; a font may not.
-        assert_eq!(budget(&form, 100 << 20), MAX_CONTENT_DECODED);
-        assert_eq!(budget(&form, 10 << 20), 320 << 20);
-        assert_eq!(budget(&dict("<< /Length1 5 /Filter /FlateDecode >>"), 100 << 20), MAX_DECODED);
-        // The zeros bomb (over 500 to one) is refused as a form too.
-        assert!(matches!(decode(&zeros_past_the_cap(), &form, true), Err(TooBig)));
-        // Content past the cap that compresses three to one is read whole.
+        assert_eq!(budget(&form, 1 << 10, true), MAX_DECODED);
+        // 100 MB of content may decode to 32 times that, up to 512 MB; 10 MB to 320 MB.
+        assert_eq!(budget(&form, 100 << 20, true), MAX_CONTENT_DECODED);
+        assert_eq!(budget(&form, 10 << 20, true), 320 << 20);
+        // Anything else stays at the cap, however little its dictionary says: an Indexed colour
+        // table (only Length and Filter), a mesh shading, a font.
+        for other in ["<< /Filter /FlateDecode >>", "<< /ShadingType 4 /BitsPerCoordinate 16 /Filter /FlateDecode >>", "<< /Length1 5 /Filter /FlateDecode >>"] {
+            assert_eq!(budget(&dict(other), 100 << 20, false), MAX_DECODED, "{other}");
+            assert!(!content_by_kind(&dict(other)), "{other}");
+        }
+        assert!(content_by_kind(&form));
+        assert!(content_by_kind(&dict("<< /Type /Pattern /PatternType 1 /PaintType 1 /Filter /FlateDecode >>")));
+        // The zeros bomb (over 500 to one) is refused as content too.
+        assert!(matches!(decode(&zeros_past_the_cap(), &form, true, true), Err(TooBig)));
+        // The reader agrees: content up to 512 MB, every other stream (object and cross-reference
+        // streams among them) 256 MB; the interpreter's page budget is the same 512 MB.
+        let limits = craft_pdf::syntax::DecodeLimits::default();
+        assert_eq!((limits.max_decoded_stream(), limits.max_decoded_content()), (MAX_DECODED, MAX_CONTENT_DECODED));
+        assert_eq!(MAX_CONTENT_DECODED, 512 << 20);
+    }
+
+    /// `mib` MiB of comment lines of random digits ending in `tail`, Flate-compressed about 3.5 to
+    /// one, as real drawings compress.
+    fn ordinary_content(mib: usize, tail: &[u8]) -> Vec<u8> {
         let mut seed = 0x9e37_79b9_u32;
-        let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         let mut row = vec![0u8; 1 << 20];
-        for _ in 0..(MAX_DECODED >> 20) + 16 {
-            for b in &mut row {
-                seed ^= seed << 13;
-                seed ^= seed >> 17;
-                seed ^= seed << 5;
-                *b = b'0' + (seed & 3) as u8;
-            }
+        for b in &mut row {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            *b = b'0' + (seed & 3) as u8;
+        }
+        row[0] = b'%';
+        row[(1 << 20) - 1] = b'\n';
+        let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        for _ in 0..mib {
             std::io::Write::write_all(&mut e, &row).unwrap();
         }
-        let content = e.finish().unwrap();
-        let ratio = (MAX_DECODED + (16 << 20)) as f64 / content.len() as f64;
+        std::io::Write::write_all(&mut e, tail).unwrap();
+        let data = e.finish().unwrap();
+        let ratio = ((mib << 20) + tail.len()) as f64 / data.len() as f64;
         assert!((2.0..=5.0).contains(&ratio), "{ratio}");
-        assert_eq!(decode(&content, &form, true).ok().flatten().map(|d| d.len()), Some(MAX_DECODED + (16 << 20)));
+        data
+    }
+
+    /// A square, after 300 MiB of comments: past the cap, under the content limit (shared).
+    fn content_300() -> &'static [u8] {
+        static DATA: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+        DATA.get_or_init(|| ordinary_content(300, b"\n0 0 10 10 re f\n"))
+    }
+
+    /// A one-page PDF drawing `data`: as its contents stream when `page` says so, or as the form
+    /// `/F0` the page draws.
+    fn page_pdf(data: &[u8], page: bool) -> Vec<u8> {
+        let stream = |dict: &str, data: &[u8]| [format!("<< {dict} /Length {} >>\nstream\n", data.len()).as_bytes(), data, b"\nendstream"].concat();
+        let shown: &[u8] = b"/F0 Do";
+        let objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << /XObject << /F0 5 0 R >> >> >>".to_vec(),
+            if page { stream("/Filter /FlateDecode", data) } else { stream("", shown) },
+            stream("/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Filter /FlateDecode", if page { &[120, 156, 3, 0, 0, 0, 0, 1] } else { data }),
+        ];
+        write_pdf(&objects)
+    }
+
+    /// The objects, numbered from 1, as a PDF with a cross-reference table.
+    fn write_pdf(objects: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = b"%PDF-1.6\n".to_vec();
+        let mut offsets = vec![];
+        for (i, o) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+            out.extend_from_slice(o);
+            out.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = out.len();
+        out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+        for o in offsets {
+            out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).as_bytes());
+        out
+    }
+
+    fn drawn(pdf: &[u8]) -> Result<usize, crate::PdfError> {
+        let doc = crate::import(pdf)?;
+        let mut n = 0;
+        doc.walk(|node| n += usize::from(!node.is_container()));
+        Ok(n)
+    }
+
+    #[test]
+    fn content_past_the_cap_at_an_ordinary_ratio_imports_whole() {
+        let data = content_300();
+        // As a form (DF394805's case) and as a page's own contents: the square after the
+        // comments is drawn, so the content was read to its end.
+        for page in [false, true] {
+            assert_eq!(drawn(&page_pdf(data, page)).ok(), Some(1), "page contents: {page}");
+        }
+        // The reader decodes it whole only as content: as any other stream it stops at the cap.
+        let pdf = crate::pages::open(&page_pdf(data, false), None).unwrap();
+        let form = pdf.xref().get::<Stream<'_>>(craft_pdf::syntax::object::ObjectIdentifier::new(5, 0)).unwrap();
+        assert_eq!(form.decoded().unwrap().len(), MAX_DECODED);
+        assert_eq!(form.decoded_content_within(usize::MAX).unwrap().len(), (300 << 20) + 16);
+    }
+
+    #[test]
+    fn other_streams_past_the_cap_are_refused_at_any_ratio() {
+        let data = content_300();
+        // The same data as an Indexed colour table the page uses, and as a mesh shading.
+        let fill: &[u8] = b"/C0 cs 0 sc 0 0 10 10 re f";
+        let pdf = write_pdf(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << /ColorSpace << /C0 [/Indexed /DeviceRGB 255 5 0 R] >> >> >>".to_vec(),
+            [format!("<< /Length {} >>\nstream\n", fill.len()).as_bytes(), fill, b"\nendstream"].concat(),
+            [format!("<< /Filter /FlateDecode /Length {} >>\nstream\n", data.len()).as_bytes(), data, b"\nendstream"].concat(),
+        ]);
+        let err = crate::info(&pdf, None).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(err.contains("would decode to more than 256 MB"), "{err}");
+        let shading = dict("<< /ShadingType 4 /ColorSpace /DeviceRGB /BitsPerCoordinate 16 /BitsPerComponent 8 /BitsPerFlag 8 /Filter /FlateDecode >>");
+        assert!(matches!(decode(data, &shading, true, false), Err(TooBig)));
+        // An object stream or a cross-reference stream: read before the file opens.
+        let stream = |dict: &str| [format!("1 0 obj\n<< {dict} /Length {} >>\nstream\n", data.len()).as_bytes(), data, b"\nendstream\nendobj\n"].concat();
+        assert!(unsafe_file_streams(&stream("/Type /ObjStm /N 1 /First 4 /Filter /FlateDecode")));
+        assert!(unsafe_file_streams(&stream("/Type /XRef /W [1 2 1] /Filter /FlateDecode")));
+    }
+
+    #[test]
+    fn content_past_the_content_limit_is_refused() {
+        let data = ordinary_content((MAX_CONTENT_DECODED >> 20) + 16, b"\n0 0 10 10 re f\n");
+        for page in [false, true] {
+            let err = crate::info(&page_pdf(&data, page), None).err().map(|e| e.to_string()).unwrap_or_default();
+            assert!(err.contains("512 MB"), "page contents {page}: {err}");
+        }
     }
 
     /// A one-page PDF drawing one flat 8-bit DeviceRGB image of `w` × `h` pixels, Flate-compressed.
@@ -445,8 +572,6 @@ mod tests {
         }
         let image = e.finish().unwrap();
         let content = b"q 595 0 0 842 0 0 cm /Im0 Do Q";
-        let mut out = b"%PDF-1.6\n".to_vec();
-        let mut offsets = vec![];
         let objects: Vec<Vec<u8>> = vec![
             b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
             b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
@@ -463,19 +588,7 @@ mod tests {
             ]
             .concat(),
         ];
-        for (i, o) in objects.iter().enumerate() {
-            offsets.push(out.len());
-            out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
-            out.extend_from_slice(o);
-            out.extend_from_slice(b"\nendobj\n");
-        }
-        let xref = out.len();
-        out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
-        for o in offsets {
-            out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
-        }
-        out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).as_bytes());
-        out
+        write_pdf(&objects)
     }
 
     #[test]

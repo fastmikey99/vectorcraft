@@ -1782,7 +1782,6 @@ dependencies = [
 [[package]]
 name = "hayro-interpret"
 version = "0.7.0"
-source = "git+https://github.com/fastmikey99/craft-libs?rev=049a48689e8488148ccd72b5d061baf8bb0810d9#049a48689e8488148ccd72b5d061baf8bb0810d9"
 dependencies = [
  "bitflags 2.13.2",
  "hayro-cmap",

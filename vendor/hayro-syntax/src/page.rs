@@ -343,7 +343,7 @@ impl<'a> ContentReader<'a> {
                     pieces.push_back(Piece::Flate { data: raw, state });
                 }
                 Incremental::Whole => {
-                    let limit = left.min(stream.dict().ctx().decode_limits().max_decoded_stream());
+                    let limit = left.min(stream.dict().ctx().decode_limits().max_decoded_content());
                     let Ok(data) = stream.decoded_raw_within(raw, limit) else {
                         truncated = true;
                         continue;
@@ -504,7 +504,9 @@ impl<'a> Page<'a> {
     /// can yield more bytes than [`Page::page_stream`] for the same stream. Whole-stream
     /// fallback decoders retain the document's ordinary limit.
     pub fn content_reader(&self) -> ContentReader<'a> {
-        self.content_reader_within(MAX_DECODED_STREAM)
+        // VectorCraft patch: decoded whole, a page's contents may make up to `MAX_DECODED_CONTENT`
+        // (hayro-interpret's page budget, which they are charged against).
+        self.content_reader_within(crate::filter::MAX_DECODED_CONTENT)
     }
 
     /// PdfCraft patch: [`Page::content_reader`], with `cap` in place of `MAX_DECODED_STREAM`.

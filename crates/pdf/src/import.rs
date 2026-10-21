@@ -201,7 +201,7 @@ fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_p
     let mut hidden_form = false;
     if hide {
         for page in picked.iter().filter_map(|&n| original.pages().get(n)) {
-            hidden_form |= hides_forms(page, &mut ocgs, original.decode_limits().max_decoded_stream())?;
+            hidden_form |= hides_forms(page, &mut ocgs, original.decode_limits().max_decoded_content())?;
             if hidden_form {
                 break;
             }
@@ -286,7 +286,7 @@ fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_p
         b.page = ab;
         // The first id of this page's art.
         let first_id = b.next;
-        let mut scan = scan_page(page, &mut ocgs, all_on, &mut b.fonts, pdf.decode_limits().max_decoded_stream())?;
+        let mut scan = scan_page(page, &mut ocgs, all_on, &mut b.fonts, pdf.decode_limits().max_decoded_content())?;
         // The walk's ink names pick between spaces of inks that look the same to the interpreter. A
         // page keeps them only when it uses such an ink and the interpreter draws as many paths
         // there as the walk counts.

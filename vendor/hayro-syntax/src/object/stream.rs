@@ -209,12 +209,20 @@ impl<'a> Stream<'a> {
             .map(|r| r.data)
     }
 
+    /// VectorCraft patch: [`Stream::decoded_within`] for a content stream (a page's contents, a
+    /// form, a tiling pattern or a Type 3 glyph), which may expand to
+    /// [`crate::DecodeLimits::max_decoded_content`] rather than the ordinary stream limit.
+    pub fn decoded_content_within(&self, max: usize) -> Result<Cow<'a, [u8]>, DecodeFailure> {
+        self.decode_raw_within(self.raw_data(), &ImageDecodeParams::default(), max, true)
+            .map(|r| r.data)
+    }
+
     fn decode_within(
         &self,
         image_params: &ImageDecodeParams,
         max: usize,
     ) -> Result<FilterResult<'a>, DecodeFailure> {
-        self.decode_raw_within(self.raw_data(), image_params, max)
+        self.decode_raw_within(self.raw_data(), image_params, max, false)
     }
 
     /// PdfCraft patch: decode caller-supplied raw/decrypted bytes with the same filters and limits.
@@ -223,7 +231,8 @@ impl<'a> Stream<'a> {
         data: Cow<'a, [u8]>,
         max: usize,
     ) -> Result<Cow<'a, [u8]>, DecodeFailure> {
-        self.decode_raw_within(data, &ImageDecodeParams::default(), max)
+        // VectorCraft patch: only page content is decoded here (`ContentReader`).
+        self.decode_raw_within(data, &ImageDecodeParams::default(), max, true)
             .map(|r| r.data)
     }
 
@@ -232,7 +241,11 @@ impl<'a> Stream<'a> {
         data: Cow<'a, [u8]>,
         image_params: &ImageDecodeParams,
         max: usize,
+        content: bool,
     ) -> Result<FilterResult<'a>, DecodeFailure> {
+        let limits = self.dict.ctx().decode_limits();
+        // VectorCraft patch: content may expand further than an ordinary stream.
+        let limits = if content { limits.with_content_limit() } else { limits };
         let filters_and_params = self.filters_and_params();
         let count = filters_and_params.filters.len();
 
@@ -245,7 +258,7 @@ impl<'a> Stream<'a> {
             .enumerate()
         {
             // PdfCraft patch: see `filter::decode_limit`.
-            let limit = crate::filter::decode_limit(image_params, i + 1 == count, self.dict.ctx().decode_limits()).min(max);
+            let limit = crate::filter::decode_limit(image_params, i + 1 == count, limits).min(max);
             let new = filter.apply(current.as_ref().map(|c| c.data.as_ref()).unwrap_or(&data), params, image_params, limit)?;
             current = Some(new);
         }

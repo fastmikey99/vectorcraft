@@ -1,7 +1,7 @@
 //! The pages of a PDF to import: opening with a password, the pages picked, the box each page
 //! is cropped to ([`CropTo`]) and [`info`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use craft_pdf::syntax::object::{Array, Dict, MaybeRef, Name, Object, ObjectIdentifier, Stream, dict_or_stream};
 use craft_pdf::syntax::page::Page;
@@ -116,7 +116,8 @@ fn procedures_too_deep(o: &Object<'_>) -> bool {
 }
 
 /// The error of a file with a stream the reader would fail on ([`crate::streams`]).
-const STREAM_NOTE: &str = "a stream in it would decode to more than 256 MB, or its decode parameters can't be applied";
+const STREAM_NOTE: &str = "a stream in it would decode to more than 256 MB (the content of a page or form: 512 MB, \
+                           at most 32 times its stored size), or its decode parameters can't be applied";
 
 /// The error of a file with functions or color spaces built on one another past [`MAX_LINKS`]
 /// (or on themselves), or a calculator function nested past [`MAX_PROCEDURES`].
@@ -132,12 +133,13 @@ const UNREADABLE_NOTE: &str = "an array in it is damaged and can't be read";
 /// images, patterns, masks and graphics states alike.
 fn hostile(pdf: &Pdf) -> Option<&'static str> {
     let xref = pdf.xref();
+    let content = content_streams(pdf);
     let mut known = HashMap::new();
     // The objects of the file, then what each holds directly (64 deep at most: the reader's cap).
     let mut pending: Vec<Object<'_>> = pdf.objects().into_iter().collect();
     while let Some(o) = pending.pop() {
         // A stream's own checks come first: a calculator function is decoded below.
-        if matches!(&o, Object::Stream(s) if crate::streams::unsafe_stream(s)) {
+        if matches!(&o, Object::Stream(s) if crate::streams::unsafe_stream(s, content.contains(&s.obj_id()))) {
             return Some(STREAM_NOTE);
         }
         if procedures_too_deep(&o) || built_on(MaybeRef::NotRef(o.clone()), xref, &mut known, MAX_LINKS).is_none() {
@@ -152,6 +154,70 @@ fn hostile(pdf: &Pdf) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// The streams `pdf` uses as content, by where they are used from: a page's `Contents` (a stream
+/// or an array of them), a Type 3 font's `CharProcs`, an annotation's appearance streams (`AP`:
+/// `N`, `R` and `D`, each a stream or a dictionary of them) and a soft mask's group (`G`). Forms
+/// and tiling patterns say what they are themselves ([`crate::streams`]). Every object is looked
+/// at, and what each holds directly, as [`hostile`] does.
+fn content_streams(pdf: &Pdf) -> HashSet<ObjectIdentifier> {
+    let xref = pdf.xref();
+    let mut ids = HashSet::new();
+    let mut pending: Vec<Object<'_>> = pdf.objects().into_iter().collect();
+    while let Some(o) = pending.pop() {
+        match &o {
+            Object::Array(a) => pending.extend(items(a).filter_map(direct)),
+            _ => {
+                let Some((d, _)) = dict_or_stream(&o) else { continue };
+                if let Some(c) = d.get_raw::<Object<'_>>(b"Contents") {
+                    streams_in(c, xref, 1, &mut ids);
+                }
+                if let Some(procs) = d.get::<Dict<'_>>(b"CharProcs") {
+                    values(&procs).for_each(|p| streams_in(p, xref, 0, &mut ids));
+                }
+                if let Some(ap) = d.get::<Dict<'_>>(b"AP") {
+                    for key in [&b"N"[..], b"R", b"D"] {
+                        if let Some(a) = ap.get_raw::<Object<'_>>(key) {
+                            streams_in(a, xref, 1, &mut ids);
+                        }
+                    }
+                }
+                if d.get::<Name<'_>>(b"S").is_some_and(|s| matches!(s.as_ref(), b"Luminosity" | b"Alpha"))
+                    && let Some(g) = d.get_raw::<Object<'_>>(b"G")
+                {
+                    streams_in(g, xref, 0, &mut ids);
+                }
+                pending.extend(values(d).filter_map(direct));
+            }
+        }
+    }
+    ids
+}
+
+/// Add the stream `o` refers to to `ids`, or, `depth` levels in, the streams of the array or
+/// dictionary it is (or refers to).
+fn streams_in<'a>(o: MaybeRef<Object<'a>>, xref: &'a XRef, depth: usize, ids: &mut HashSet<ObjectIdentifier>) {
+    let o = match o {
+        MaybeRef::Ref(r) => {
+            let id = ObjectIdentifier::from(r);
+            match xref.get::<Object<'a>>(id) {
+                Some(Object::Stream(_)) => {
+                    ids.insert(id);
+                    return;
+                }
+                Some(o) => o,
+                None => return,
+            }
+        }
+        MaybeRef::NotRef(o) => o,
+    };
+    let Some(depth) = depth.checked_sub(1) else { return };
+    match &o {
+        Object::Array(a) => items(a).for_each(|i| streams_in(i, xref, depth, ids)),
+        Object::Dict(d) => values(d).for_each(|v| streams_in(v, xref, depth, ids)),
+        _ => {}
+    }
 }
 
 /// Read a PDF, decrypting it with `password` (none: the empty user password). The permissions
