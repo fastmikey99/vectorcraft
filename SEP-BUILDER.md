@@ -1,4 +1,4 @@
-# PAL player — preparation, WE Light, WE Dark and WE Mixed
+# PAL player — preparation, WE Light, WE Dark, WE Mixed and metallic
 
 `sep.runActionList` runs an ordered sequence of ArtPro PAL XML action lists on a
 single-page, unrotated PDF. It is an engine command available through the CLI, MCP's command
@@ -80,8 +80,8 @@ ink resources remain independently readable.
 
 - `AddWhiteUnderPrint`: union of the selected painted footprints (including stroke
   outlines), spread/choke in millimetres, Round/Miter/Bevel joins and miter limit.
-  `ExcludeCoveredAreas` subtracts unselected art **above** the selected art, in
-  painting order; selected objects do not knock each other out. `ExcludeWhiteObjects`
+  `ExcludeCoveredAreas` subtracts unselected knockout paint **above** the selected art, in
+  painting order; overprinting paint and selected objects do not knock selected art out. `ExcludeWhiteObjects`
   excludes zero-ink objects. The result is added to `White Underprint`, and only the
   new result is selected. `UseSelectedSeparation=0` uses `Opaque White`; otherwise
   exactly one selected ink is required. Subsequent PAL paint and overprint actions
@@ -177,9 +177,8 @@ Excluded objects still take part in nearest-boundary ownership.
 
 PAL name matching is case-sensitive. WHP's `NO WHP` and `NO WHP OR POWDER`
 exclusions apply to underprint, not trap tags; `NO POWDER` is not a trap exclusion
-either. The standalone command does not execute those underprint actions. Metallic
-and neon names now fail explicitly as outside the experiment's scope instead of
-silently producing a partially trapped job. Neither underprint layer is edited.
+either. The standalone command does not execute those underprint actions. Neon names fail explicitly as outside the experiment's scope. Metallic
+paints follow the same tag and ink eligibility rules as other spot paints. Neither underprint layer is edited.
 
 Limits: solid vector paints and path/group/layer/compound nodes only, plus
 opaque unlinked CMYK linear/radial gradients whose stop bounds prove uniform
@@ -291,3 +290,97 @@ SupaBG tag; the player retains them. Two of the other five satisfy the strict
 other three, alongside source geometry and known colour-conversion differences.
 The local report records every plate, stage attribution and unresolved causes;
 no backdrop-removal rule or tolerance exception was added.
+
+## Metallic preparation and artist intent
+
+The player supports `RemoveFill` (remove fill layers, preserve strokes) and
+`ClipOnShape` (use the topmost selected path as a clip, preserving existing layers,
+containers and intervening unselected objects). `MoveObjectsToLayer` and Shaper
+copies use the topmost selected layer, or the topmost layer when none is selected,
+as specified by ArtPro's active-layer rules (25.07 guide, Layers and Actions sections). The metallic recipe actions run
+from the supplied PALs, including Silver underprints, white subtraction, the Light
+clip fix, M-1 and Dark renames. Metallic names and inks are accepted by TrapTask;
+neon remains unsupported. The existing trap epsilon/K predicate is unchanged.
+Clip semantics follow [Esko's public guide, Clip On Shape](https://docs.esko.com/docs/en-us/artproplus/23.03/userguide/pdf/artproplus.pdf).
+
+An optional `intents` parameter supplies the artist's metallic selection:
+
+```json
+{
+  "intents": {
+    "metallic": [
+      {
+        "objects": {"spot": "Customer Gold"},
+        "list": "(2a) Apply Metallic Colour/Set M-2 objects (NZ_US)"
+      }
+    ]
+  }
+}
+```
+
+`objects` accepts exactly one of `{"ids":[12,15]}`, `{"spot":"ink name"}`,
+or `{"rectMm":[x,y,width,height]}`. Rectangle coordinates are document coordinates,
+x rightward and y downward, in millimetres; fully enclosed painted bounds qualify.
+Spot matching is exact and case-sensitive. Selectors choose atomic objects, not
+mixed parent groups; explicit group IDs include their descendants. IDs and bounds
+refer to the document **after preparation**, at the intent boundary. Missing,
+locked or hidden IDs and empty explicit selections are errors.
+
+Metallic intents execute in array order before the first `(2b)` or `(3)`
+folder-qualified list, `Trapping_Supacolour_Standard (NEW)` ticket (including a
+bare filename), or `TrapTask`. An explicit `MetallicIntents` entry in `lists` places that
+boundary elsewhere; without any boundary it is before the first list. The prior
+object selection is restored afterward. Explicit selections bound the 2a list's
+attribute selection, so its AddToSelection cannot recolour unrelated objects.
+Other PAL actions, including the global cleanup call, retain their literal scope.
+Omit `objects` to start that 2a list with an empty selection and let it self-select.
+A self-selecting list can also be named directly in `lists`; no intent is required.
+The trace records resolved IDs and then every PAL action. No metallic ink choice
+is inferred from order text or filenames.
+
+The inspected library has these literal selection behaviours:
+
+- M-1 through M-26 and M-28, including both M-2 variants: AddToSelection of the
+  corresponding spot, ignoring case, plus the current artist selection. M-23 is
+  an exception: its PAL searches **M-24**, then applies M-23. This is preserved.
+- M-27: NewSelection of M-27, ignoring case; replaces the artist's selection.
+- PMS 871–876, M-SPOT and M-FLOOD: current selection only; no self-selection.
+- No PMS 877 list or PANTONE 877 C selection exists in this library snapshot.
+  An explicit PANTONE 877 C spot selector can be supplied to the M-1 list.
+- M-28 is selected but never renamed by `M- DARK NAME FIX`. The player does not
+  insert a missing rename or otherwise repair the supplied PALs.
+
+Revision: 2026-10-21 — metallic action support and explicit artist selections;
+local customer validation is recorded outside the repository.
+
+Metallic validation: all 12 local clean Dark inputs complete; Silver footprints are
+within 1 pixel of the shipped plates at 600 dpi. All 37 available metallic
+application lists also complete on synthetic Light and Dark art (74 runs).
+Process plates are judged by footprint, not tint. Whole-output parity is not
+claimed: WHP choke geometry still differs (including one empty underprint), and
+TrapTask has small band/owner differences and residual M-1 samples. Intermediate
+TrapTask and artwork-only renders isolate those differences before Rasterize and
+TRAPPY. A synthetic Dark M-28 retains the PAL's missing DK rename: the ticket's
+later DARK rename means no Silver is generated for that case. No exception is
+inserted. Customer identifiers, selections and plate tables remain local.
+
+## Combining artist intents
+
+One `intents` object accepts both independently validated keys:
+
+```json
+{
+  "intents": {
+    "metallic": [{"objects": {"spot": "Customer Gold"}, "list": "(2a) Apply Metallic Colour/Set M-2 objects (NZ_US)"}],
+    "noTrap": {"objectIds": [19], "rectangles": [{"x": 10, "y": 20, "width": 15, "height": 8}]}
+  }
+}
+```
+
+Metallic lists run at the preparation boundary, before the Mixed ticket; `noTrap`
+then replaces the selection immediately before that ticket. Each selector keeps
+its own format and meaning: metallic `rectMm` selects fully enclosed objects,
+whereas no-trap `rectangles` select intersecting geometry and can split paths.
+Neither key is required; unknown keys and invalid payloads are rejected. Synthetic
+combined-intent tests cover preparation, metallic selection/paint, no-trap selection
+and ticket/TrapTask order with bare and folder-qualified ticket names.

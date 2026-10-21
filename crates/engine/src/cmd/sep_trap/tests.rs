@@ -97,7 +97,8 @@ fn spot_inks_stay_on_their_plate_and_excluded_names_block_them() {
         vectorcraft_doc::inks::visit_node_colors(Arc::make_mut(art), &mut |_, _, tint| *tint = 0.0);
     }
     assert_eq!(s.execute(C, &json!({"blackThreshold":0.7})).unwrap()["pixels"], 0, "zero-tint ink");
-    for name in ["NEON-Test", "M-Test"] {
+    {
+        let name = "NEON-Test";
         let mut s = session(Color::cmyk(1.0, 0.0, 0.0, 0.0));
         let d = Arc::make_mut(&mut s.doc_mut().unwrap().doc);
         Arc::make_mut(&mut Arc::make_mut(&mut d.layers[0]).children_mut().unwrap()[0]).name = Some(name.into());
@@ -343,5 +344,15 @@ fn white_no_bleed_masks_suppress_coincident_edges_in_both_trap_outputs() {
                 assert!(result["pixels"].as_u64().unwrap() > 0, "a white mask behind the art must not suppress visible ink");
             }
         }
+    }
+}
+
+#[test]
+fn metallic_object_names_use_the_existing_ink_predicate() {
+    for name in ["M-1", "M-2", "DK M-2", "M-28", "DK M-SPOT"] {
+        let mut s = session(Color::cmyk(1.0, 0.0, 0.0, 0.0));
+        let d = Arc::make_mut(&mut s.doc_mut().unwrap().doc);
+        Arc::make_mut(&mut Arc::make_mut(&mut d.layers[0]).children_mut().unwrap()[0]).name = Some(name.into());
+        assert!(s.execute(C, &json!({"blackThreshold":0.7})).unwrap()["pixels"].as_u64().unwrap() > 0);
     }
 }
