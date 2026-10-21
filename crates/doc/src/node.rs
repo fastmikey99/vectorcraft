@@ -533,10 +533,53 @@ pub struct Node {
     pub extras: Extras,
 }
 
+/// Artist intent for the separation builder. It never changes the object's paint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum SepMark {
+    Metallic { list: String },
+    NoTrap,
+}
+
+impl<'de> Deserialize<'de> for SepMark {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // A struct-shaped empty variant makes serde reject extra NoTrap fields too.
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+        enum Wire {
+            Metallic { list: String },
+            NoTrap {},
+        }
+        Ok(match Wire::deserialize(d)? {
+            Wire::Metallic { list } => Self::Metallic { list },
+            Wire::NoTrap {} => Self::NoTrap,
+        })
+    }
+}
+
+impl SepMark {
+    /// A bounded, relative PAL name. Resolution remains confined to the builder's library.
+    pub fn valid(&self) -> bool {
+        match self {
+            Self::NoTrap => true,
+            Self::Metallic { list } => {
+                !list.trim().is_empty()
+                    && list.len() <= 1024
+                    && !list.chars().any(char::is_control)
+                    && !list.starts_with(['/', '\\'])
+                    && !list.contains(':')
+                    && !list.split(['/', '\\']).any(|part| part == "..")
+            }
+        }
+    }
+}
+
 /// The parts of a [`Node`] that few objects have: kept out of line, so that the nodes without
 /// them stay small ([`Node::extras`]).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NodeExtras {
+    /// Separation intent, retained by native and PDF saves.
+    pub sep_mark: Option<SepMark>,
     /// ISO 19593-1 White processing-step group for a layer; does not change its paint.
     pub processing_white: bool,
     /// External trap permission; absent inherits the enclosing object or ticket.
@@ -581,6 +624,7 @@ pub struct NodeExtras {
 
 /// No extras: what [`Node::extras`] gives for a node without any.
 static NO_EXTRAS: NodeExtras = NodeExtras {
+    sep_mark: None,
     processing_white: false,
     trap_external: None,
     mask: None,
@@ -733,6 +777,7 @@ impl Serialize for Node {
             e.live_paint_gaps.is_none(),
             e.trap_external.is_none(),
             !e.processing_white,
+            e.sep_mark.is_none(),
         ];
         let mut st = s.serialize_struct("Node", skips.iter().filter(|s| !**s).count())?;
         let mut skip = skips.into_iter();
@@ -773,6 +818,7 @@ impl Serialize for Node {
         field!("live_paint_gaps", &e.live_paint_gaps);
         field!("trap_external", &e.trap_external);
         field!("processing_white", &e.processing_white);
+        field!("sep_mark", &e.sep_mark);
         st.end()
     }
 }
@@ -782,6 +828,8 @@ impl Serialize for Node {
 #[derive(Deserialize)]
 #[serde(rename = "Node")]
 struct NodeWire {
+    #[serde(default)]
+    sep_mark: Option<SepMark>,
     #[serde(default)]
     processing_white: bool,
     #[serde(default)]
@@ -841,6 +889,7 @@ struct NodeWire {
 impl From<NodeWire> for Node {
     fn from(w: NodeWire) -> Self {
         let extras = NodeExtras {
+            sep_mark: w.sep_mark,
             processing_white: w.processing_white,
             trap_external: w.trap_external,
             mask: w.mask,

@@ -190,6 +190,17 @@ pub fn solidify(app: &mut VectorcraftApp, request: &protocol::Solidify) -> Resul
     })
 }
 
+/// Summarize what was actually saved (also used for File > Save downloads and selection exports).
+pub fn saved_marks(name: &str, bytes: &[u8]) -> Result<serde_json::Value, String> {
+    if !name.to_ascii_lowercase().ends_with(".pdf") {
+        return Ok(serde_json::json!([]));
+    }
+    let loaded = vectorcraft_engine::cmd::fileio::load(name, bytes).map_err(|e| e.to_string())?;
+    let mut session = vectorcraft_engine::Session::new();
+    session.add_document(loaded.doc, None);
+    Ok(session.execute("sep.mark.list", &serde_json::json!({})).map_err(|e| e.to_string())?["marks"].clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,6 +224,27 @@ mod tests {
         let mut session = Session::new();
         session.add_document(doc, None);
         VectorcraftApp::new(session, Default::default())
+    }
+
+    #[test]
+    fn host_marks_export_summary_and_production_reopen() {
+        let mut app = app();
+        app.run("select.all", json!({})).unwrap();
+        let (cmd, params) = protocol::mark_command("vectorcraft:sep.mark.set", Some(json!({"type":"noTrap"}))).unwrap();
+        app.run(cmd, params).unwrap();
+        let (name, bytes, _, _) = write_export(&mut app, &request()).unwrap();
+        let summary = saved_marks(&name, &bytes).unwrap();
+        assert_eq!(summary.as_array().unwrap().len(), 1);
+        assert_eq!(summary[0]["mark"], json!({"type":"noTrap"}));
+        assert!(summary[0]["bounds"]["width"].as_f64().unwrap() > 0.);
+        app.run("document.open", json!({"name":"reopen.pdf","dataBase64":vectorcraft_format::base64_encode(&bytes),"printProduction":true})).unwrap();
+        assert_eq!(app.run("sep.mark.list", json!({})).unwrap()["marks"].as_array().unwrap().len(), 1);
+        let (cmd, params) = protocol::mark_command("vectorcraft:sep.mark.clear", None).unwrap();
+        app.run("select.all", json!({})).unwrap();
+        app.run(cmd, params).unwrap();
+        assert_eq!(app.run("sep.mark.list", json!({})).unwrap()["marks"], json!([]));
+        app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(app.run("sep.mark.list", json!({})).unwrap()["marks"].as_array().unwrap().len(), 1);
     }
 
     fn request() -> protocol::Export {

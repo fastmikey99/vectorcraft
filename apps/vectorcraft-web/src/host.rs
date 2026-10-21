@@ -77,6 +77,7 @@ pub struct Bridge {
     selection: Rc<Cell<Option<(u64, usize, protocol::Selection)>>>,
     /// Exports the parent asked for, run on the next frame (they need the app).
     exports: Rc<RefCell<Vec<(JsValue, protocol::Export)>>>,
+    marks: Rc<RefCell<Vec<(JsValue, String, serde_json::Value)>>>,
     /// Files the parent asked to place, run on the next frame.
     places: Rc<RefCell<Vec<(JsValue, protocol::Place)>>>,
     /// Soft pixels the parent asked to remove, run on the next frame.
@@ -104,6 +105,7 @@ impl Bridge {
             reported: Rc::default(),
             selection: Rc::default(),
             exports: Rc::default(),
+            marks: Rc::default(),
             places: Rc::default(),
             solidifies: Rc::default(),
             prefs: Rc::default(),
@@ -143,6 +145,7 @@ impl Bridge {
             ("rasterEffectsResolution", true.into()),
             ("units", true.into()),
             ("solidify", true.into()),
+            ("separationMarks", true.into()),
         ]);
     }
 
@@ -159,6 +162,17 @@ impl Bridge {
 
     /// Each frame: write the exports the parent asked for and send them back.
     pub fn run_exports(&self, app: &mut VectorcraftApp) {
+        for (id, command, params) in std::mem::take(&mut *self.marks.borrow_mut()) {
+            match app.run(&command, params).and_then(|_| app.session.execute("sep.mark.list", &serde_json::json!({})).map_err(|e| e.to_string())) {
+                Ok(result) => match js_sys::JSON::parse(&result["marks"].to_string()) {
+                    Ok(marks) => {
+                        self.send(&[("type", "vectorcraft:sep.marks".into()), ("id", id), ("marks", marks), ("units", "pt".into())]);
+                    }
+                    Err(_) => self.post_export_failed(&id, "couldn't encode separation marks"),
+                },
+                Err(error) => self.post_export_failed(&id, &error),
+            }
+        }
         let asked = std::mem::take(&mut *self.exports.borrow_mut());
         for (id, export) in asked {
             match crate::operations::write_export(app, &export) {
@@ -273,6 +287,10 @@ impl Bridge {
         {
             fields.push(("bounds", o.into()));
         }
+        let summary = crate::operations::saved_marks(name, bytes)?;
+        let marks = js_sys::JSON::parse(&summary.to_string()).map_err(|_| "couldn't encode separation marks".to_string())?;
+        fields.push(("marks", marks));
+        fields.push(("markUnits", "pt".into()));
         let message = message(&fields).ok_or_else(|| "couldn't build the message".to_string())?;
         self.parent
             .post_message_with_transfer(&message, &self.origin, &js_sys::Array::of1(&buffer))
@@ -290,6 +308,22 @@ impl Bridge {
             let from_parent = event.source().is_some_and(|s| js_sys::Object::is(&s, &bridge.parent));
             let data = event.data();
             if !protocol::accepts(&bridge.origin, &event.origin(), from_parent, string(&data, "type").as_deref()) {
+                return;
+            }
+            if let Some(kind) = string(&data, "type").filter(|k| k.starts_with("vectorcraft:sep.mark.")) {
+                let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
+                let mark = js_sys::Reflect::get(&data, &JsValue::from_str("mark"))
+                    .ok()
+                    .and_then(|m| js_sys::JSON::stringify(&m).ok())
+                    .and_then(|m| m.as_string())
+                    .and_then(|m| serde_json::from_str(&m).ok());
+                match protocol::mark_command(&kind, mark) {
+                    Ok((command, params)) => {
+                        bridge.marks.borrow_mut().push((id, command.into(), params));
+                        wake();
+                    }
+                    Err(error) => bridge.post_export_failed(&id, &error),
+                }
                 return;
             }
             if string(&data, "type").as_deref() == Some("vectorcraft:export") {

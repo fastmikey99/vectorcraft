@@ -99,7 +99,17 @@ impl Player<'_> {
                         found
                     }
                 };
-                selection::merge(&mut selected, found, p.value("SelectionMode").unwrap_or("NewSelection"))?;
+                // An artist-supplied selection is authoritative for the opening ink selector
+                // of a 2a list (including lists using NewSelection). Nested cleanup retains
+                // its literal PAL selection semantics; a bare/self-selecting list is unchanged.
+                let artist_selection = self.intent_scope.is_some()
+                    && self.stack.len() == 1
+                    && a.position == 1
+                    && a.kind == "SelectObjectsByAttributes"
+                    && p.children.iter().filter(|e| e.name == "Rule").all(|r| r.attributes.get("Type").is_some_and(|t| t == "SeparationNameRule"));
+                if !artist_selection {
+                    selection::merge(&mut selected, found, p.value("SelectionMode").unwrap_or("NewSelection"))?;
+                }
                 let n = selected.len();
                 self.session.doc_mut()?.selection.set(selected);
                 Ok(n)

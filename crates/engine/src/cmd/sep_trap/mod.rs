@@ -165,6 +165,8 @@ fn tag_conflicts(n: &Node, doc: &Document, threshold: f32, inherited: Option<boo
 fn has_render_extras(n: &Node) -> bool {
     let mut extras = n.extras().clone();
     extras.trap_external = None;
+    // Artist intent is metadata, just like trap permission; it cannot switch rendering paths.
+    extras.sep_mark = None;
     extras != Default::default()
 }
 

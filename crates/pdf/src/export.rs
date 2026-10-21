@@ -606,6 +606,8 @@ pub(crate) struct Exporter<'a> {
     layer_index: HashMap<usize, usize>,
     /// The address of the layer whose form is being drawn.
     in_layer: usize,
+    sep_index: HashMap<usize, usize>,
+    in_sep: usize,
     /// Overprinting fills and strokes are drawn as forms marked to overprint.
     pub overprint: bool,
     /// An overprinting fill or stroke was drawn so.
@@ -629,6 +631,12 @@ impl<'a> Exporter<'a> {
     /// An exporter of `doc` writing images as `set` says; layers whose Print option is off are
     /// left out.
     pub(crate) fn new(doc: &'a Document, set: &'a crate::PdfSettings) -> Self {
+        let mut sep_index = HashMap::new();
+        doc.walk(|n| {
+            if n.extras().sep_mark.is_some() {
+                sep_index.insert(address(n), sep_index.len());
+            }
+        });
         Self {
             doc,
             symbols: doc.symbol_boxes().quick().with_brush_art(),
@@ -651,6 +659,8 @@ impl<'a> Exporter<'a> {
             layers: false,
             layer_index: crate::forms::pdf_layers(doc).iter().enumerate().map(|(i, l)| (address(l.node), i)).collect(),
             in_layer: 0,
+            sep_index,
+            in_sep: 0,
             overprint: false,
             overprinted: false,
             inline_depth: 0,
@@ -1229,6 +1239,14 @@ impl Exporter<'_> {
             Some(b) if !force && !rects_overlap(b.inflate(1.0, 1.0), page) => return,
             None if !n.is_container() => return,
             _ => {}
+        }
+        if self.in_sep != address(n)
+            && let Some(&i) = self.sep_index.get(&address(n))
+        {
+            let enclosing = std::mem::replace(&mut self.in_sep, address(n));
+            crate::forms::form(s, Mark::Sep(i), |s| self.node(s, n, page, force));
+            self.in_sep = enclosing;
+            return;
         }
         self.warn_raster(&n.appearance.effects, || format!("{} objects", n.kind_label().to_lowercase()));
         let container = n.is_container() && !matches!(n.kind, NodeKind::Compound { .. });

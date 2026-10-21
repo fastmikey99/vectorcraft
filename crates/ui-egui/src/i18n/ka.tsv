@@ -5214,3 +5214,24 @@ imageTrace	Outline	კონტური
 @msg	prototype does not support neon artwork	prototype does not support neon artwork
 @msg	prototype does not support neon inks	prototype does not support neon inks
 @msg	PAL has no active layer	PAL has no active layer
+	Separation marks	Separation marks
+	Metallic	Metallic
+	No trap (no bleed)	No trap (no bleed)
+	Clear separation mark	Clear separation mark
+	Set Separation Mark	Set Separation Mark
+	Clear Separation Mark	Clear Separation Mark
+	Separation Marks	Separation Marks
+@id	sep.mark.set	Set Separation Mark
+@id	sep.mark.clear	Clear Separation Mark
+@id	sep.mark.list	Separation Marks
+@msg	invalid separation mark list	invalid separation mark list
+@msg	ids must be an array	ids must be an array
+@msg	too many separation mark targets	too many separation mark targets
+@msg	separation mark target is missing	separation mark target is missing
+@msg	NoTrap marks require exactly one trap ticket immediately followed by TrapTask	NoTrap marks require exactly one trap ticket immediately followed by TrapTask
+@msg	invalid separation mark	invalid separation mark
+@msg	missing separation mark	missing separation mark
+@msg	missing separation form	missing separation form
+@msg	unreadable separation form	unreadable separation form
+@msg	couldn't encode separation marks	couldn't encode separation marks
+@msg	unknown separation mark message	unknown separation mark message

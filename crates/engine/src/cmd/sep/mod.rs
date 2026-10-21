@@ -3,6 +3,7 @@ mod actions;
 mod clean;
 mod geometry;
 mod intents;
+mod marks;
 mod metallic;
 pub(super) mod profiles;
 mod reader;
@@ -47,7 +48,8 @@ fn is_trap_ticket(name: &str) -> bool {
 }
 
 pub fn specs() -> Vec<CommandSpec> {
-    vec![cmd!(
+    let mut specs = marks::specs();
+    specs.push(cmd!(
         "sep.runActionList",
         "Run Separation Action Lists",
         [],
@@ -55,7 +57,8 @@ pub fn specs() -> Vec<CommandSpec> {
         "{root?: action-list library folder (default: VECTORCRAFT_ACTION_LISTS), profiles?: ICC folder (default: VECTORCRAFT_PROFILES), lists: [relative list names in execution order], intents?: {noTrap?: {objectIds?: [prepared object ids], rectangles?: [{x, y, width, height in mm}]}, metallic?: [{objects?: {ids: [id]} | {spot: name} | {rectMm: [x,y,width,height]}, list: relative PAL name}]}, input: PDF path, output: PDF path} run PAL actions; returns {status, stoppedAt, traceLength, trace, layers, spots, artwork, warnings}. Trace is also written to stderr. Unsupported actions stop before mutation and write the document so far.",
         always,
         run
-    )]
+    ));
+    specs
 }
 
 struct Player<'a> {
@@ -74,6 +77,7 @@ struct Player<'a> {
     messages: Vec<String>,
     no_trap: Option<intents::NoTrap>,
     crosshair: Option<vectorcraft_geom::Point>,
+    marked_intents: bool,
 }
 impl Player<'_> {
     fn doc(&self) -> Result<&Document> {
@@ -96,6 +100,9 @@ impl Player<'_> {
             return Err(error("recursive PAL call or call depth exceeds 32"));
         }
         let actions = reader::read(&path).map_err(error)?;
+        if caller.is_none() && is_trap_ticket(name) && self.marked_intents {
+            self.no_trap = intents::from_marks(self.doc()?).no_trap;
+        }
         if caller.is_none()
             && is_trap_ticket(name)
             && let Some(intent) = self.no_trap.take()
@@ -188,6 +195,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let string = |key| p.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).ok_or_else(|| error(format!("sep.runActionList requires {key}")));
     let mut intents = intents::read(p)?;
     let no_trap = intents.no_trap.take();
+    let marked_intents = p.get("intents").is_none();
     let profiles = profiles::folder(p)?;
     let input = string("input")?;
     let output = string("output")?;
@@ -226,6 +234,22 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     crate::file_access::check_read(&root.to_string_lossy()).map_err(error)?;
     let root = root.canonicalize().map_err(error)?;
     let opened = s.execute("document.open", &json!({"path":input,"printProduction":true,"textAs":"outlines"}))?;
+    s.edit("Clean Up", |d, _| {
+        clean::stabilize_input(d);
+        Ok(())
+    })?;
+    if marked_intents {
+        s.edit("Separation Marks", |d, _| {
+            marks::inherit(d);
+            Ok(())
+        })?;
+        if intents::from_marks(&s.doc()?.doc).no_trap.is_some() {
+            let tickets: Vec<_> = lists.iter().enumerate().filter(|(_, name)| is_trap_ticket(name)).map(|(i, _)| i).collect();
+            if tickets.len() != 1 || tickets.first().and_then(|i| lists.get(i + 1)).copied() != Some("TrapTask") {
+                return Err(error("NoTrap marks require exactly one trap ticket immediately followed by TrapTask"));
+            }
+        }
+    }
     if s.doc()?.doc.artboards.len() != 1 {
         return Err(error("PAL preparation currently requires a single-page PDF"));
     }
@@ -267,6 +291,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         messages: Vec::new(),
         no_trap,
         crosshair: None,
+        marked_intents,
     };
     player.remove_background()?;
     let intent_position = lists
@@ -278,6 +303,9 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         .unwrap_or(0);
     for (position, list) in lists.into_iter().enumerate() {
         if position == intent_position {
+            if marked_intents {
+                intents = intents::from_marks(player.doc()?);
+            }
             if let Err(e) = player.apply_intents(&intents) {
                 player.stopped = Some(json!({"list":"MetallicIntents","reason":e.to_string()}));
             }
