@@ -8,7 +8,7 @@ const MAX_XML_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_NESTING: usize = 32;
 const MAX_ITEMS: usize = 10_000;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Element {
     pub name: String,
     pub attributes: BTreeMap<String, String>,

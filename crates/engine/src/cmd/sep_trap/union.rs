@@ -36,7 +36,7 @@ fn painted(n: &Node) -> Result<Option<PathData>> {
         || n.blend != BlendMode::Normal
         || n.knockout != Default::default()
         || !n.appearance.effects.is_empty()
-        || n.extras != Default::default()
+        || has_render_extras(n)
     {
         return Ok(None);
     }

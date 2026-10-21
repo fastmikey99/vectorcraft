@@ -1,4 +1,4 @@
-# PAL player — preparation and WE Light
+# PAL player — preparation, WE Light and WE Dark
 
 `sep.runActionList` runs an ordered sequence of ArtPro PAL XML action lists on a
 single-page, unrotated PDF. It is an engine command available through the CLI, MCP's command
@@ -9,11 +9,35 @@ vectorcraft-cli run --cmd sep.runActionList --params \
   '{"root":"/path/to/action-library","lists":["Preparation","Recipe"],"input":"/path/to/input.pdf","output":"/path/to/prepared.pdf"}'
 ```
 
+For Dark, insert the literal `"TrapTask"` in `lists` between the trap-ticket PAL
+and the recipe PAL. It is an explicit AE step, not a filename or an automatically
+inferred operation. It uses the established 0.2 mm outward, image-extend trap with
+K ≥ 70% excluded, creates `Trap Layer 1` above the art, and records its time and
+tag/ink-rule conflicts in `messages`. The PALs then lock, rename and move that
+layer, rasterize it and run TRAPPY.
+
 `root` is optional and defaults to the folder named by the
 `VECTORCRAFT_ACTION_LISTS` environment variable. List names are relative to that root, with an optional `.pal`
 extension. Backslashes are accepted. Folder-qualified calls resolve from the
 root; bare calls resolve from the calling list's folder. Calls cannot escape the
 root. XML size, nesting, recursion and total execution are bounded.
+
+`profiles` optionally names a local folder of `.icc`/`.icm` files; it overrides
+`VECTORCRAFT_PROFILES`. `AssignDocumentProfile` matches CMYK profile descriptions,
+ignoring case, whitespace and punctuation, and allowing an omitted parenthetical
+qualifier. Exact descriptions win; ambiguous matches are reported, never guessed.
+Only the matched profile is loaded through `color.loadProfile` and assigned through
+`edit.assignProfile`. The configured folder is authoritative; without one, already
+registered profiles remain available. No ICC files are bundled.
+
+The assigned profile is used for RGB ink selection, PDF-alternate conversion and
+process-ink deletion, and for remaining RGB at PDF export; existing CMYK values and
+spot tints are preserved. `ConvertToCMYK` follows `Option=UseFromPDF` or the explicit
+`Custom` values. Esko's documented action has no rendering-intent or BPC settings;
+these PAL variants do not supply them. Profile conversions use the existing
+`edit.colorSettings` intent and BPC (defaults: relative colorimetric, BPC on), not an
+inferred Esko default. Missing profiles retain the PAL severity and mention
+`VECTORCRAFT_PROFILES` in the diagnostic.
 
 The result contains `status` (`completed` or `stopped`), `stoppedAt` (list, one-based
 position, action and reason), `traceLength`, `trace`, `layers`, `spots`, `artwork`,
@@ -70,8 +94,17 @@ ink resources remain independently readable.
   physical width/height about the selection center. `Mode=Relative` selects that
   anchor rather than the crosshair; it is not percentage scaling. Content page
   boxes also accept `FitToSelection`.
-- `Rasterize`, `SetTrapTags`, `RemoveTrappingTags`: empty selections are harmless;
-  nonempty selections stop explicitly. Trap processing is a separate slice.
+- `SetTrapTags`: the WE ticket variant (Trapping, external Always/Never, Outwards,
+  0.2 mm, internal Never/0 mm, pullback Never). Unsupported ticket variants stop.
+  Permissions live on objects, inherit through groups, and survive native save/reopen.
+  `RemoveTrappingTags` removes selected-level tags, or descendants too with `AllLevels=1`.
+  Permission and the existing epsilon/K eligibility checks must both allow trapping;
+  `Always` does not force white or high-K paint to trap. Conflict counts are reported.
+- `Rasterize`: 600 dpi, AntiAliasing None, ConsiderBackground 0. Renders the selected
+  art into its original process/spot planes, retaining transparency as an opacity mask
+  and creating a vector clip. Background artwork is not composited. The new group
+  remains selected. TRAPPY's Spread/Choke preserves the clipping-path flag.
+  Unsupported resolution/background/AA variants stop. Empty selections are harmless.
 
 Before any PAL runs, the house preparation rule deletes objects painted with the
 spot `SupaBG`. The trace records this separately as `Preparation / DeleteBackground`.
@@ -91,11 +124,17 @@ Set Object Size, pp. 457–458). Tests generate
 small synthetic PDFs and PALs inline; no production artwork or action-library
 files are included in the repository.
 
+Profile semantics: the same guide, Color Management (pp. 88–90), Convert to CMYK
+(pp. 130–131, 430).
+
+Revision: 2026-10-21 — local ICC discovery and assigned-profile conversion.
 
 # Trap layer (`sep.trap`)
 
-Status: experimental, 21 October 2026. This command is an isolated trap experiment,
-not a production separation builder or PAL player. No parity score is claimed.
+Status: experimental, 21 October 2026. Standalone `sep.trap` and the PAL player's
+explicit AE TrapTask share the same band and ink computation. The clean Dark set
+runs end to end, but production parity is not claimed: customer-to-shipped colour
+changes and geometry/tint differences remain in the local report.
 
 `sep.trap {"blackThreshold": 0.7}` replaces the bottom `Auto Trap-1` layer from exactly
 one top-level `Artwork` layer, in one undo step. The K threshold is required: the example
@@ -107,13 +146,27 @@ are united with pathops and rasterised once, preventing internal raster seams
 from becoming bands while retaining real blank counters. Transparency and live
 effects use renderer occupancy with a one-pixel closing fallback. Band distance
 is measured from occupied pixel cells, avoiding a half-pixel width shortfall.
-Colour samples use the nearest vector boundary and its own ink values for
-opaque single-fill paths. The existing epsilon/K predicate is applied to that
+Colour samples use a balanced spatial index over cubic-segment bounds to find the
+nearest vector boundary and its own ink values for opaque single-fill paths.
+Exact distances and original-order ties agree with the previous linear search. The existing epsilon/K predicate is applied to that
 owner. Complex appearances retain original renderer sampling. The command extends
 the chosen process and spot ink values by 0.2 mm, traces the
 pixel edges, then spreads and chokes the clip by 0.01 mm with miter joins (limit 4).
-The output is a clip and a process/DeviceN image with a matching opacity mask;
-PDF export retains the spot channels and SMask. Trap overprint is off.
+The standalone output is a clip and a process/DeviceN image with a matching opacity
+mask; PDF export retains the spot channels and SMask. The clip is unpainted: it
+must not add black ink where smoothing exposes a gap in the image mask. Trap
+overprint is off.
+
+TrapTask instead emits vector runs on that same 600 dpi band grid with an uncleaned
+clip. It does not perform Rasterize or TRAPPY. The runs preserve the sampled ink
+values; the PAL Rasterize makes the image, then TRAPPY spreads/chokes the clip once.
+A checked footprint cache avoids repeatedly uniting those runs during underprint;
+it is valid only while the complete generated group equals its saved snapshot.
+Synthetic process/spot plate comparisons cover equivalence with standalone trapping.
+Both paths report `tagConflicts` (tagged paints excluded by ink rules and ink-eligible
+paints excluded by tags). RGB process sources are converted through the assigned
+CMYK profile consistently with the player's PDF output; existing CMYK and spots
+keep their values.
 
 Eligibility uses the PAL's `SeparationTypeRule Any / NotUsing` epsilon of 0.005:
 all process coverages and the spot tint must be below 0.5% to count as no ink.
@@ -124,7 +177,7 @@ Excluded objects still take part in nearest-boundary ownership.
 
 PAL name matching is case-sensitive. WHP's `NO WHP` and `NO WHP OR POWDER`
 exclusions apply to underprint, not trap tags; `NO POWDER` is not a trap exclusion
-either. This isolated command does not execute those underprint actions. Metallic
+either. The standalone command does not execute those underprint actions. Metallic
 and neon names now fail explicitly as outside the experiment's scope instead of
 silently producing a partially trapped job. Neither underprint layer is edited.
 
@@ -132,7 +185,8 @@ Limits: solid vector paints and path/group/layer/compound nodes only, plus
 opaque unlinked CMYK linear/radial gradients whose stop bounds prove uniform
 PAL epsilon/K eligibility. Crossing gradients remain unsupported; accepted
 gradients retain nearest rendered colour samples. There are no raster-art
-inputs. The grid is limited to 64 million pixels at 600 dpi. An unsupported input fails before changing the document. The
+inputs. The grid is limited to 64 million pixels at 600 dpi; TrapTask's pre-raster vector
+form is limited to one million horizontal runs. An unsupported input fails before changing the document. The
 exterior is the complement of the art union, including blank enclosed openings;
 ink-to-ink edges never receive a band.
 No page trap-ticket `/Properties` are written by this prototype.
@@ -152,3 +206,28 @@ preservation, vector union, small counters, clips, seam closing,
 pixel-cell distance, nearest excluded ownership, white and
 rich black, PAL epsilon boundaries, specialty-input rejection, spot alternates, spot-plane preservation, PDF DeviceN/SMask export,
 replacement, undo and cancellation. There are no customer fixtures.
+
+## Dark validation and remaining differences
+
+All eleven clean customer inputs complete the supplied sequence with local profiles.
+The white-only input produces no trap. One coloured input also produces no trap:
+its customer and shipped artwork have different K coverage on opposite sides of
+the required K≥70% threshold. The rule excludes the customer ink despite its Always tag. No threshold exception or
+colour correction was added.
+
+The supplied New template ends with SelectAllObjects then InvertObjectSelection.
+Consequently the following 2b RemoveFromSelection/rename-LIGHT sequence starts
+empty. This behavior is retained, not repaired with an extra selection action.
+Specialty-name lists are reached with empty selections on this cohort; no metallic
+or neon implementation was added.
+
+Local comparisons use every process, white and PANTONE plate at 600 dpi, translated
+to register Artwork bounds without scaling. Full plates use the existing headless
+preview; trap-only ink measurements additionally disable antialiasing and image
+smoothing. Reports include XOR area, percent of shipped ink, symmetric worst
+distance, shared-ink mean/max tint error, layer order/overprint and build/trap times.
+No customer data, identities or per-job reports are included here.
+
+Revision: 2026-10-21 — explicit Dark TrapTask, inherited trap tags, 600 dpi Rasterize,
+TRAPPY clip preservation and indexed nearest-vector colour ownership. Changes are
+uncommitted for lead review.

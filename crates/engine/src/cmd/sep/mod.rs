@@ -2,10 +2,12 @@
 mod actions;
 mod clean;
 mod geometry;
+pub(super) mod profiles;
 mod reader;
 mod selection;
 #[cfg(test)]
 mod tests;
+mod trap;
 
 use super::{CommandSpec, always, cmd};
 use crate::{EngineError, Result, Session};
@@ -41,7 +43,7 @@ pub fn specs() -> Vec<CommandSpec> {
         "Run Separation Action Lists",
         [],
         None,
-        "{root?: action-list library folder (default: the reference library under the user's home), lists: [relative list names in execution order], input: PDF path, output: PDF path} run PAL actions; returns {status, stoppedAt, traceLength, trace, layers, spots, artwork, warnings}. Trace is also written to stderr. Unsupported actions stop before mutation and write the document so far.",
+        "{root?: action-list library folder (default: VECTORCRAFT_ACTION_LISTS), profiles?: ICC folder (default: VECTORCRAFT_PROFILES), lists: [relative list names in execution order], input: PDF path, output: PDF path} run PAL actions; returns {status, stoppedAt, traceLength, trace, layers, spots, artwork, warnings}. Trace is also written to stderr. Unsupported actions stop before mutation and write the document so far.",
         always,
         run
     )]
@@ -50,6 +52,7 @@ pub fn specs() -> Vec<CommandSpec> {
 struct Player<'a> {
     session: &'a mut Session,
     root: PathBuf,
+    profiles: Option<PathBuf>,
     stack: Vec<PathBuf>,
     layers: Vec<NodeId>,
     inks: Vec<String>,
@@ -57,6 +60,7 @@ struct Player<'a> {
     trace: Vec<Value>,
     stopped: Option<Value>,
     clipboard_empty: bool,
+    trap_footprints: BTreeMap<NodeId, (vectorcraft_doc::Node, vectorcraft_geom::PathData)>,
     messages: Vec<String>,
 }
 impl Player<'_> {
@@ -160,6 +164,7 @@ impl Player<'_> {
 
 fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let string = |key| p.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).ok_or_else(|| error(format!("sep.runActionList requires {key}")));
+    let profiles = profiles::folder(p)?;
     let input = string("input")?;
     let output = string("output")?;
     if !Path::new(input).extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
@@ -217,6 +222,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let mut player = Player {
         session: s,
         root,
+        profiles,
         stack: Vec::new(),
         layers: Vec::new(),
         inks: Vec::new(),
@@ -224,11 +230,27 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         trace: Vec::new(),
         stopped: None,
         clipboard_empty: true,
+        trap_footprints: BTreeMap::new(),
         messages: Vec::new(),
     };
     player.remove_background()?;
     for list in lists {
-        if let Err(e) = player.list(list, None) {
+        let result = if list == "TrapTask" {
+            player.play(
+                &player.root.join("AE"),
+                &[Action {
+                    kind: "TrapTask".into(),
+                    position: 1,
+                    params: Element::default(),
+                    children: vec![],
+                    then_actions: vec![],
+                    else_actions: vec![],
+                }],
+            )
+        } else {
+            player.list(list, None)
+        };
+        if let Err(e) = result {
             player.stopped = Some(json!({"list":list,"reason":e.to_string()}));
         }
         if player.stopped.is_some() {
@@ -237,11 +259,16 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     }
     player.session.edit("Artboard Options", |d, _| vectorcraft_pdf::set_preparation_boxes(d, &player.boxes).map_err(error))?;
     let doc = player.doc()?;
+    let output_colors = if let Some(name) = doc.color_profiles.cmyk.as_deref() {
+        json!({"conversion":"preserveNumbers","destination":name,"profiles":"none"})
+    } else {
+        json!({"conversion":"none","profiles":"none"})
+    };
     let (bytes, warnings) = super::fileio::encode_with_warnings(
         doc,
         "pdf",
         &json!({"preserveEditing":true,"createLayers":true,
-        "includeNonPrinting":true,"discardImportedPrintSettings":false,"output":{"conversion":"none","profiles":"none"},"advanced":{"overprint":"preserve","outlineText":true}}),
+        "includeNonPrinting":true,"discardImportedPrintSettings":false,"output":output_colors,"advanced":{"overprint":"preserve","outlineText":true}}),
     )?;
     let bytes = vectorcraft_pdf::preparation_output(bytes, &player.boxes, doc).map_err(error)?;
     write_output(output, &bytes)?;
@@ -254,6 +281,9 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
             let mut strokes = std::collections::BTreeSet::new();
             for id in &leaves {
                 if let Some(node) = doc.node(*id) {
+                    if matches!(node.kind, vectorcraft_doc::NodeKind::Image(_)) && node.appearance.items.is_empty() {
+                        fills.insert(false);
+                    }
                     for item in &node.appearance.items {
                         match item {
                             vectorcraft_doc::AppearanceItem::Fill(f) if !f.paint.is_none() => {

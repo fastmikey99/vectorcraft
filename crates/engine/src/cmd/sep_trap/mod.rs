@@ -12,10 +12,14 @@ use super::{CommandSpec, Session, bad, cmd, has_doc};
 use crate::Result;
 
 mod colour;
+mod index;
 mod pixels;
+mod raster;
+pub(super) use raster::rasterize;
 #[cfg(test)]
 mod tests;
 mod union;
+mod vector;
 
 const C: &str = "sep.trap";
 const SCALE: f64 = 600.0 / 72.0;
@@ -89,13 +93,14 @@ fn gradient_eligibility(g: &vectorcraft_color::gradient::GradientPaint, threshol
     }
 }
 
-fn eligibility(n: &mut Node, doc: &Document, threshold: f32) -> Result<()> {
+fn eligibility(n: &mut Node, doc: &Document, threshold: f32, inherited: bool) -> Result<()> {
     if n.name.as_deref().is_some_and(specialty_name) {
         return Err(bad(C, "prototype does not support metallic or neon artwork"));
     }
     if !matches!(n.kind, NodeKind::Path { .. } | NodeKind::Compound { .. } | NodeKind::Group { .. } | NodeKind::Layer { .. }) {
         return Err(bad(C, "prototype supports vector paths and groups only"));
     }
+    let permission = n.extras().trap_external.unwrap_or(inherited);
     // Recolour each object's own paints, retaining its geometry, clipping, opacity and stacking.
     for item in &mut n.appearance.items {
         let paint = match item {
@@ -105,7 +110,7 @@ fn eligibility(n: &mut Node, doc: &Document, threshold: f32) -> Result<()> {
         if let Paint::Gradient(g) = paint {
             let on = gradient_eligibility(g, threshold)
                 .ok_or_else(|| bad(C, "prototype requires an opaque CMYK gradient with uniform ink/black eligibility"))?;
-            *paint = Paint::solid(if on { Color::WHITE } else { Color::BLACK });
+            *paint = Paint::solid(if on && permission { Color::WHITE } else { Color::BLACK });
             continue;
         }
         if !matches!(paint, Paint::None | Paint::Solid { .. }) {
@@ -118,17 +123,49 @@ fn eligibility(n: &mut Node, doc: &Document, threshold: f32) -> Result<()> {
         }
         vectorcraft_doc::inks::visit_paint(paint, &mut |color, swatch, tint| {
             let (_, on) = paint_ink(doc, color, swatch.as_deref(), *tint, threshold);
-            *color = if on { Color::WHITE } else { Color::BLACK };
+            *color = if on && permission { Color::WHITE } else { Color::BLACK };
             *swatch = None;
             *tint = 1.0;
         });
     }
     if let Some(children) = n.children_mut() {
         for child in children {
-            eligibility(Arc::make_mut(child), doc, threshold)?;
+            eligibility(Arc::make_mut(child), doc, threshold, permission)?;
         }
     }
     Ok(())
+}
+
+fn tag_conflicts(n: &Node, doc: &Document, threshold: f32, inherited: Option<bool>, counts: &mut [usize; 2]) {
+    let tag = n.extras().trap_external.or(inherited);
+    for item in &n.appearance.items {
+        let paint = match item {
+            vectorcraft_doc::AppearanceItem::Fill(f) if f.visible && f.opacity > 0.0 => &f.paint,
+            vectorcraft_doc::AppearanceItem::Stroke(s) if s.visible && s.opacity > 0.0 && s.width > 0.0 => &s.paint,
+            _ => continue,
+        };
+        let eligible = match paint {
+            Paint::Solid { color, swatch, tint } => Some(paint_ink(doc, color, swatch.as_deref(), *tint, threshold).1),
+            Paint::Gradient(g) => gradient_eligibility(g, threshold),
+            _ => None,
+        };
+        match (tag, eligible) {
+            (Some(true), Some(false)) => counts[0] += 1,
+            (Some(false), Some(true)) => counts[1] += 1,
+            _ => (),
+        }
+    }
+    if let Some(cs) = n.children() {
+        for c in cs {
+            tag_conflicts(c, doc, threshold, tag, counts);
+        }
+    }
+}
+
+fn has_render_extras(n: &Node) -> bool {
+    let mut extras = n.extras().clone();
+    extras.trap_external = None;
+    extras != Default::default()
 }
 
 fn options(plate: Option<&str>) -> RenderOptions {
@@ -136,13 +173,15 @@ fn options(plate: Option<&str>) -> RenderOptions {
         background: plate.map(|_| [255; 4]),
         artboards: false,
         anti_alias: AntiAlias::None,
+        smooth_images: false,
+        image_mips: false,
         overprint_preview: true,
         proof: plate.map(|p| ProofSetup { separations: Some(vec![p.into()]), ..Default::default() }),
         ..Default::default()
     }
 }
 
-fn outline(mask: &[bool], w: usize, h: usize, region: Rect) -> Result<PathData> {
+fn outline(mask: &[bool], w: usize, h: usize, region: Rect, cleanup: bool) -> Result<PathData> {
     let mut path = BezPath::new();
     for component in vectorcraft_trace::trace_mask(mask, w, h) {
         for contour in std::iter::once(component.outer).chain(component.holes) {
@@ -157,6 +196,9 @@ fn outline(mask: &[bool], w: usize, h: usize, region: Rect) -> Result<PathData> 
         }
     }
     let path = PathData::from_bezpath(&path);
+    if !cleanup {
+        return Ok(path);
+    }
     log::debug!("trap: cleaning {} anchors", path.subpaths.iter().map(|p| p.anchors.len()).sum::<usize>());
     let spread = vectorcraft_pathops::try_offset_path(&path, 0.01 * MM, vectorcraft_pathops::Join::Miter, 4.0)
         .map_err(|e| bad(C, format!("clip spread: {e}")))?;
@@ -168,6 +210,14 @@ fn image_node(d: &mut Document, key: String, w: u32, h: u32, xf: Affine) -> Node
 }
 
 fn run(s: &mut Session, p: &Value) -> Result<Value> {
+    build(s, p, false)
+}
+
+pub(super) fn trap_task(s: &mut Session) -> Result<Value> {
+    build(s, &json!({"blackThreshold":0.7}), true)
+}
+
+fn build(s: &mut Session, p: &Value, pre_cleanup: bool) -> Result<Value> {
     crate::cancel::check()?;
     #[cfg(not(target_arch = "wasm32"))]
     let started = std::time::Instant::now();
@@ -187,6 +237,18 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let mut source = (**doc).clone();
     source.layers = art;
+    // Match the player's preserve-numbers PDF output: keep existing CMYK/spot inks,
+    // convert RGB process paints (including gradient stops) through the assigned profile.
+    let cms = super::sep::profiles::document_cms(&source);
+    let spots: std::collections::BTreeSet<_> = source.swatches.iter().filter(|w| w.spot).map(|w| w.name.clone()).collect();
+    for layer in &mut source.layers {
+        vectorcraft_doc::inks::visit_node_colors(Arc::make_mut(layer), &mut |color, swatch, _| {
+            if !matches!(color, Color::Cmyk { .. }) && !swatch.as_ref().is_some_and(|s| spots.contains(s)) {
+                let [c, m, y, k] = super::sep::profiles::cmyk(*color, cms.as_ref());
+                *color = Color::cmyk(c, m, y, k);
+            }
+        });
+    }
     source.drop_lookup_cache();
     let bounds = source.art_bounds().ok_or_else(|| bad(C, "Artwork has no bounds"))?.inflate(0.3 * MM, 0.3 * MM);
     let region = Rect::new(
@@ -200,9 +262,14 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     if n > MAX_PIXELS {
         return Err(bad(C, format!("prototype grid {w} x {h} exceeds 64 million pixels at 600 dpi")));
     }
+    let mut conflicts = [0; 2];
+    for layer in &source.layers {
+        tag_conflicts(layer, &source, threshold as f32, None, &mut conflicts);
+    }
+    let conflicts = json!({"taggedPaintsExcludedByInkRules":conflicts[0],"inkEligiblePaintsExcludedByTags":conflicts[1]});
     let mut eligible = source.clone();
     for layer in &mut eligible.layers {
-        eligibility(Arc::make_mut(layer), &source, threshold as f32)?;
+        eligibility(Arc::make_mut(layer), &source, threshold as f32, true)?;
     }
     let mut renderer = Renderer::new();
     log::debug!("trap: rendering {w} x {h}");
@@ -237,17 +304,18 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let colours = colour::samples(&source, &mut nearest, w as usize, region, threshold as f32)?;
     let mask: Vec<_> = nearest.iter().map(Option::is_some).collect();
     let count = mask.iter().filter(|&&v| v).count();
-    let existing: Vec<_> = doc.layers.iter().filter(|l| l.name.as_deref() == Some("Auto Trap-1")).map(|l| l.id).collect();
+    let layer_name = if pre_cleanup { "Trap Layer 1" } else { "Auto Trap-1" };
+    let existing: Vec<_> = doc.layers.iter().filter(|l| l.name.as_deref() == Some(layer_name)).map(|l| l.id).collect();
     crate::cancel::check()?;
     if count == 0 {
         s.edit("Trap", |d, _| {
             d.remove_many(&existing)?;
             Ok(())
         })?;
-        return Ok(json!({"pixels":0,"width":w,"height":h,"blackThreshold":threshold,"seconds":elapsed()}));
+        return Ok(json!({"pixels":0,"width":w,"height":h,"blackThreshold":threshold,"seconds":elapsed(),"tagConflicts":conflicts}));
     }
     log::debug!("trap: tracing {count} pixels");
-    let clip = outline(&mask, w as usize, h as usize, region)?;
+    let clip = outline(&mask, w as usize, h as usize, region, !pre_cleanup)?;
     if clip.is_empty() {
         return Err(bad(C, "clip cleanup unexpectedly removed the band"));
     }
@@ -279,6 +347,10 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
     }
+    if pre_cleanup {
+        vector::insert(s, vector::Band { mask: &mask, process: &process, spot: &spot, plates: &plates, width: w as usize, region }, clip, &existing)?;
+        return Ok(json!({"pixels":count,"width":w,"height":h,"blackThreshold":threshold,"seconds":elapsed(),"tagConflicts":conflicts}));
+    }
     let inks = vectorcraft_doc::cmyk::Inks::new(w, h, process).ok_or_else(|| bad(C, "invalid process samples"))?;
     let blob = if spot_count == 0 {
         ImageBlob::cmyk_tiff(&inks)
@@ -305,17 +377,20 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         d.images.insert(key.clone(), ImageBlob::new("image/png", png.into_inner()));
         let alpha = image_node(d, key, w, h, xf);
         image.extras_mut().mask = Some(Box::new(OpacityMask::new(alpha, true)));
-        let clip = Node::path(d.alloc_id(), clip, Appearance::basic(Paint::solid(Color::BLACK), Paint::None, 0.0));
+        let mut clip = Node::path(d.alloc_id(), clip, Appearance::basic(Paint::None, Paint::None, 0.0));
+        if let NodeKind::Path { clipping, .. } = &mut clip.kind {
+            *clipping = true;
+        }
         let mut group = Node::group(d.alloc_id(), vec![Arc::new(clip), Arc::new(image)]);
         if let NodeKind::Group { clip, .. } = &mut group.kind {
             *clip = true;
         }
-        let mut layer = Node::layer(d.alloc_id(), "Auto Trap-1", LayerColor::Preset(0));
+        let mut layer = Node::layer(d.alloc_id(), layer_name, LayerColor::Preset(0));
         if let Some(children) = layer.children_mut() {
             children.push(Arc::new(group));
         }
-        d.insert(None, 0, layer)?;
+        d.insert(None, if pre_cleanup { usize::MAX } else { 0 }, layer)?;
         Ok(())
     })?;
-    Ok(json!({"pixels":count,"width":w,"height":h,"blackThreshold":threshold,"seconds":elapsed()}))
+    Ok(json!({"pixels":count,"width":w,"height":h,"blackThreshold":threshold,"seconds":elapsed(),"tagConflicts":conflicts}))
 }

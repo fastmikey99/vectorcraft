@@ -47,6 +47,9 @@ fn replacement_undo_and_pdf_mask() {
     let reply = s.execute(C, &json!({"blackThreshold":0.7})).unwrap();
     assert!(reply["pixels"].as_u64().unwrap() > 0);
     assert_eq!(s.doc().unwrap().doc.layers[0].name.as_deref(), Some("Auto Trap-1"));
+    let trap = &s.doc().unwrap().doc.layers[0];
+    let clip = &trap.children().unwrap()[0].children().unwrap()[0];
+    assert!(clip.appearance.fill_paint().is_none(), "a clip must not add black ink outside its masked image after cleanup");
     let bytes = vectorcraft_pdf::export(&s.doc().unwrap().doc, &Default::default()).unwrap();
     assert!(String::from_utf8_lossy(&bytes).contains("/SMask"));
     let read = vectorcraft_pdf::import(&bytes).unwrap();

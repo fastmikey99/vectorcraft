@@ -147,8 +147,24 @@ impl Player<'_> {
         } else {
             "Opaque White".into()
         };
-        let selected = actions::leaf_targets(self.doc()?, &self.ids()?);
-        let all = actions::leaf_targets(self.doc()?, &selection::all_objects(self.doc()?, false));
+        let doc = self.doc()?;
+        let selected = actions::leaf_targets(doc, &self.ids()?);
+        let all = actions::leaf_targets(doc, &selection::all_objects(doc, false));
+        let cached: std::collections::BTreeMap<_, _> = self
+            .trap_footprints
+            .iter()
+            .filter(|(id, (node, _))| doc.node(**id) == Some(node))
+            .filter(|(id, _)| !selected.iter().any(|s| doc.ancestry(*s).is_some_and(|a| a.contains(id))))
+            .map(|(id, (_, path))| (*id, path.clone()))
+            .collect();
+        let mut seen = std::collections::BTreeSet::new();
+        let all: Vec<_> = all
+            .into_iter()
+            .filter_map(|id| {
+                let replacement = doc.ancestry(id).and_then(|parents| parents.into_iter().find(|p| cached.contains_key(p))).unwrap_or(id);
+                seen.insert(replacement).then_some(replacement)
+            })
+            .collect();
         let brushes = vectorcraft_brush::library(self.doc()?);
         self.session.edit("Offset Path", |d, sel| {
             let mut region = PathData::default();
@@ -165,7 +181,10 @@ impl Player<'_> {
                 if !chosen && (!exclude || region.is_empty()) {
                     continue;
                 }
-                let path = clipped_footprint(d, &n, &brushes)?;
+                let path = match cached.get(id) {
+                    Some(path) => path.clone(),
+                    None => clipped_footprint(d, &n, &brushes)?,
+                };
                 region = combine(&region, &path, if chosen { BoolOp::Union } else { BoolOp::Difference })?;
             }
             let region = offset(&region, options)?;
@@ -212,10 +231,14 @@ impl Player<'_> {
                 if path.is_empty() {
                     continue;
                 }
-                let mut new = Node::path(if target == "OriginalPath" { *id } else { d.alloc_id() }, path, (*n.appearance).clone());
-                new.name = n.name.clone();
-                new.opacity = n.opacity;
-                new.blend = n.blend;
+                let mut new = n.clone();
+                if target != "OriginalPath" {
+                    new.id = d.alloc_id();
+                }
+                match &mut new.kind {
+                    NodeKind::Path { path: original, .. } => *original = path,
+                    _ => new.kind = NodeKind::Path { path, rule: vectorcraft_geom::FillRule::NonZero, clipping: false, guide: false, live: None },
+                }
                 results.push(new.id);
                 d.insert(parent, at + usize::from(target == "CopyInFront"), new)?;
             }

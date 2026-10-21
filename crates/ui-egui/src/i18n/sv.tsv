@@ -5239,3 +5239,20 @@ theme	Appearance	Utseende
 @msg	unsupported SpreadTarget {0}	unsupported SpreadTarget {0}
 @msg	unsupported Shaper operation {0}	unsupported Shaper operation {0}
 @msg	not implemented for nonempty selection: {0}	not implemented for nonempty selection: {0}
+
+# Local PAL profile discovery
+@msg	profiles must be a nonempty folder path	profiles must be a nonempty folder path
+@msg	ambiguous document profile: {want}	ambiguous document profile: {want}
+@msg	profile folder exceeds 4096 entries	profile folder exceeds 4096 entries
+@msg	PAL profile folders are unavailable on the web	PAL profile folders are unavailable on the web
+@msg	document profile unavailable: {name}; set VECTORCRAFT_PROFILES or profiles to an ICC folder{detail}	document profile unavailable: {name}; set VECTORCRAFT_PROFILES or profiles to an ICC folder{detail}
+
+# PAL Dark trapping and rasterization
+@msg	unsupported trap tag {0}	unsupported trap tag {0}
+@msg	unsupported ExternalTrap {0}	unsupported ExternalTrap {0}
+@msg	TrapTask: {0} pixels; {1} seconds	TrapTask: {0} pixels; {1} seconds
+@msg	Rasterize supports 600 dpi, AntiAliasing None, ConsiderBackground 0	Rasterize supports 600 dpi, AntiAliasing None, ConsiderBackground 0
+@msg	Rasterize selection has no bounds	Rasterize selection has no bounds
+@msg	Rasterize exceeds 64 million pixels	Rasterize exceeds 64 million pixels
+@msg	Trap tag conflicts: {0} paints excluded by ink rules; {1} paints excluded by tags	Trap tag conflicts: {0} paints excluded by ink rules; {1} paints excluded by tags
+@msg	trap vector band exceeds one million runs	trap vector band exceeds one million runs
