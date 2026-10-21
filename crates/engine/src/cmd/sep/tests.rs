@@ -44,8 +44,10 @@ fn player(s: &mut Session) -> Player<'_> {
         trace: vec![],
         stopped: None,
         clipboard_empty: true,
+        intent_scope: None,
         trap_footprints: BTreeMap::new(),
         messages: vec![],
+        no_trap: None,
     }
 }
 fn step(p: &mut Player<'_>, kind: &str, params: &str) -> Result<usize> {
@@ -515,4 +517,372 @@ fn trap_tags_inherit_remove_and_roundtrip_without_overriding_black() {
     step(&mut p, "SelectAllObjects", "").unwrap();
     step(&mut p, "SetTrapTags", &trap_ticket("Always")).unwrap();
     assert_eq!(step(&mut p, "TrapTask", "").unwrap(), 0);
+}
+
+#[test]
+fn no_trap_intent_selects_prepared_ids_and_splits_rectangles_without_repainting() {
+    use vectorcraft_color::{Color, Paint};
+    use vectorcraft_doc::{Appearance, Node};
+    use vectorcraft_geom::shapes;
+    let mut d = Document::new(100.0, 100.0);
+    let layer = d.layers[0].id;
+    d.node_mut(layer).unwrap().name = Some("Artwork".into());
+    let mut ids = Vec::new();
+    for x in [10.0, 50.0] {
+        let n = Node::path(
+            d.alloc_id(),
+            shapes::rectangle(Rect::new(x, 10.0, x + 20.0, 30.0)),
+            Appearance::basic(Paint::solid(Color::cmyk(0.4, 0.2, 0.0, 0.0)), Paint::None, 0.0),
+        );
+        ids.push(n.id);
+        d.insert(Some(layer), usize::MAX, n).unwrap();
+    }
+    let mut s = Session::new();
+    s.add_document(d, None);
+    let mut p = player(&mut s);
+    let mm = 25.4 / 72.0;
+    let intent = intents::read(
+        &json!({"intents":{"noTrap":{"objectIds":[ids[1]],"rectangles":[{"x":10.0*mm,"y":10.0*mm,"width":10.0*mm,"height":20.0*mm}]}}}),
+    )
+    .unwrap()
+    .no_trap
+    .unwrap();
+    p.apply_no_trap(intent).unwrap();
+    let selected = p.ids().unwrap();
+    assert_eq!(selected.len(), 2);
+    assert!(selected.contains(&ids[1]));
+    let doc = p.doc().unwrap();
+    let original = doc.node(ids[0]).unwrap();
+    assert!((original.visual_bounds().unwrap().width() - 10.0).abs() < 1e-6);
+    let split = doc.node(*selected.iter().find(|&&id| id != ids[1]).unwrap()).unwrap();
+    assert_eq!(split.appearance, original.appearance);
+    assert!((split.visual_bounds().unwrap().x1 - 20.0).abs() < 1e-6);
+    assert_eq!(p.trace.last().unwrap()["action"], "SelectNoTrap");
+}
+
+#[test]
+fn no_trap_intent_rejects_invalid_regions_and_missing_ticket() {
+    for value in [json!(null), json!({"rectangles":[{"x":0,"y":0,"width":-1,"height":5}]}), json!({"objectIds":[-1]}), json!({"rectangle":[]})] {
+        assert!(intents::read(&json!({"intents":{"noTrap":value}})).is_err());
+    }
+    let f = Fixture::new();
+    f.input();
+    f.pal("main", "");
+    let error = Session::new()
+        .execute(
+            "sep.runActionList",
+            &json!({"root":f.0,"lists":["main"],"input":f.0.join("input.pdf"),"output":f.0.join("output.pdf"),"intents":{"noTrap":{"objectIds":[]}}}),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("immediately followed by TrapTask"));
+}
+
+#[test]
+fn mixed_mask_blocks_trap_and_zero_choke_whp_but_retains_light_underprint() {
+    use vectorcraft_color::{Color, Paint};
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    let left = rect(&mut s, 10., 10., 20., 20.);
+    let right = rect(&mut s, 50., 10., 20., 20.);
+    s.edit("Trap", |d, _| {
+        d.layers.iter_mut().for_each(|l| std::sync::Arc::make_mut(l).name = Some("Artwork".into()));
+        for id in [left, right] {
+            d.node_mut(id).unwrap().appearance.set_fill(Paint::solid(Color::cmyk(1., 0., 0., 0.)));
+        }
+        Ok(())
+    })
+    .unwrap();
+    let mut p = player(&mut s);
+    p.apply_no_trap(intents::read(&json!({"intents":{"noTrap":{"objectIds":[left]}}})).unwrap().no_trap.unwrap()).unwrap();
+    step(&mut p, "RenameObjects", "<ObjectName>LIGHT</ObjectName>").unwrap();
+    under(&mut p, true, 0.);
+    let mask = p.ids().unwrap()[0];
+    step(&mut p, "SetFillFlatPaint", "<Percentage>0</Percentage>").unwrap();
+    step(&mut p, "RenameObjects", "<ObjectName>LIGHT NO BLEED</ObjectName>").unwrap();
+    step(&mut p, "SelectLayerByName", "<LayerName>Artwork</LayerName><Mode>NewSelection</Mode>").unwrap();
+    step(&mut p, "MoveObjectsToLayer", "").unwrap();
+    p.trap_task().unwrap();
+    let trap = p.doc().unwrap().layers.iter().find(|n| n.name.as_deref() == Some("Trap Layer 1")).unwrap();
+    assert!(trap.visual_bounds().unwrap().x0 > 49., "only the right object's band exists");
+    // WHP converts the temporary white to K50 before its Back/Front operations.
+    p.session
+        .edit("Fill", |d, _| {
+            d.node_mut(mask).unwrap().appearance.set_fill(Paint::solid(Color::cmyk(0., 0., 0., 0.5)));
+            Ok(())
+        })
+        .unwrap();
+    p.session.doc_mut().unwrap().selection.set([left]);
+    under(&mut p, true, 0.);
+    assert!(p.ids().unwrap().is_empty(), "no zero-choke dark WHP under the front mask");
+    p.session.doc_mut().unwrap().selection.set([mask]);
+    step(&mut p, "ArrangeObjects", "<MoveDirection>Back</MoveDirection>").unwrap();
+    p.session.doc_mut().unwrap().selection.set([left]);
+    under(&mut p, true, 0.);
+    assert!((selected_area(&p) - 400.).abs() < 0.01, "a back mask does not cover selected art");
+    step(&mut p, "DeleteObjects", "").unwrap();
+    p.session.doc_mut().unwrap().selection.set([mask]);
+    step(&mut p, "ArrangeObjects", "<MoveDirection>Front</MoveDirection>").unwrap();
+    p.session.doc_mut().unwrap().selection.set([left, mask]);
+    under(&mut p, false, 0.2);
+    let expected = (20. - 2. * 0.2 * 72. / 25.4_f64).powi(2);
+    assert!((selected_area(&p) - expected).abs() < 0.01, "light-style choked WHP is retained");
+}
+
+#[test]
+fn runner_applies_intent_after_preparation_immediately_before_explicit_ticket() {
+    let f = Fixture::new();
+    f.input();
+    f.pal(
+        "prepare",
+        &[
+            a("SelectAllObjects", ""),
+            a("CleanObjects", "<ExecuteClip>1</ExecuteClip>"),
+            a("CreateLayerOnTop", "<LayerName>Artwork</LayerName>"),
+            a("MoveObjectsToLayer", ""),
+            a("SelectAllObjects", ""),
+            a("InvertObjectSelection", ""),
+        ]
+        .join(""),
+    );
+    f.pal("Trapping_Supacolour_Standard (NEW)", &a("RenameObjects", "<ObjectName>LIGHT</ObjectName>"));
+    let mut s = Session::new();
+    let r = s.execute("sep.runActionList", &json!({"root":f.0,"lists":["prepare","Trapping_Supacolour_Standard (NEW)","TrapTask"],"input":f.0.join("input.pdf"),"output":f.0.join("output.pdf"),"intents":{"noTrap":{"rectangles":[{"x":0,"y":0,"width":40,"height":40}]}}})).unwrap();
+    assert_eq!(r["status"], "completed", "{r}");
+    let trace = r["trace"].as_array().unwrap();
+    let at = trace.iter().position(|t| t["action"] == "SelectNoTrap").unwrap();
+    assert_eq!(trace[at]["objectsAffected"], 1);
+    assert_eq!(trace[at + 1]["action"], "RenameObjects");
+    assert_eq!(trace[at + 1]["objectsAffected"], 1);
+    assert_eq!(trace[at + 2]["action"], "TrapTask");
+}
+
+#[test]
+fn metallic_intents_are_scoped_and_restore_selection() {
+    let f = Fixture::new();
+    f.pal("metal", &[
+        a("SelectObjectsByAttributes", "<SelectionMode>AddToSelection</SelectionMode><Rule Type=\"SeparationNameRule\"><SeparationName>M-2</SeparationName><SeparationRelation>Using</SeparationRelation></Rule>"),
+        a("RemoveFill", ""),
+        a("CreateSeparation", "<SeparationName>M-2</SeparationName><PreviewRed>0.8</PreviewRed><PreviewGreen>0.7</PreviewGreen><PreviewBlue>0.3</PreviewBlue>"),
+        a("SetFillFlatPaint", "<Percentage>100</Percentage>"),
+        a("RenameObjects", "<ObjectName>M-2</ObjectName>"),
+    ].concat());
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    s.execute("shape.rectangle", &json!({"x":10,"y":10,"width":20,"height":20})).unwrap();
+    let first = s.doc().unwrap().selection.objects[0];
+    s.execute("shape.rectangle", &json!({"x":50,"y":10,"width":20,"height":20})).unwrap();
+    let second = s.doc().unwrap().selection.objects[0];
+    let mut p = player(&mut s);
+    p.root = f.0.canonicalize().unwrap();
+    step(
+        &mut p,
+        "CreateSeparation",
+        "<SeparationName>M-2</SeparationName><PreviewRed>0.8</PreviewRed><PreviewGreen>0.7</PreviewGreen><PreviewBlue>0.3</PreviewBlue>",
+    )
+    .unwrap();
+    step(&mut p, "SetFillFlatPaint", "<Percentage>50</Percentage>").unwrap();
+    let intents = intents::read(&json!({"intents":{"metallic":[{"objects":{"ids":[first.0]},"list":"metal"}]}})).unwrap();
+    p.apply_intents(&intents).unwrap();
+    assert_eq!(p.ids().unwrap(), vec![second]);
+    assert_eq!(p.doc().unwrap().node(first).unwrap().name.as_deref(), Some("M-2"));
+    assert_ne!(p.doc().unwrap().node(second).unwrap().name.as_deref(), Some("M-2"));
+    assert!(matches!(p.doc().unwrap().node(second).unwrap().appearance.fill_paint(),vectorcraft_color::Paint::Solid{tint,..} if tint == 0.5));
+    let by_spot = intents::read(&json!({"intents":{"metallic":[{"objects":{"spot":"M-2"},"list":"metal"}]}})).unwrap();
+    p.apply_intents(&by_spot).unwrap();
+    assert_eq!(p.doc().unwrap().node(second).unwrap().name.as_deref(), Some("M-2"));
+    let by_rect = intents::read(&json!({"intents":{"metallic":[{"objects":{"rectMm":[0,0,12,12]},"list":"metal"}]}})).unwrap();
+    p.apply_intents(&by_rect).unwrap();
+    let bad = intents::read(&json!({"intents":{"metallic":[{"objects":{"ids":[999999]},"list":"metal"}]}})).unwrap();
+    assert!(p.apply_intents(&bad).is_err());
+    assert!(intents::read(&json!({"intents":{"metallic":[{"objects":{"spot":"ink","typo":true},"list":"metal"}]}})).is_err());
+}
+
+#[test]
+fn clip_on_shape_preserves_layers_unselected_siblings_and_overprint() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    let mut ids = vec![];
+    for x in [0, 10, 20] {
+        s.execute("shape.rectangle", &json!({"x":x,"y":0,"width":10,"height":10})).unwrap();
+        ids.push(s.doc().unwrap().selection.objects[0]);
+    }
+    let mut p = player(&mut s);
+    step(&mut p, "CreateLayerOnTop", "<LayerName>Upper</LayerName>").unwrap();
+    p.call("shape.rectangle", json!({"x":0,"y":0,"width":25,"height":5})).unwrap();
+    let top = p.ids().unwrap()[0];
+    step(&mut p, "MoveObjectsToLayer", "").unwrap();
+    p.session.doc_mut().unwrap().selection.set([ids[0], ids[2]]);
+    step(&mut p, "SetFillOverprint", "").unwrap();
+    p.session.doc_mut().unwrap().selection.set([ids[0], ids[2], top]);
+    step(&mut p, "ClipOnShape", "").unwrap();
+    assert_eq!(p.ids().unwrap().len(), 2);
+    assert!(p.doc().unwrap().node(top).is_none());
+    assert_eq!(p.doc().unwrap().layers.len(), 2);
+    for id in p.ids().unwrap() {
+        let group = p.doc().unwrap().node(id).unwrap();
+        assert!(group.clips());
+        let cs = group.children().unwrap();
+        assert!(cs[0].appearance.fill_paint().is_none());
+        assert!(cs[1].appearance.fill().unwrap().overprint);
+    }
+    let parent = p.doc().unwrap().parent_of(ids[1]).unwrap();
+    assert_eq!(p.doc().unwrap().node(parent).unwrap().children().unwrap()[1].id, ids[1]);
+}
+
+#[test]
+fn remove_fill_preserves_stroke_and_silver_underprint() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    s.execute("shape.rectangle", &json!({"x":0,"y":0,"width":20,"height":20})).unwrap();
+    let mut p = player(&mut s);
+    step(&mut p, "SelectSeparationByName", "<SeparationName>Black</SeparationName>").unwrap();
+    step(&mut p, "SetStrokeFlatPaint", "<Percentage>100</Percentage>").unwrap();
+    step(&mut p, "SetStrokeWidth", "<Width>0.1</Width>").unwrap();
+    step(&mut p, "RemoveFill", "").unwrap();
+    let id = p.ids().unwrap()[0];
+    let n = p.doc().unwrap().node(id).unwrap();
+    assert!(n.appearance.fill().is_none());
+    assert!(!n.appearance.stroke_paint().is_none());
+    step(
+        &mut p,
+        "CreateSeparation",
+        "<SeparationName>M-2</SeparationName><PreviewRed>0.8</PreviewRed><PreviewGreen>0.7</PreviewGreen><PreviewBlue>0.3</PreviewBlue>",
+    )
+    .unwrap();
+    step(&mut p, "SetFillFlatPaint", "<Percentage>100</Percentage>").unwrap();
+    step(&mut p,"AddWhiteUnderPrint","<TrappingMode>Spread</TrappingMode><Distance>0</Distance><JoinType>Round</JoinType><ExcludeCoveredAreas>1</ExcludeCoveredAreas><ExcludeWhiteObjects>1</ExcludeWhiteObjects>").unwrap();
+    step(
+        &mut p,
+        "CreateSeparation",
+        "<SeparationName>Silver</SeparationName><PreviewRed>0.6</PreviewRed><PreviewGreen>0.6</PreviewGreen><PreviewBlue>0.6</PreviewBlue>",
+    )
+    .unwrap();
+    step(&mut p, "SetFillFlatPaint", "<Percentage>100</Percentage>").unwrap();
+    step(&mut p, "SetFillOverprint", "").unwrap();
+    let n = p.doc().unwrap().node(p.ids().unwrap()[0]).unwrap();
+    assert!(n.appearance.fill().unwrap().overprint);
+    assert!(matches!(n.appearance.fill_paint(),vectorcraft_color::Paint::Solid{swatch:Some(ref name),..} if name=="Silver"));
+}
+
+#[test]
+fn silver_underprint_is_not_erased_by_overprinting_white_layers() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    let back = rect(&mut s, 0., 0., 20., 20.);
+    let front = rect(&mut s, 0., 0., 20., 20.);
+    let mut p = player(&mut s);
+    p.session.doc_mut().unwrap().selection.set([front]);
+    step(
+        &mut p,
+        "CreateSeparation",
+        "<SeparationName>WHP</SeparationName><PreviewRed>1</PreviewRed><PreviewGreen>0.5</PreviewGreen><PreviewBlue>1</PreviewBlue>",
+    )
+    .unwrap();
+    step(&mut p, "SetFillFlatPaint", "<Percentage>100</Percentage>").unwrap();
+    step(&mut p, "SetFillOverprint", "").unwrap();
+    p.session.doc_mut().unwrap().selection.set([back]);
+    under(&mut p, true, 0.);
+    assert!((selected_area(&p) - 400.).abs() < 0.01);
+    step(&mut p, "DeleteObjects", "").unwrap();
+    p.session.doc_mut().unwrap().selection.set([front]);
+    step(&mut p, "SetFillKnockout", "").unwrap();
+    p.session.doc_mut().unwrap().selection.set([back]);
+    under(&mut p, true, 0.);
+    assert!(p.ids().unwrap().is_empty());
+}
+
+#[test]
+fn move_consolidates_duplicate_named_layers_into_the_topmost_selected_layer() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    let first = rect(&mut s, 0., 0., 10., 10.);
+    let mut p = player(&mut s);
+    step(&mut p, "CreateLayerOnTop", "<LayerName>Lower</LayerName>").unwrap();
+    step(&mut p, "MoveObjectsToLayer", "").unwrap();
+    let lower = p.layers[0];
+    step(&mut p, "CreateLayerOnTop", "<LayerName>Upper</LayerName>").unwrap();
+    let upper = p.layers[0];
+    p.layers = vec![upper, lower];
+    step(&mut p, "RenameLayers", "<LayerName>Silver layer</LayerName>").unwrap();
+    step(&mut p, "MoveObjectsToLayer", "").unwrap();
+    assert_eq!(p.doc().unwrap().parent_of(first), Some(upper));
+    p.layers.clear();
+    assert_eq!(p.active_layer().unwrap(), upper);
+}
+
+#[test]
+fn combined_intents_apply_metallic_after_preparation_before_no_trap_ticket() {
+    for ticket in ["Trapping_Supacolour_Standard (NEW)", "(2b)/Trapping_Supacolour_Standard (NEW).pal"] {
+        let f = Fixture::new();
+        f.input();
+        f.pal(
+            "prepare",
+            &[
+                a("SelectAllObjects", ""),
+                a("CleanObjects", "<ExecuteClip>1</ExecuteClip>"),
+                a("CreateLayerOnTop", "<LayerName>Artwork</LayerName>"),
+                a("MoveObjectsToLayer", ""),
+                a("SelectAllObjects", ""),
+                a("InvertObjectSelection", ""),
+            ]
+            .concat(),
+        );
+        f.pal(
+            "metal",
+            &[
+                a("RemoveFill", ""),
+                a(
+                    "CreateSeparation",
+                    "<SeparationName>M-2</SeparationName><PreviewRed>0.8</PreviewRed><PreviewGreen>0.7</PreviewGreen><PreviewBlue>0.3</PreviewBlue>",
+                ),
+                a("SetFillFlatPaint", "<Percentage>100</Percentage>"),
+                a("RenameObjects", "<ObjectName>M-2</ObjectName>"),
+            ]
+            .concat(),
+        );
+        f.pal(ticket.trim_end_matches(".pal"), &a("RenameObjects", "<ObjectName>LIGHT</ObjectName>"));
+        let mut s = Session::new();
+        let result = s
+            .execute(
+                "sep.runActionList",
+                &json!({
+                    "root": f.0, "lists": ["prepare", ticket, "TrapTask"],
+                    "input": f.0.join("input.pdf"), "output": f.0.join("output.pdf"),
+                    "intents": {
+                        "metallic": [{"objects": {"rectMm": [0, 0, 40, 40]}, "list": "metal"}],
+                        "noTrap": {"rectangles": [{"x": 0, "y": 0, "width": 40, "height": 40}]}
+                    }
+                }),
+            )
+            .unwrap();
+        assert_eq!(result["status"], "completed", "{result}");
+        let trace = result["trace"].as_array().unwrap();
+        let metal = trace.iter().position(|t| t["action"] == "SelectIntent").unwrap();
+        let no_trap = trace.iter().position(|t| t["action"] == "SelectNoTrap").unwrap();
+        assert_eq!(trace[metal - 1]["list"], "prepare");
+        assert_eq!(trace[metal]["objects"].as_array().unwrap().len(), 1);
+        assert_eq!(trace[no_trap - 1]["list"], "metal");
+        assert_eq!(trace[no_trap]["objectsAffected"], 1);
+        assert_eq!(trace[no_trap + 1]["action"], "RenameObjects");
+        assert_eq!(trace[no_trap + 2]["action"], "TrapTask");
+        let d = &s.doc().unwrap().doc;
+        let light = selection::all_objects(d, false).into_iter().filter_map(|id| d.node(id)).find(|n| n.name.as_deref() == Some("LIGHT")).unwrap();
+        assert!(matches!(light.appearance.fill_paint(), vectorcraft_color::Paint::Solid {swatch: Some(ref name), ..} if name == "M-2"));
+    }
+}
+
+#[test]
+fn shared_intent_parser_rejects_unknown_keys_and_each_invalid_payload() {
+    assert!(intents::read(&json!({})).unwrap().no_trap.is_none());
+    assert!(intents::read(&json!({"intents": {}})).unwrap().no_trap.is_none());
+    for intents in [
+        json!(null),
+        json!({"noTrap": {}, "metallic": [], "unknown": true}),
+        json!({"noTrap": null, "metallic": []}),
+        json!({"noTrap": {}, "metallic": null}),
+        json!({"noTrap": {}, "metallic": [{"objects": {"objectIds": [1]}, "list": "metal"}]}),
+        json!({"noTrap": {"ids": [1]}, "metallic": []}),
+    ] {
+        assert!(intents::read(&json!({"intents": intents})).is_err(), "{intents}");
+    }
 }

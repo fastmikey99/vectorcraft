@@ -97,7 +97,8 @@ fn spot_inks_stay_on_their_plate_and_excluded_names_block_them() {
         vectorcraft_doc::inks::visit_node_colors(Arc::make_mut(art), &mut |_, _, tint| *tint = 0.0);
     }
     assert_eq!(s.execute(C, &json!({"blackThreshold":0.7})).unwrap()["pixels"], 0, "zero-tint ink");
-    for name in ["NEON-Test", "M-Test"] {
+    {
+        let name = "NEON-Test";
         let mut s = session(Color::cmyk(1.0, 0.0, 0.0, 0.0));
         let d = Arc::make_mut(&mut s.doc_mut().unwrap().doc);
         Arc::make_mut(&mut Arc::make_mut(&mut d.layers[0]).children_mut().unwrap()[0]).name = Some(name.into());
@@ -317,4 +318,41 @@ fn gradient_eligibility_requires_a_proven_constant_ink_predicate() {
     let inks = d.images.values().find_map(ImageBlob::cmyk).unwrap();
     let cyan: std::collections::BTreeSet<_> = inks.data.as_chunks::<4>().0.iter().map(|p| p[0]).filter(|v| *v > 0).collect();
     assert!(cyan.len() > 10, "gradient samples remain a ramp rather than one flat tint");
+}
+
+#[test]
+fn white_no_bleed_masks_suppress_coincident_edges_in_both_trap_outputs() {
+    for task in [false, true] {
+        for front in [false, true] {
+            let mut s = session(Color::cmyk(1.0, 0.0, 0.0, 0.0));
+            s.edit("Trap", |d, _| {
+                let layer = d.layers[0].id;
+                let mut mask = Node::path(
+                    d.alloc_id(),
+                    shapes::rectangle(Rect::new(5.0, 5.0, 25.0, 25.0)),
+                    Appearance::basic(Paint::solid(Color::cmyk(0.0, 0.0, 0.0, 0.0)), Paint::None, 0.0),
+                );
+                mask.name = Some("LIGHT NO BLEED".into());
+                d.insert(Some(layer), if front { usize::MAX } else { 0 }, mask)?;
+                Ok(())
+            })
+            .unwrap();
+            let result = if task { trap_task(&mut s) } else { s.execute(C, &json!({"blackThreshold":0.7})) }.unwrap();
+            if front {
+                assert_eq!(result["pixels"], 0);
+            } else {
+                assert!(result["pixels"].as_u64().unwrap() > 0, "a white mask behind the art must not suppress visible ink");
+            }
+        }
+    }
+}
+
+#[test]
+fn metallic_object_names_use_the_existing_ink_predicate() {
+    for name in ["M-1", "M-2", "DK M-2", "M-28", "DK M-SPOT"] {
+        let mut s = session(Color::cmyk(1.0, 0.0, 0.0, 0.0));
+        let d = Arc::make_mut(&mut s.doc_mut().unwrap().doc);
+        Arc::make_mut(&mut Arc::make_mut(&mut d.layers[0]).children_mut().unwrap()[0]).name = Some(name.into());
+        assert!(s.execute(C, &json!({"blackThreshold":0.7})).unwrap()["pixels"].as_u64().unwrap() > 0);
+    }
 }
