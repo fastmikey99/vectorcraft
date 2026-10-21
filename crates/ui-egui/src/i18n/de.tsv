@@ -4823,6 +4823,18 @@ effect	Soft	Weich
 	Unassigned	Nicht zugewiesen
 @msg	Invalid separation context or too many entries	Ungültiger Farbauszugskontext oder zu viele Einträge
 @msg	Invalid or duplicate separation name/component	Ungültiger oder doppelter Farbauszugsname bzw. Komponente
+	Remove Soft Pixels	Weiche Pixel entfernen
+@msg	select one image to remove its soft pixels	wählen Sie ein Bild aus, um seine weichen Pixel zu entfernen
+@msg	the image is linked: embed it to remove its soft pixels	das Bild ist verknüpft: betten Sie es ein, um seine weichen Pixel zu entfernen
+@msg	the image's opacity mask isn't one greyscale image	die Deckkraftmaske des Bildes ist nicht ein einzelnes Graustufenbild
+@msg	the image has no transparency: nothing to remove	das Bild hat keine Transparenz: nichts zu entfernen
+@msg	the image's pixels couldn't be written	die Pixel des Bildes konnten nicht geschrieben werden
+@msg	removing soft pixels failed its check: nothing was changed	das Entfernen weicher Pixel hat die Prüfung nicht bestanden: nichts wurde geändert
+@msg	the image has its own transparency and an opacity mask: release the mask first	das Bild hat eigene Transparenz und eine Deckkraftmaske: geben Sie zuerst die Maske frei
+@msg	level must be a whole number from 1 to 255	level muss eine ganze Zahl von 1 bis 255 sein
+@msg	copies must be true or false	copies muss true oder false sein
+@msg	the image's opacity mask has its own transparency: release it first	die Deckkraftmaske des Bildes hat eigene Transparenz: geben Sie sie zuerst frei
+@msg	id must name an image	id muss ein Bild bezeichnen
 	Run Separation Action Lists	Aktionslisten für Farbseparation ausführen
 @msg	PAL XML nesting exceeds 32 levels	PAL-XML-Verschachtelung überschreitet 32 Ebenen
 @msg	PAL action has no Type	PAL-Aktion hat keinen Type

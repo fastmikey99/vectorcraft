@@ -157,6 +157,39 @@ pub fn place_file(app: &mut VectorcraftApp, place: &protocol::Place) -> Result<V
     Ok(r.get("ids").and_then(serde_json::Value::as_array).map(|ids| ids.iter().filter_map(serde_json::Value::as_u64).collect()).unwrap_or_default())
 }
 
+/// What a `vectorcraft:solidify` did (`vectorcraft:solidified`): the images changed (none when no
+/// pixel was soft), where their transparency is stored (`alpha` or `mask`), the level, and the
+/// pixels counted (soft before; clear and opaque after).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Solidified {
+    pub ids: Vec<u64>,
+    pub form: String,
+    pub level: u64,
+    pub soft: u64,
+    pub clear: u64,
+    pub opaque: u64,
+}
+
+/// Remove the soft pixels of the one selected image (`object.image.solidifyAlpha`): one undo step,
+/// with `copies` also for its copies at the same printed size.
+pub fn solidify(app: &mut VectorcraftApp, request: &protocol::Solidify) -> Result<Solidified, String> {
+    let st = app.session.active().ok_or("vectorcraft:solidify: no document is open")?;
+    let id = match st.selection.objects.as_slice() {
+        [id] if matches!(st.doc.node(*id).map(|n| &n.kind), Some(vectorcraft_doc::NodeKind::Image(_))) => *id,
+        _ => return Err("vectorcraft:solidify: select one image".to_string()),
+    };
+    let r = app.run("object.image.solidifyAlpha", serde_json::json!({ "id": id.0, "level": request.level, "copies": request.copies }))?;
+    let n = |k: &str| r.get(k).and_then(serde_json::Value::as_u64).ok_or_else(|| format!("vectorcraft:solidify: the answer has no `{k}`"));
+    Ok(Solidified {
+        ids: r.get("ids").and_then(serde_json::Value::as_array).map(|a| a.iter().filter_map(serde_json::Value::as_u64).collect()).unwrap_or_default(),
+        form: r.get("form").and_then(serde_json::Value::as_str).unwrap_or("alpha").to_string(),
+        level: n("level")?,
+        soft: n("softPixels")?,
+        clear: n("clearPixels")?,
+        opaque: n("opaquePixels")?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +323,42 @@ mod tests {
         app.run("edit.undo", json!({})).unwrap();
         assert_eq!(app.session.active().unwrap().doc, before);
         assert!(protocol::place_copies(Some("b.png".into()), Some(PNG_B.to_vec()), Some(vec![0.0, 0.0, 1.0, 1.0]), Some(true)).is_err());
+    }
+
+    /// A 4 × 1 RGBA PNG: clear, soft below and at the default level, opaque.
+    fn soft_png() -> Vec<u8> {
+        let img = image::RgbaImage::from_raw(4, 1, vec![9, 8, 7, 0, 1, 2, 3, 127, 4, 5, 6, 128, 7, 7, 7, 255]).unwrap();
+        let mut out = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+        out
+    }
+
+    #[test]
+    fn solidify_takes_the_selected_image_and_its_copies_in_one_undo_step() {
+        let mut app = app();
+        let png = soft_png();
+        let put = |app: &mut VectorcraftApp, rect: [f64; 4]| {
+            app.run("select.set", json!({"ids": []})).unwrap();
+            place_file(app, &protocol::place(Some("s.png".into()), Some(png.clone()), Some(rect.to_vec())).unwrap()).unwrap()[0]
+        };
+        let (a, b) = (put(&mut app, [0.0, 0.0, 40.0, 10.0]), put(&mut app, [0.0, 20.0, 40.0, 10.0]));
+        let one = protocol::solidify(None, None).unwrap();
+        // Nothing selected, several objects selected: refused.
+        app.run("select.set", json!({"ids": []})).unwrap();
+        assert!(solidify(&mut app, &one).unwrap_err().contains("select one image"));
+        app.run("select.all", json!({})).unwrap();
+        assert!(solidify(&mut app, &one).unwrap_err().contains("select one image"));
+        app.run("select.set", json!({"ids": [a]})).unwrap();
+        let before = app.session.active().unwrap().doc.clone();
+        let undo = app.session.active().unwrap().history.undo.len();
+        let done = solidify(&mut app, &one).unwrap();
+        assert_eq!(done, Solidified { ids: vec![a], form: "alpha".into(), level: 128, soft: 2, clear: 2, opaque: 2 });
+        assert_eq!(app.session.active().unwrap().history.undo.len(), undo + 1);
+        app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(app.session.active().unwrap().doc, before);
+        let all = protocol::solidify(Some(Some(200.0)), Some(Some(true))).unwrap();
+        let done = solidify(&mut app, &all).unwrap();
+        assert_eq!((done.ids, done.clear, done.opaque), (vec![a, b], 3, 1));
+        assert_eq!(app.session.active().unwrap().history.undo.len(), undo + 1, "copies too in one undo step");
     }
 }

@@ -4836,6 +4836,18 @@ theme	Appearance	Giao diện
 	Unassigned	Chưa gán
 @msg	Invalid separation context or too many entries	Ngữ cảnh tách màu không hợp lệ hoặc quá nhiều mục
 @msg	Invalid or duplicate separation name/component	Tên bản tách màu hoặc thành phần không hợp lệ hoặc trùng lặp
+	Remove Soft Pixels	Xóa điểm ảnh mềm
+@msg	select one image to remove its soft pixels	chọn một hình ảnh để xóa các điểm ảnh mềm của nó
+@msg	the image is linked: embed it to remove its soft pixels	hình ảnh được liên kết: hãy nhúng nó để xóa các điểm ảnh mềm
+@msg	the image's opacity mask isn't one greyscale image	mặt nạ độ mờ của hình ảnh không phải là một hình ảnh thang độ xám
+@msg	the image has no transparency: nothing to remove	hình ảnh không có độ trong suốt: không có gì để xóa
+@msg	the image's pixels couldn't be written	không thể ghi các điểm ảnh của hình ảnh
+@msg	removing soft pixels failed its check: nothing was changed	việc xóa điểm ảnh mềm không vượt qua kiểm tra: không có gì thay đổi
+@msg	the image has its own transparency and an opacity mask: release the mask first	hình ảnh có độ trong suốt riêng và mặt nạ độ mờ: hãy giải phóng mặt nạ trước
+@msg	level must be a whole number from 1 to 255	level phải là số nguyên từ 1 đến 255
+@msg	copies must be true or false	copies phải là true hoặc false
+@msg	the image's opacity mask has its own transparency: release it first	mặt nạ độ mờ của hình ảnh có độ trong suốt riêng: hãy giải phóng nó trước
+@msg	id must name an image	id phải chỉ định một hình ảnh
 	Run Separation Action Lists	Chạy danh sách thao tác tách màu
 @msg	PAL XML nesting exceeds 32 levels	Độ lồng XML PAL vượt quá 32 cấp
 @msg	PAL action has no Type	Thao tác PAL không có Type

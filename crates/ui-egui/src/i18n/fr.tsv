@@ -5241,6 +5241,18 @@ theme	Appearance	Apparence
 	Unassigned	Non attribué
 @msg	Invalid separation context or too many entries	Contexte de séparation invalide ou trop d’entrées
 @msg	Invalid or duplicate separation name/component	Nom de séparation ou composant invalide ou en double
+	Remove Soft Pixels	Supprimer les pixels flous
+@msg	select one image to remove its soft pixels	sélectionnez une image pour supprimer ses pixels flous
+@msg	the image is linked: embed it to remove its soft pixels	l’image est liée : incorporez-la pour supprimer ses pixels flous
+@msg	the image's opacity mask isn't one greyscale image	le masque d’opacité de l’image n’est pas une seule image en niveaux de gris
+@msg	the image has no transparency: nothing to remove	l’image n’a pas de transparence : rien à supprimer
+@msg	the image's pixels couldn't be written	les pixels de l’image n’ont pas pu être écrits
+@msg	removing soft pixels failed its check: nothing was changed	la suppression des pixels flous n’a pas passé la vérification : rien n’a été modifié
+@msg	the image has its own transparency and an opacity mask: release the mask first	l’image a sa propre transparence et un masque d’opacité : libérez d’abord le masque
+@msg	level must be a whole number from 1 to 255	level doit être un nombre entier de 1 à 255
+@msg	copies must be true or false	copies doit valoir true ou false
+@msg	the image's opacity mask has its own transparency: release it first	le masque d’opacité de l’image a sa propre transparence : libérez-le d’abord
+@msg	id must name an image	id doit désigner une image
 	Run Separation Action Lists	Exécuter les listes d’actions de séparation
 @msg	PAL XML nesting exceeds 32 levels	L’imbrication XML PAL dépasse 32 niveaux
 @msg	PAL action has no Type	L’action PAL ne possède pas de Type
