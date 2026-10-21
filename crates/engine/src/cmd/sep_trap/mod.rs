@@ -11,6 +11,7 @@ use vectorcraft_render::{AntiAlias, RenderOptions, Renderer, proof::ProofSetup};
 use super::{CommandSpec, Session, bad, cmd, has_doc};
 use crate::Result;
 
+mod colour;
 mod pixels;
 #[cfg(test)]
 mod tests;
@@ -41,6 +42,53 @@ fn specialty_name(name: &str) -> bool {
 
 const INK_EPSILON: f32 = 0.005;
 
+fn paint_ink(doc: &Document, color: &Color, swatch: Option<&str>, tint: f32, threshold: f32) -> (vectorcraft_doc::inks::Inks, bool) {
+    let ink = vectorcraft_doc::inks::inks(doc, &vectorcraft_color::cms::active(), color, swatch.map(|name| (name, tint)), Default::default());
+    // PAL Any / NotUsing: a spot's tint, not its alternate, is its actual coverage.
+    let no_ink = ink.cmyk.iter().all(|v| *v < INK_EPSILON) && ink.spot.as_ref().is_none_or(|(_, tint)| *tint < INK_EPSILON);
+    let alternate = swatch.and_then(|name| vectorcraft_doc::inks::spot_color(doc, name));
+    let k = alternate.unwrap_or(*color).to_cmyk()[3];
+    (ink, !no_ink && k < threshold)
+}
+
+// A CMYK ramp is a convex combination of its stops. These bounds prove that the
+// existing epsilon/K predicate is constant over the whole ramp; crossing ramps
+// remain unsupported rather than interpolating a Boolean eligibility decision.
+fn gradient_eligibility(g: &vectorcraft_color::gradient::GradientPaint, threshold: f32) -> Option<bool> {
+    use vectorcraft_color::gradient::GradientKind;
+    if !matches!(g.gradient.kind, GradientKind::Linear | GradientKind::Radial)
+        || g.swatch.is_some()
+        || g.freeform.is_some()
+        || g.gradient.stops.is_empty()
+    {
+        return None;
+    }
+    let mut low = [1.0_f32; 4];
+    let mut high = [0.0_f32; 4];
+    for stop in &g.gradient.stops {
+        if stop.opacity != 1.0 || stop.swatch.is_some() {
+            return None;
+        }
+        let Color::Cmyk { c, m, y, k } = stop.color else {
+            return None;
+        };
+        for ((lo, hi), v) in low.iter_mut().zip(&mut high).zip([c, m, y, k]) {
+            if !(0.0..=1.0).contains(&v) {
+                return None;
+            }
+            *lo = lo.min(v);
+            *hi = hi.max(v);
+        }
+    }
+    if low[3] >= threshold || high.iter().all(|v| *v < INK_EPSILON) {
+        Some(false)
+    } else if high[3] < threshold && low.iter().any(|v| *v >= INK_EPSILON) {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 fn eligibility(n: &mut Node, doc: &Document, threshold: f32) -> Result<()> {
     if n.name.as_deref().is_some_and(specialty_name) {
         return Err(bad(C, "prototype does not support metallic or neon artwork"));
@@ -54,8 +102,14 @@ fn eligibility(n: &mut Node, doc: &Document, threshold: f32) -> Result<()> {
             vectorcraft_doc::AppearanceItem::Fill(f) => &mut f.paint,
             vectorcraft_doc::AppearanceItem::Stroke(s) => &mut s.paint,
         };
+        if let Paint::Gradient(g) = paint {
+            let on = gradient_eligibility(g, threshold)
+                .ok_or_else(|| bad(C, "prototype requires an opaque CMYK gradient with uniform ink/black eligibility"))?;
+            *paint = Paint::solid(if on { Color::WHITE } else { Color::BLACK });
+            continue;
+        }
         if !matches!(paint, Paint::None | Paint::Solid { .. }) {
-            return Err(bad(C, "prototype eligibility requires solid vector paints"));
+            return Err(bad(C, "prototype eligibility requires solid paints or supported CMYK gradients"));
         }
         if let Paint::Solid { swatch, .. } = paint
             && swatch.as_deref().is_some_and(specialty_name)
@@ -63,20 +117,8 @@ fn eligibility(n: &mut Node, doc: &Document, threshold: f32) -> Result<()> {
             return Err(bad(C, "prototype does not support metallic or neon inks"));
         }
         vectorcraft_doc::inks::visit_paint(paint, &mut |color, swatch, tint| {
-            let ink = vectorcraft_doc::inks::inks(
-                doc,
-                &vectorcraft_color::cms::active(),
-                color,
-                swatch.as_deref().map(|name| (name, *tint)),
-                Default::default(),
-            );
-            // PAL SeparationTypeRule Any / NotUsing, Epsilon 0.005. A spot's
-            // coverage is its tint; its alternate is not a process separation.
-            let no_ink = ink.cmyk.iter().all(|v| *v < INK_EPSILON) && ink.spot.as_ref().is_none_or(|(_, tint)| *tint < INK_EPSILON);
-            let alternate = swatch.as_deref().and_then(|name| vectorcraft_doc::inks::spot_color(doc, name));
-            let k = alternate.unwrap_or(*color).to_cmyk()[3];
-            let off = no_ink || k >= threshold;
-            *color = if off { Color::BLACK } else { Color::WHITE };
+            let (_, on) = paint_ink(doc, color, swatch.as_deref(), *tint, threshold);
+            *color = if on { Color::WHITE } else { Color::BLACK };
             *swatch = None;
             *tint = 1.0;
         });
@@ -191,7 +233,8 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     };
     crate::cancel::check()?;
     log::debug!("trap: nearest features");
-    let nearest = pixels::band(&occupied, &allowed, &union, w as usize, h as usize, 0.2 * 600.0 / 25.4)?;
+    let mut nearest = pixels::band(&occupied, &allowed, &union, w as usize, h as usize, 0.2 * 600.0 / 25.4)?;
+    let colours = colour::samples(&source, &mut nearest, w as usize, region, threshold as f32)?;
     let mask: Vec<_> = nearest.iter().map(Option::is_some).collect();
     let count = mask.iter().filter(|&&v| v).count();
     let existing: Vec<_> = doc.layers.iter().filter(|l| l.name.as_deref() == Some("Auto Trap-1")).map(|l| l.id).collect();
@@ -216,18 +259,22 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let mut process = vec![0; n * 4];
     let spot_count = plates.len().saturating_sub(4);
     let mut spot = vec![0; n * spot_count];
-    for (channel, plate) in plates.iter().enumerate() {
-        crate::cancel::check()?;
-        let rendered = renderer.render_region_with(&source, region, SCALE, &options(Some(&plate.name)));
-        if rendered.pixels.len() != n * 4 {
-            return Err(bad(C, "incomplete plate render"));
-        }
-        for (i, sample) in nearest.iter().enumerate() {
-            if let Some(sample) = sample {
-                let ink = 255 - rendered.pixels.get(*sample as usize * 4).copied().unwrap_or(255);
-                let out = if channel < 4 { process.get_mut(i * 4 + channel) } else { spot.get_mut(i * spot_count + channel - 4) };
-                if let Some(out) = out {
-                    *out = ink;
+    if let Some(colours) = colours {
+        colours.write(&plates, &mut process, &mut spot);
+    } else {
+        for (channel, plate) in plates.iter().enumerate() {
+            crate::cancel::check()?;
+            let rendered = renderer.render_region_with(&source, region, SCALE, &options(Some(&plate.name)));
+            if rendered.pixels.len() != n * 4 {
+                return Err(bad(C, "incomplete plate render"));
+            }
+            for (i, sample) in nearest.iter().enumerate() {
+                if let Some(sample) = sample {
+                    let ink = 255 - rendered.pixels.get(*sample as usize * 4).copied().unwrap_or(255);
+                    let out = if channel < 4 { process.get_mut(i * 4 + channel) } else { spot.get_mut(i * spot_count + channel - 4) };
+                    if let Some(out) = out {
+                        *out = ink;
+                    }
                 }
             }
         }

@@ -184,8 +184,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         Some(Value::String(v)) => PathBuf::from(v),
         Some(_) => return Err(error("root must be a folder path")),
         None => PathBuf::from(
-            std::env::var_os("VECTORCRAFT_ACTION_LISTS")
-                .ok_or_else(|| error("set root, or VECTORCRAFT_ACTION_LISTS, to the action-list folder"))?,
+            std::env::var_os("VECTORCRAFT_ACTION_LISTS").ok_or_else(|| error("set root, or VECTORCRAFT_ACTION_LISTS, to the action-list folder"))?,
         ),
     };
     crate::file_access::check_read(&root.to_string_lossy()).map_err(error)?;

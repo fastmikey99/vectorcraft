@@ -253,3 +253,65 @@ fn vector_occupancy_obeys_clips_and_leaves_transparency_to_the_renderer() {
     d.node_mut(id).unwrap().opacity = 0.5;
     assert!(union::artwork(&d).unwrap().is_none());
 }
+
+#[test]
+fn flat_band_ink_uses_the_nearest_vector_boundary_and_keeps_exclusions() {
+    let mut d = Document::new(30.0, 30.0);
+    let layer = d.layers[0].id;
+    for (rect, color) in
+        [(Rect::new(0.0, 0.0, 10.0, 9.9), Color::cmyk(1.0, 0.0, 0.0, 0.0)), (Rect::new(10.6, 0.0, 20.0, 9.9), Color::cmyk(0.0, 1.0, 0.0, 0.0))]
+    {
+        let mut path = shapes::rectangle(rect);
+        for subpath in &mut path.subpaths {
+            subpath.closed = false;
+        }
+        let node = Node::path(d.alloc_id(), path, Appearance::basic(Paint::solid(color), Paint::None, 0.0));
+        d.insert(Some(layer), d.node(layer).unwrap().children().unwrap().len(), node).unwrap();
+    }
+    let region = Rect::new(10.49 - 0.5 / SCALE, 5.0 - 0.5 / SCALE, 11.0, 11.0);
+    let mut nearest = vec![Some(0)]; // A raster tie can select a pixel of the more distant cyan object.
+    let colours = colour::samples(&d, &mut nearest, 1, region, 0.7).unwrap().unwrap();
+    let mut process = [0; 4];
+    colours.write(&vectorcraft_doc::inks::plates(&d), &mut process, &mut []);
+    assert_eq!(process, [0, 255, 0, 0]);
+    let last = d.node(layer).unwrap().children().unwrap()[1].id;
+    d.node_mut(last).unwrap().appearance = Appearance::basic(Paint::solid(Color::cmyk(0.0, 0.0, 0.0, 0.8)), Paint::None, 0.0).into();
+    let _ = colour::samples(&d, &mut nearest, 1, region, 0.7).unwrap().unwrap();
+    assert_eq!(nearest, [None], "the closer excluded boundary cannot borrow cyan ink");
+}
+
+#[test]
+fn complex_appearances_keep_renderer_colour_sampling() {
+    let mut s = session(Color::cmyk(1.0, 0.0, 0.0, 0.0));
+    let d = Arc::make_mut(&mut s.doc_mut().unwrap().doc);
+    let node = Arc::make_mut(&mut Arc::make_mut(&mut d.layers[0]).children_mut().unwrap()[0]);
+    if let vectorcraft_doc::AppearanceItem::Fill(f) = &mut node.appearance.items[0] {
+        f.overprint = true;
+    }
+    let mut nearest = vec![Some(0)];
+    assert!(colour::samples(d, &mut nearest, 1, Rect::new(0.0, 0.0, 1.0, 1.0), 0.7).unwrap().is_none());
+    assert_eq!(nearest, [Some(0)]);
+}
+
+#[test]
+fn gradient_eligibility_requires_a_proven_constant_ink_predicate() {
+    use vectorcraft_color::gradient::{Gradient, GradientPaint, GradientStop};
+    let ramp = |a, b| GradientPaint::new(Gradient { stops: vec![GradientStop::new(0.0, a), GradientStop::new(1.0, b)], ..Default::default() });
+    let g = ramp(Color::cmyk(0.2, 0.0, 0.0, 0.0), Color::cmyk(0.8, 0.0, 0.0, 0.0));
+    assert_eq!(gradient_eligibility(&g, 0.7), Some(true));
+    assert_eq!(gradient_eligibility(&ramp(Color::cmyk(0.0, 0.0, 0.0, 0.8), Color::cmyk(0.0, 0.0, 0.0, 0.9)), 0.7), Some(false));
+    assert_eq!(gradient_eligibility(&ramp(Color::cmyk(0.0, 0.0, 0.0, 0.6), Color::cmyk(0.0, 0.0, 0.0, 0.8)), 0.7), None);
+    // Both ends use ink, but the middle has less than epsilon on every channel.
+    assert_eq!(gradient_eligibility(&ramp(Color::cmyk(0.006, 0.0, 0.0, 0.0), Color::cmyk(0.0, 0.006, 0.0, 0.0)), 0.7), None);
+    let mut s = session(Color::cmyk(1.0, 0.0, 0.0, 0.0));
+    {
+        let d = Arc::make_mut(&mut s.doc_mut().unwrap().doc);
+        let n = Arc::make_mut(&mut Arc::make_mut(&mut d.layers[0]).children_mut().unwrap()[0]);
+        n.appearance = Appearance::basic(Paint::Gradient(Box::new(g)), Paint::None, 0.0).into();
+    }
+    assert!(s.execute(C, &json!({"blackThreshold":0.7})).unwrap()["pixels"].as_u64().unwrap() > 0);
+    let d = &s.doc().unwrap().doc;
+    let inks = d.images.values().find_map(ImageBlob::cmyk).unwrap();
+    let cyan: std::collections::BTreeSet<_> = inks.data.as_chunks::<4>().0.iter().map(|p| p[0]).filter(|v| *v > 0).collect();
+    assert!(cyan.len() > 10, "gradient samples remain a ramp rather than one flat tint");
+}
