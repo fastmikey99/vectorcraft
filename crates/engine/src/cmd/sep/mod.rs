@@ -2,6 +2,8 @@
 mod actions;
 mod clean;
 mod geometry;
+mod intents;
+mod metallic;
 pub(super) mod profiles;
 mod reader;
 mod selection;
@@ -43,7 +45,7 @@ pub fn specs() -> Vec<CommandSpec> {
         "Run Separation Action Lists",
         [],
         None,
-        "{root?: action-list library folder (default: VECTORCRAFT_ACTION_LISTS), profiles?: ICC folder (default: VECTORCRAFT_PROFILES), lists: [relative list names in execution order], input: PDF path, output: PDF path} run PAL actions; returns {status, stoppedAt, traceLength, trace, layers, spots, artwork, warnings}. Trace is also written to stderr. Unsupported actions stop before mutation and write the document so far.",
+        "{root?: action-list library folder (default: VECTORCRAFT_ACTION_LISTS), profiles?: ICC folder (default: VECTORCRAFT_PROFILES), lists: [relative list names in execution order], intents?: {metallic: [{objects?: {ids: [id]} | {spot: name} | {rectMm: [x,y,width,height]}, list: relative PAL name}]}, input: PDF path, output: PDF path} run PAL actions; returns {status, stoppedAt, traceLength, trace, layers, spots, artwork, warnings}. Trace is also written to stderr. Unsupported actions stop before mutation and write the document so far.",
         always,
         run
     )]
@@ -60,12 +62,17 @@ struct Player<'a> {
     trace: Vec<Value>,
     stopped: Option<Value>,
     clipboard_empty: bool,
+    intent_scope: Option<Vec<NodeId>>,
     trap_footprints: BTreeMap<NodeId, (vectorcraft_doc::Node, vectorcraft_geom::PathData)>,
     messages: Vec<String>,
 }
 impl Player<'_> {
     fn doc(&self) -> Result<&Document> {
         Ok(&self.session.doc()?.doc)
+    }
+    fn active_layer(&self) -> Result<NodeId> {
+        let layers = selection::layer_ids(self.doc()?);
+        layers.iter().rev().find(|id| self.layers.contains(id)).or_else(|| layers.last()).copied().ok_or_else(|| error("PAL has no active layer"))
     }
     fn ids(&self) -> Result<Vec<NodeId>> {
         Ok(self.session.doc()?.selection.objects.clone())
@@ -164,6 +171,7 @@ impl Player<'_> {
 
 fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let string = |key| p.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).ok_or_else(|| error(format!("sep.runActionList requires {key}")));
+    let intents = intents::read(p)?;
     let profiles = profiles::folder(p)?;
     let input = string("input")?;
     let output = string("output")?;
@@ -230,11 +238,30 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         trace: Vec::new(),
         stopped: None,
         clipboard_empty: true,
+        intent_scope: None,
         trap_footprints: BTreeMap::new(),
         messages: Vec::new(),
     };
     player.remove_background()?;
-    for list in lists {
+    let intent_position = lists
+        .iter()
+        .position(|name| {
+            let name = name.replace('\\', "/");
+            name == "MetallicIntents" || name == "TrapTask" || name.starts_with("(2b)") || name.starts_with("(3)")
+        })
+        .unwrap_or(0);
+    for (position, list) in lists.into_iter().enumerate() {
+        if position == intent_position {
+            if let Err(e) = player.apply_intents(&intents) {
+                player.stopped = Some(json!({"list":"MetallicIntents","reason":e.to_string()}));
+            }
+            if player.stopped.is_some() {
+                break;
+            }
+        }
+        if list == "MetallicIntents" {
+            continue;
+        }
         let result = if list == "TrapTask" {
             player.play(
                 &player.root.join("AE"),

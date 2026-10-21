@@ -42,6 +42,18 @@ impl Player<'_> {
                 }
                 Ok(0)
             }
+            "RemoveFill" => {
+                let targets = leaf_targets(self.doc()?, &ids);
+                self.session.edit("Appearance", |d, _| {
+                    for id in &targets {
+                        if let Some(n) = d.node_mut(*id) {
+                            n.appearance.items.retain(|item| !matches!(item, AppearanceItem::Fill(_)));
+                        }
+                    }
+                    Ok(targets.len())
+                })
+            }
+            "ClipOnShape" => self.clip_on_shape(),
             "TrapTask" => self.trap_task(),
             "SetTrapTags" | "RemoveTrappingTags" => self.trap_tags(p, a.kind == "RemoveTrappingTags"),
             "Rasterize" => self.rasterize(p),
@@ -51,7 +63,12 @@ impl Player<'_> {
             }
             "SelectAllObjects" | "InvertObjectSelection" | "SelectObjectsInLayer" | "SelectObjectsByAttributes" => {
                 let d = self.doc()?;
-                let all = selection::all_objects(d, true);
+                let mut all = selection::all_objects(d, true);
+                if a.kind == "SelectObjectsByAttributes"
+                    && let Some(scope) = &self.intent_scope
+                {
+                    all.retain(|id| scope.contains(id));
+                }
                 let mut selected = ids.clone();
                 let found = match a.kind.as_str() {
                     "SelectAllObjects" => all,
@@ -200,10 +217,7 @@ impl Player<'_> {
                 if ids.is_empty() {
                     return Ok(0);
                 }
-                let target = *self.layers.first().ok_or_else(|| error("MoveObjectsToLayer requires one selected layer"))?;
-                if self.layers.len() != 1 {
-                    return Err(error("MoveObjectsToLayer requires exactly one layer"));
-                }
+                let target = self.active_layer()?;
                 let targets = roots(self.doc()?, &ids);
                 let n = targets.len();
                 self.session.edit("Move", |d, _| {
@@ -429,7 +443,7 @@ impl Player<'_> {
                     return Err(error("PAL shape creation supports rectangles with zero corner radius"));
                 }
                 let bounds = self.doc()?.bounds_of(&roots(self.doc()?, &ids), true).ok_or_else(|| error("cannot fit page box to empty artwork"))?;
-                let layer = self.layers.last().copied().or_else(|| self.doc().ok().and_then(|d| d.layers.last().map(|n| n.id)));
+                let layer = Some(self.active_layer()?);
                 self.session.edit("Rectangle", |d, sel| {
                     let mut appearance = vectorcraft_doc::Appearance::default();
                     appearance.set_fill(Paint::solid(Color::cmyk(0.0, 0.0, 0.0, 1.0)));

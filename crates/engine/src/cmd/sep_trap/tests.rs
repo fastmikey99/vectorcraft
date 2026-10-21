@@ -97,7 +97,8 @@ fn spot_inks_stay_on_their_plate_and_excluded_names_block_them() {
         vectorcraft_doc::inks::visit_node_colors(Arc::make_mut(art), &mut |_, _, tint| *tint = 0.0);
     }
     assert_eq!(s.execute(C, &json!({"blackThreshold":0.7})).unwrap()["pixels"], 0, "zero-tint ink");
-    for name in ["NEON-Test", "M-Test"] {
+    {
+        let name = "NEON-Test";
         let mut s = session(Color::cmyk(1.0, 0.0, 0.0, 0.0));
         let d = Arc::make_mut(&mut s.doc_mut().unwrap().doc);
         Arc::make_mut(&mut Arc::make_mut(&mut d.layers[0]).children_mut().unwrap()[0]).name = Some(name.into());
@@ -317,4 +318,14 @@ fn gradient_eligibility_requires_a_proven_constant_ink_predicate() {
     let inks = d.images.values().find_map(ImageBlob::cmyk).unwrap();
     let cyan: std::collections::BTreeSet<_> = inks.data.as_chunks::<4>().0.iter().map(|p| p[0]).filter(|v| *v > 0).collect();
     assert!(cyan.len() > 10, "gradient samples remain a ramp rather than one flat tint");
+}
+
+#[test]
+fn metallic_object_names_use_the_existing_ink_predicate() {
+    for name in ["M-1", "M-2", "DK M-2", "M-28", "DK M-SPOT"] {
+        let mut s = session(Color::cmyk(1.0, 0.0, 0.0, 0.0));
+        let d = Arc::make_mut(&mut s.doc_mut().unwrap().doc);
+        Arc::make_mut(&mut Arc::make_mut(&mut d.layers[0]).children_mut().unwrap()[0]).name = Some(name.into());
+        assert!(s.execute(C, &json!({"blackThreshold":0.7})).unwrap()["pixels"].as_u64().unwrap() > 0);
+    }
 }

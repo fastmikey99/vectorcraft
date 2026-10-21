@@ -41,7 +41,7 @@ pub fn specs() -> Vec<CommandSpec> {
 // NameRule is case-sensitive. These special inks are outside this experiment's scope.
 // WHP's exact NO WHP / NO WHP OR POWDER exclusions affect underprint, not trap tags.
 fn specialty_name(name: &str) -> bool {
-    name.contains("NEON") || name.starts_with("M-") || name.starts_with("DK M-")
+    name.contains("NEON")
 }
 
 const INK_EPSILON: f32 = 0.005;
@@ -95,7 +95,7 @@ fn gradient_eligibility(g: &vectorcraft_color::gradient::GradientPaint, threshol
 
 fn eligibility(n: &mut Node, doc: &Document, threshold: f32, inherited: bool) -> Result<()> {
     if n.name.as_deref().is_some_and(specialty_name) {
-        return Err(bad(C, "prototype does not support metallic or neon artwork"));
+        return Err(bad(C, "prototype does not support neon artwork"));
     }
     if !matches!(n.kind, NodeKind::Path { .. } | NodeKind::Compound { .. } | NodeKind::Group { .. } | NodeKind::Layer { .. }) {
         return Err(bad(C, "prototype supports vector paths and groups only"));
@@ -119,7 +119,7 @@ fn eligibility(n: &mut Node, doc: &Document, threshold: f32, inherited: bool) ->
         if let Paint::Solid { swatch, .. } = paint
             && swatch.as_deref().is_some_and(specialty_name)
         {
-            return Err(bad(C, "prototype does not support metallic or neon inks"));
+            return Err(bad(C, "prototype does not support neon inks"));
         }
         vectorcraft_doc::inks::visit_paint(paint, &mut |color, swatch, tint| {
             let (_, on) = paint_ink(doc, color, swatch.as_deref(), *tint, threshold);

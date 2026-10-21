@@ -170,7 +170,7 @@ impl Player<'_> {
             let mut region = PathData::default();
             for id in &all {
                 vectorcraft_doc::cancel::check().map_err(error)?;
-                let n = d.node(*id).cloned().ok_or_else(|| error("PAL object disappeared"))?;
+                let mut n = d.node(*id).cloned().ok_or_else(|| error("PAL object disappeared"))?;
                 // Hidden/nonprinting ancestors do not cover artwork. Locked art still does.
                 if d.ancestry(*id).is_some_and(|parents| {
                     parents.iter().any(|i| d.node(*i).is_some_and(|n| !n.visible || matches!(n.kind, NodeKind::Layer { printable: false, .. })))
@@ -180,6 +180,14 @@ impl Player<'_> {
                 let chosen = selected.contains(id) && (!white || selection::inks(d, &n)?.values().any(|t| *t > 0.0));
                 if !chosen && (!exclude || region.is_empty()) {
                     continue;
+                }
+                if !chosen {
+                    // Overprinting ink does not knock out the selected artwork underneath.
+                    // Only knockout fills/strokes participate in covered-area subtraction.
+                    n.appearance.items.retain(|item| match item {
+                        vectorcraft_doc::AppearanceItem::Fill(f) => !f.overprint,
+                        vectorcraft_doc::AppearanceItem::Stroke(s) => !s.overprint,
+                    });
                 }
                 let path = match cached.get(id) {
                     Some(path) => path.clone(),
@@ -264,7 +272,7 @@ impl Player<'_> {
             ids.reverse();
         }
         let brushes = vectorcraft_brush::library(self.doc()?);
-        let active = self.session.doc()?.active_layer;
+        let active = Some(self.active_layer()?);
         self.session.edit("Pathfinder", |d, sel| {
             let mut result = None;
             for id in &ids {
