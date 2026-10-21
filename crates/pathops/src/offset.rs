@@ -14,7 +14,19 @@ const STROKE_TOL: f64 = 1e-3;
 
 fn stroke_bez(bp: &BezPath, width: f64, cap: Cap, join: Join, miter_limit: f64) -> BezPath {
     let style = Stroke::new(width).with_join(join).with_caps(cap).with_miter_limit(miter_limit.max(1.0));
-    close_all(&kurbo::stroke(bp.iter(), &style, &StrokeOpts::default(), STROKE_TOL))
+    let outline = kurbo::stroke(bp.iter(), &style, &StrokeOpts::default(), STROKE_TOL);
+    if outline.is_finite() || !bp.is_finite() {
+        return close_all(&outline);
+    }
+    // A cubic with its last control point at its endpoint has a zero derivative at
+    // t=1. Kurbo's offset cusp search can round its root to that endpoint, normalize
+    // the zero derivative and emit NaNs. Reversing the parameterization moves that
+    // endpoint to t=0, where the derivative evaluation avoids cancellation. This
+    // preserves every source curve exactly (including holes and open paths); caps
+    // are symmetric. Only retry a failed stroke, leaving successful results intact.
+    // If the reversed stroke also fails, retain its nonfinite coordinates so the
+    // fallible arrangement rejects it, rather than dropping any source geometry.
+    close_all(&kurbo::stroke(bp.reverse_subpaths().iter(), &style, &StrokeOpts::default(), STROKE_TOL))
 }
 
 /// kurbo's stroker may leave the outline of an open path without a final `ClosePath`.
@@ -277,6 +289,50 @@ mod tests {
     use kurbo::Shape;
 
     use super::*;
+
+    #[test]
+    fn stationary_cubic_endpoint_does_not_make_offset_nonfinite() {
+        // Synthetic rounded tip: the final handle coincides with the endpoint.
+        // The offset's cusp is close enough to t=1 for kurbo's root search to
+        // reach the zero derivative there. No customer geometry is used.
+        let mut bp = BezPath::new();
+        bp.move_to((0., 0.));
+        bp.curve_to((0.032, 0.), (0.04, 0.008), (0.04, 0.008));
+        bp.line_to((2., 2.));
+        bp.line_to((2., 0.));
+        bp.close_path();
+        // Also retain a disconnected component and its hole when retrying.
+        bp.extend(kurbo::Rect::new(5., 0., 9., 4.).to_path(0.01).iter());
+        bp.extend(kurbo::Rect::new(6., 1., 8., 3.).to_path(0.01).reverse_subpaths().iter());
+        let path = PathData::from_bezpath(&bp);
+        let grown = try_offset_path(&path, 0.25, Join::Round, 4.).unwrap();
+        assert!(grown.to_bezpath().is_finite());
+        assert!(grown.to_bezpath().winding((1., 0.5).into()) != 0, "rounded tip's shape was lost");
+        assert!(grown.to_bezpath().winding((5.5, 0.5).into()) != 0, "disconnected shape was lost");
+        assert_eq!(grown.to_bezpath().winding((7., 2.).into()), 0, "hole was filled");
+        let area = crate::area(&grown, FillRule::NonZero);
+        assert!(area > crate::area(&path, FillRule::NonZero));
+        // Reparameterizing the original curve supplies the same valid offset.
+        let reversed = PathData::from_bezpath(&bp.reverse_subpaths());
+        let expected = try_offset_path(&reversed, 0.25, Join::Round, 4.).unwrap();
+        assert!((area - crate::area(&expected, FillRule::NonZero)).abs() < 1e-8);
+    }
+
+    #[test]
+    fn stationary_cubic_endpoint_open_stroke_retains_both_ends() {
+        let mut bp = BezPath::new();
+        bp.move_to((0., 0.));
+        bp.curve_to((0.032, 0.), (0.04, 0.008), (0.04, 0.008));
+        let path = PathData::from_bezpath(&bp);
+        let outline = outline_stroke(&path, 0.5, Cap::Round, Join::Round, 4.);
+        let out = outline.to_bezpath();
+        assert!(out.is_finite());
+        assert!(out.winding((-0.1, 0.).into()) != 0);
+        assert!(out.winding((0.14, 0.008).into()) != 0);
+        let mut invalid = bp;
+        invalid.line_to((f64::NAN, 0.));
+        assert_eq!(try_offset_path(&PathData::from_bezpath(&invalid), 0.25, Join::Round, 4.), Err(crate::PathOpsError::NonFinite));
+    }
 
     #[test]
     fn indexed_offset_distance_matches_full_scan_at_thresholds_and_curve_extrema() {
