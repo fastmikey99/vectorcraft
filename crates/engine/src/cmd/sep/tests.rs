@@ -46,6 +46,7 @@ fn player(s: &mut Session) -> Player<'_> {
         clipboard_empty: true,
         trap_footprints: BTreeMap::new(),
         messages: vec![],
+        no_trap: None,
     }
 }
 fn step(p: &mut Player<'_>, kind: &str, params: &str) -> Result<usize> {
@@ -515,4 +516,140 @@ fn trap_tags_inherit_remove_and_roundtrip_without_overriding_black() {
     step(&mut p, "SelectAllObjects", "").unwrap();
     step(&mut p, "SetTrapTags", &trap_ticket("Always")).unwrap();
     assert_eq!(step(&mut p, "TrapTask", "").unwrap(), 0);
+}
+
+#[test]
+fn no_trap_intent_selects_prepared_ids_and_splits_rectangles_without_repainting() {
+    use vectorcraft_color::{Color, Paint};
+    use vectorcraft_doc::{Appearance, Node};
+    use vectorcraft_geom::shapes;
+    let mut d = Document::new(100.0, 100.0);
+    let layer = d.layers[0].id;
+    d.node_mut(layer).unwrap().name = Some("Artwork".into());
+    let mut ids = Vec::new();
+    for x in [10.0, 50.0] {
+        let n = Node::path(
+            d.alloc_id(),
+            shapes::rectangle(Rect::new(x, 10.0, x + 20.0, 30.0)),
+            Appearance::basic(Paint::solid(Color::cmyk(0.4, 0.2, 0.0, 0.0)), Paint::None, 0.0),
+        );
+        ids.push(n.id);
+        d.insert(Some(layer), usize::MAX, n).unwrap();
+    }
+    let mut s = Session::new();
+    s.add_document(d, None);
+    let mut p = player(&mut s);
+    let mm = 25.4 / 72.0;
+    let intent = intents::read(
+        &json!({"intents":{"noTrap":{"objectIds":[ids[1]],"rectangles":[{"x":10.0*mm,"y":10.0*mm,"width":10.0*mm,"height":20.0*mm}]}}}),
+    )
+    .unwrap()
+    .unwrap();
+    p.apply_no_trap(intent).unwrap();
+    let selected = p.ids().unwrap();
+    assert_eq!(selected.len(), 2);
+    assert!(selected.contains(&ids[1]));
+    let doc = p.doc().unwrap();
+    let original = doc.node(ids[0]).unwrap();
+    assert!((original.visual_bounds().unwrap().width() - 10.0).abs() < 1e-6);
+    let split = doc.node(*selected.iter().find(|&&id| id != ids[1]).unwrap()).unwrap();
+    assert_eq!(split.appearance, original.appearance);
+    assert!((split.visual_bounds().unwrap().x1 - 20.0).abs() < 1e-6);
+    assert_eq!(p.trace.last().unwrap()["action"], "SelectNoTrap");
+}
+
+#[test]
+fn no_trap_intent_rejects_invalid_regions_and_missing_ticket() {
+    for value in [json!(null), json!({"rectangles":[{"x":0,"y":0,"width":-1,"height":5}]}), json!({"objectIds":[-1]}), json!({"rectangle":[]})] {
+        assert!(intents::read(&json!({"intents":{"noTrap":value}})).is_err());
+    }
+    let f = Fixture::new();
+    f.input();
+    f.pal("main", "");
+    let error = Session::new()
+        .execute(
+            "sep.runActionList",
+            &json!({"root":f.0,"lists":["main"],"input":f.0.join("input.pdf"),"output":f.0.join("output.pdf"),"intents":{"noTrap":{"objectIds":[]}}}),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("immediately followed by TrapTask"));
+}
+
+#[test]
+fn mixed_mask_blocks_trap_and_zero_choke_whp_but_retains_light_underprint() {
+    use vectorcraft_color::{Color, Paint};
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    let left = rect(&mut s, 10., 10., 20., 20.);
+    let right = rect(&mut s, 50., 10., 20., 20.);
+    s.edit("Trap", |d, _| {
+        d.layers.iter_mut().for_each(|l| std::sync::Arc::make_mut(l).name = Some("Artwork".into()));
+        for id in [left, right] {
+            d.node_mut(id).unwrap().appearance.set_fill(Paint::solid(Color::cmyk(1., 0., 0., 0.)));
+        }
+        Ok(())
+    })
+    .unwrap();
+    let mut p = player(&mut s);
+    p.apply_no_trap(intents::read(&json!({"intents":{"noTrap":{"objectIds":[left]}}})).unwrap().unwrap()).unwrap();
+    step(&mut p, "RenameObjects", "<ObjectName>LIGHT</ObjectName>").unwrap();
+    under(&mut p, true, 0.);
+    let mask = p.ids().unwrap()[0];
+    step(&mut p, "SetFillFlatPaint", "<Percentage>0</Percentage>").unwrap();
+    step(&mut p, "RenameObjects", "<ObjectName>LIGHT NO BLEED</ObjectName>").unwrap();
+    step(&mut p, "SelectLayerByName", "<LayerName>Artwork</LayerName><Mode>NewSelection</Mode>").unwrap();
+    step(&mut p, "MoveObjectsToLayer", "").unwrap();
+    p.trap_task().unwrap();
+    let trap = p.doc().unwrap().layers.iter().find(|n| n.name.as_deref() == Some("Trap Layer 1")).unwrap();
+    assert!(trap.visual_bounds().unwrap().x0 > 49., "only the right object's band exists");
+    // WHP converts the temporary white to K50 before its Back/Front operations.
+    p.session
+        .edit("Fill", |d, _| {
+            d.node_mut(mask).unwrap().appearance.set_fill(Paint::solid(Color::cmyk(0., 0., 0., 0.5)));
+            Ok(())
+        })
+        .unwrap();
+    p.session.doc_mut().unwrap().selection.set([left]);
+    under(&mut p, true, 0.);
+    assert!(p.ids().unwrap().is_empty(), "no zero-choke dark WHP under the front mask");
+    p.session.doc_mut().unwrap().selection.set([mask]);
+    step(&mut p, "ArrangeObjects", "<MoveDirection>Back</MoveDirection>").unwrap();
+    p.session.doc_mut().unwrap().selection.set([left]);
+    under(&mut p, true, 0.);
+    assert!((selected_area(&p) - 400.).abs() < 0.01, "a back mask does not cover selected art");
+    step(&mut p, "DeleteObjects", "").unwrap();
+    p.session.doc_mut().unwrap().selection.set([mask]);
+    step(&mut p, "ArrangeObjects", "<MoveDirection>Front</MoveDirection>").unwrap();
+    p.session.doc_mut().unwrap().selection.set([left, mask]);
+    under(&mut p, false, 0.2);
+    let expected = (20. - 2. * 0.2 * 72. / 25.4_f64).powi(2);
+    assert!((selected_area(&p) - expected).abs() < 0.01, "light-style choked WHP is retained");
+}
+
+#[test]
+fn runner_applies_intent_after_preparation_immediately_before_explicit_ticket() {
+    let f = Fixture::new();
+    f.input();
+    f.pal(
+        "prepare",
+        &[
+            a("SelectAllObjects", ""),
+            a("CleanObjects", "<ExecuteClip>1</ExecuteClip>"),
+            a("CreateLayerOnTop", "<LayerName>Artwork</LayerName>"),
+            a("MoveObjectsToLayer", ""),
+            a("SelectAllObjects", ""),
+            a("InvertObjectSelection", ""),
+        ]
+        .join(""),
+    );
+    f.pal("Trapping_Supacolour_Standard (NEW)", &a("RenameObjects", "<ObjectName>LIGHT</ObjectName>"));
+    let mut s = Session::new();
+    let r = s.execute("sep.runActionList", &json!({"root":f.0,"lists":["prepare","Trapping_Supacolour_Standard (NEW)","TrapTask"],"input":f.0.join("input.pdf"),"output":f.0.join("output.pdf"),"intents":{"noTrap":{"rectangles":[{"x":0,"y":0,"width":40,"height":40}]}}})).unwrap();
+    assert_eq!(r["status"], "completed", "{r}");
+    let trace = r["trace"].as_array().unwrap();
+    let at = trace.iter().position(|t| t["action"] == "SelectNoTrap").unwrap();
+    assert_eq!(trace[at]["objectsAffected"], 1);
+    assert_eq!(trace[at + 1]["action"], "RenameObjects");
+    assert_eq!(trace[at + 1]["objectsAffected"], 1);
+    assert_eq!(trace[at + 2]["action"], "TrapTask");
 }

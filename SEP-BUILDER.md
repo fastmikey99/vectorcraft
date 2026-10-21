@@ -1,4 +1,4 @@
-# PAL player — preparation, WE Light and WE Dark
+# PAL player — preparation, WE Light, WE Dark and WE Mixed
 
 `sep.runActionList` runs an ordered sequence of ArtPro PAL XML action lists on a
 single-page, unrotated PDF. It is an engine command available through the CLI, MCP's command
@@ -231,3 +231,63 @@ No customer data, identities or per-job reports are included here.
 Revision: 2026-10-21 — explicit Dark TrapTask, inherited trap tags, 600 dpi Rasterize,
 TRAPPY clip preservation and indexed nearest-vector colour ownership. Changes are
 uncommitted for lead review.
+
+
+## Mixed garment intent
+
+`sep.runActionList` accepts an optional, independently keyed human selection:
+
+```json
+{"intents":{"noTrap":{"objectIds":[12,19],"rectangles":[{"x":10,"y":20,"width":15,"height":8}]}}}
+```
+
+Use the same explicit list sequence as Dark: preparation (0), template (2),
+`Trapping_Supacolour_Standard (NEW)`, `TrapTask`, then WE Separation (3).
+For Mixed, `noTrap` replaces the selection **immediately before** the one explicit
+2b call. This represents the artist's manual 2b run; AE proceeds straight to
+TrapTask without a second 2b run. The player records `Intent / SelectNoTrap`
+before the PAL trace. Missing or repeated tickets, and a ticket not immediately
+followed by TrapTask, are rejected before opening the input.
+
+Object IDs refer to prepared Artwork immediately after (0)/(2), obtainable from
+`document.inspect` in the session after running those lists. Group IDs select
+their leaves. IDs are specific to that input and preparation, not portable job
+identifiers. Rectangles use document coordinates in millimetres, x rightwards
+and y downwards (the same origin as document inspection, converted from points).
+Their union selects only the intersecting geometry: partially intersected paths
+are split, retaining their paint and stacking order. Only prepared opaque filled
+paths without strokes, clipping, masks or effects support partial-region selection;
+unsupported inputs stop explicitly. Both selector fields can be combined; empty
+selectors are valid and preserve the Dark behavior. Missing IDs are errors.
+
+The PAL, not the intent handler, renames selected art `LIGHT`, builds the white
+`LIGHT NO BLEED` mask, applies the trap ticket and later handles WHP and cleanup.
+No additional PAL action types are required. Both `sep.trap` and TrapTask respect
+the visible white mask. When that mask is present, nearest rendered ownership is
+used instead of nearest-outline colour ties; a mask behind artwork does not
+suppress its visible ink. WHP's existing actions convert the mask to 50% K and
+move it back/front, excluding covered dark-style WHP while retaining the choked
+light-style pass. CLEAN UP deletes the temporary mask.
+
+NE/NB neon is automatically non-trapped by the production sequence; WE has no
+neon jobs. This change does not add neon separation support or alter the established
+ink epsilon, K threshold or colour conversion.
+
+Revision: 2026-10-21 — Mixed no-trap intent, partial rectangle selection and
+visible white-mask trap ownership; uncommitted for lead review.
+
+
+Mixed validation remains experimental. All twelve local inputs complete with an
+explicit empty no-trap intent. A separate shipped-Artwork retrap diagnostic found
+no clear omitted eligible whole-object or partial-region bands in this cohort;
+it does not supply a convincing nonempty production mask case. Synthetic tests
+cover a nonempty selection, partial rectangles, front/back mask ownership and
+WHP's covered-area versus choked pass.
+
+The requested customer-to-shipped parity bar is not met. Seven supplied inputs
+contain printed process backdrops absent from their shipped artwork, without a
+SupaBG tag; the player retains them. Two of the other five satisfy the strict
+2-pixel trap/WHP bound at 600 dpi. Small trap/underprint residuals remain in the
+other three, alongside source geometry and known colour-conversion differences.
+The local report records every plate, stage attribution and unresolved causes;
+no backdrop-removal rule or tolerance exception was added.

@@ -2,6 +2,7 @@
 mod actions;
 mod clean;
 mod geometry;
+mod intents;
 pub(super) mod profiles;
 mod reader;
 mod selection;
@@ -43,7 +44,7 @@ pub fn specs() -> Vec<CommandSpec> {
         "Run Separation Action Lists",
         [],
         None,
-        "{root?: action-list library folder (default: VECTORCRAFT_ACTION_LISTS), profiles?: ICC folder (default: VECTORCRAFT_PROFILES), lists: [relative list names in execution order], input: PDF path, output: PDF path} run PAL actions; returns {status, stoppedAt, traceLength, trace, layers, spots, artwork, warnings}. Trace is also written to stderr. Unsupported actions stop before mutation and write the document so far.",
+        "{root?: action-list library folder (default: VECTORCRAFT_ACTION_LISTS), profiles?: ICC folder (default: VECTORCRAFT_PROFILES), lists: [relative list names in execution order], intents?: {noTrap: {objectIds?: [prepared object ids], rectangles?: [{x, y, width, height in mm}]}}, input: PDF path, output: PDF path} run PAL actions; returns {status, stoppedAt, traceLength, trace, layers, spots, artwork, warnings}. Trace is also written to stderr. Unsupported actions stop before mutation and write the document so far.",
         always,
         run
     )]
@@ -62,6 +63,7 @@ struct Player<'a> {
     clipboard_empty: bool,
     trap_footprints: BTreeMap<NodeId, (vectorcraft_doc::Node, vectorcraft_geom::PathData)>,
     messages: Vec<String>,
+    no_trap: Option<intents::NoTrap>,
 }
 impl Player<'_> {
     fn doc(&self) -> Result<&Document> {
@@ -80,6 +82,12 @@ impl Player<'_> {
             return Err(error("recursive PAL call or call depth exceeds 32"));
         }
         let actions = reader::read(&path).map_err(error)?;
+        if caller.is_none()
+            && path.file_stem().and_then(|s| s.to_str()) == Some("Trapping_Supacolour_Standard (NEW)")
+            && let Some(intent) = self.no_trap.take()
+        {
+            self.apply_no_trap(intent)?;
+        }
         self.stack.push(path.clone());
         let result = self.play(&path, &actions);
         self.stack.pop();
@@ -164,6 +172,7 @@ impl Player<'_> {
 
 fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let string = |key| p.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).ok_or_else(|| error(format!("sep.runActionList requires {key}")));
+    let no_trap = intents::read(p)?;
     let profiles = profiles::folder(p)?;
     let input = string("input")?;
     let output = string("output")?;
@@ -184,6 +193,19 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         .filter(|v| !v.is_empty() && v.len() <= 256)
         .ok_or_else(|| error("lists must contain 1 to 256 action-list names"))?;
     let lists = lists.iter().map(|v| v.as_str().ok_or_else(|| error("list names must be strings"))).collect::<Result<Vec<_>>>()?;
+    if no_trap.is_some() {
+        let tickets: Vec<_> = lists
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| name.replace('\\', "/").trim_end_matches(".pal").rsplit('/').next() == Some("Trapping_Supacolour_Standard (NEW)"))
+            .map(|(i, _)| i)
+            .collect();
+        if tickets.len() != 1 || tickets.first().and_then(|i| lists.get(i + 1)).copied() != Some("TrapTask") {
+            return Err(error(
+                "intents.noTrap requires exactly one explicit Trapping_Supacolour_Standard (NEW) list immediately followed by TrapTask",
+            ));
+        }
+    }
     let root = match p.get("root") {
         Some(Value::String(v)) => PathBuf::from(v),
         Some(_) => return Err(error("root must be a folder path")),
@@ -232,6 +254,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         clipboard_empty: true,
         trap_footprints: BTreeMap::new(),
         messages: Vec::new(),
+        no_trap,
     };
     player.remove_background()?;
     for list in lists {
