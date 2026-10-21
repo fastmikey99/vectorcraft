@@ -614,6 +614,93 @@ mod tests {
         assert_eq!(drawn(&pdf(vec![form("")])).ok(), Some(1));
     }
 
+    /// The objects of a one-page PDF whose page draws `/F` from `resources` (object 3's
+    /// resources), objects 1 to 4.
+    fn page_objects(resources: &str) -> Vec<Vec<u8>> {
+        vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << {resources} >> >>").into_bytes(),
+            stream_object("", b"/F Do"),
+        ]
+    }
+
+    /// A form drawing `/F` of object `next` when there is one, with `data` (Flate when `big`).
+    fn chained_form(next: Option<usize>, data: &[u8], big: bool) -> Vec<u8> {
+        let res = next.map(|n| format!("/XObject << /F {n} 0 R >>")).unwrap_or_default();
+        let filter = if big { "/Filter /FlateDecode" } else { "" };
+        stream_object(&format!("/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << {res} >> {filter}"), data)
+    }
+
+    #[test]
+    fn content_is_followed_only_as_deep_as_the_interpreter_draws_it() {
+        // `forms` small forms, each drawing the next, then 300 MiB of content.
+        let chain = |forms: usize| {
+            let mut objects = page_objects("/XObject << /F 5 0 R >>");
+            objects.extend((0..forms).map(|i| chained_form(Some(6 + i), b"/F Do", false)));
+            objects.push(chained_form(None, content_300(), true));
+            write_pdf(&objects)
+        };
+        assert!(crate::info(&chain(10), None).is_ok());
+        // Past the interpreter's 50 nested forms the content keeps the cap; a chain thousands
+        // long is walked without running out of stack.
+        for forms in [60, 5000] {
+            let err = crate::info(&chain(forms), None).err().map(|e| e.to_string()).unwrap_or_default();
+            assert!(err.contains("would decode to more than 256 MB"), "{forms}: {err}");
+        }
+    }
+
+    #[test]
+    fn content_inherited_far_down_the_page_tree_is_found() {
+        // 70 page tree nodes, the top one holding the form the page draws.
+        let nodes = 70;
+        let (page, form) = (nodes + 2, nodes + 4);
+        let mut objects = vec![b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()];
+        for k in 2..nodes + 2 {
+            let parent = if k == 2 { format!("/Resources << /XObject << /F {form} 0 R >> >>") } else { format!("/Parent {} 0 R", k - 1) };
+            objects.push(format!("<< /Type /Pages /Kids [{} 0 R] /Count 1 {parent} >>", k + 1).into_bytes());
+        }
+        objects.push(format!("<< /Type /Page /Parent {} 0 R /MediaBox [0 0 100 100] /Contents {} 0 R >>", page - 1, page + 1).into_bytes());
+        objects.push(stream_object("", b"/F Do"));
+        objects.push(chained_form(None, content_300(), true));
+        assert_eq!(objects.len(), form);
+        let info = crate::info(&write_pdf(&objects), None);
+        assert!(info.is_ok(), "{:?}", info.err());
+    }
+
+    #[test]
+    fn content_reached_through_a_dictionary_used_for_something_else_keeps_the_cap() {
+        // The page's forms are also its shadings: the reader would decode the form as one.
+        let mut objects = page_objects("/XObject 6 0 R /Shading 6 0 R");
+        objects.push(chained_form(None, content_300(), true));
+        objects.push(b"<< /F 5 0 R >>".to_vec());
+        let err = crate::info(&write_pdf(&objects), None).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(err.contains("would decode to more than 256 MB"), "{err}");
+        // Used only as the page's forms: read whole (the control).
+        let mut objects = page_objects("/XObject 6 0 R");
+        objects.push(chained_form(None, content_300(), true));
+        objects.push(b"<< /F 5 0 R >>".to_vec());
+        assert!(crate::info(&write_pdf(&objects), None).is_ok());
+    }
+
+    #[test]
+    fn a_decrypted_form_past_the_budget_stops_the_walk() {
+        // An encrypted form without filters decrypts to its whole length, whatever is left.
+        let mut objects = page_objects("/XObject << /F 5 0 R >>");
+        objects.push(chained_form(None, &[b"% padding\n".repeat(400), b"0 0 10 10 re f".to_vec()].concat(), false));
+        let mut settings = crate::PdfSettings::default();
+        settings.security.open_password = "secret".into();
+        let pdf = crate::encrypt::protect(write_pdf(&objects), &settings).unwrap();
+        let file = crate::pages::open(&pdf, Some("secret")).unwrap();
+        let scan = |budget: usize| {
+            let mut ocgs = crate::import_scan::Ocgs::read(&file);
+            crate::import_scan::scan_page(&file.pages()[0], &mut ocgs, false, &mut crate::import_scan::FontNames::new(), budget)
+        };
+        assert!(scan(1 << 20).is_ok());
+        // 4 kB held against 1 kB left: refused, not a budget that wraps round.
+        assert!(scan(1 << 10).is_err());
+    }
+
     #[test]
     fn content_past_the_content_limit_is_refused() {
         let data = ordinary_content((MAX_CONTENT_DECODED >> 20) + 16, b"\n0 0 10 10 re f\n");

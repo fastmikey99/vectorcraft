@@ -824,33 +824,42 @@ impl Walker<'_, '_> {
                         self.out.cut = true;
                         return;
                     }
-                    // Bytes read straight from the file cost nothing, as for the interpreter.
+                    // Bytes read straight from the file cost nothing, as for the interpreter. A
+                    // decrypted form without filters isn't cut at `left`: past it, the walk stops.
                     let held = if matches!(data, std::borrow::Cow::Owned(_)) { data.len() } else { 0 };
-                    self.content_left -= held;
+                    let Some(rest) = left.checked_sub(held) else {
+                        self.out.cut = true;
+                        return;
+                    };
+                    self.content_left = rest;
                     let oc = d.get::<Dict<'_>>(b"OC");
                     if let Some(oc) = &oc {
                         self.begin_oc(oc, d.get_ref(b"OC").map(ObjectIdentifier::from));
                         self.hidden_form |= !self.is_visible();
                     }
-                    if self.is_visible() {
-                        if let Some(g) = d.get::<Dict<'_>>(b"Group") {
-                            if self.out.groups.len() >= MAX_GROUPS {
-                                self.out.cut = true;
-                                return;
+                    let stop = 'form: {
+                        if self.is_visible() {
+                            if let Some(g) = d.get::<Dict<'_>>(b"Group") {
+                                if self.out.groups.len() >= MAX_GROUPS {
+                                    self.out.cut = true;
+                                    break 'form true;
+                                }
+                                self.out.groups.push((g.get::<bool>(b"I").unwrap_or(false), g.get::<bool>(b"K").unwrap_or(false)));
                             }
-                            self.out.groups.push((g.get::<bool>(b"I").unwrap_or(false), g.get::<bool>(b"K").unwrap_or(false)));
+                            // (Its own resources, or without any those of what draws it: as the interpreter reads them.)
+                            let inner = Resources::from_scope(d.get::<Dict<'_>>(b"Resources"), res.clone());
+                            self.save();
+                            self.walk(data.as_ref(), &inner, depth + 1);
+                            self.restore();
                         }
-                        // (Its own resources, or without any those of what draws it: as the interpreter reads them.)
-                        let inner = Resources::from_scope(d.get::<Dict<'_>>(b"Resources"), res.clone());
-                        self.save();
-                        self.walk(data.as_ref(), &inner, depth + 1);
-                        self.restore();
-                        if self.out.cut {
-                            return;
-                        }
-                    }
+                        self.out.cut
+                    };
+                    // The form's bytes are given back however the walk of it ended.
                     drop(data);
-                    self.content_left += held;
+                    self.content_left = self.content_left.saturating_add(held);
+                    if stop {
+                        return;
+                    }
                     if oc.is_some() {
                         self.visible.pop();
                     }

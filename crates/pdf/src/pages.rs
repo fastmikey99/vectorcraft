@@ -166,7 +166,7 @@ fn hostile(pdf: &Pdf) -> Option<&'static str> {
 /// function, an unrelated dictionary's `Contents`) is not content here: it gets the ordinary
 /// limit ([`crate::streams`]).
 fn content_streams(pdf: &Pdf) -> HashSet<ObjectIdentifier> {
-    let mut uses = Uses { xref: pdf.xref(), seen: HashSet::new(), inherited: HashSet::new(), content: HashMap::new() };
+    let mut uses = Uses { xref: pdf.xref(), seen: HashSet::new(), inherited: HashSet::new(), roles: HashMap::new(), content: HashMap::new(), path: vec![], depth: 0 };
     for page in pdf.pages().iter() {
         uses.page(page.raw());
     }
@@ -185,38 +185,67 @@ fn content_streams(pdf: &Pdf) -> HashSet<ObjectIdentifier> {
             }
         }
     }
-    uses.content.into_iter().filter(|(id, n)| refs.get(id) == Some(n)).map(|(id, _)| id).collect()
+    // Content only, and reached only through objects the file uses for nothing else: an object
+    // also referred to from anywhere else (`/XObject 7 0 R /Shading 7 0 R`) passes no content on.
+    let only_here = |id: &ObjectIdentifier| uses.roles.get(id) == refs.get(id);
+    uses.content.iter().filter(|(id, within)| only_here(id) && within.iter().all(only_here)).map(|(id, _)| *id).collect()
 }
 
-/// The walk of [`content_streams`]: each place that holds content is looked at once, and each
-/// reference to content from one counted once.
+/// How deep [`content_streams`] follows content inside content (forms in forms, glyphs in
+/// glyphs): the interpreter's limit on nested forms. Content past it gets the ordinary limit.
+const MAX_CONTENT_NESTING: usize = 50;
+
+/// How many page tree nodes above a page [`content_streams`] looks through for the resources it
+/// inherits: the reader's page tree work budget, so any page it reads has its resources found.
+const MAX_PAGE_TREE: usize = 100_000;
+
+/// The walk of [`content_streams`]: each place that holds content is looked at once.
 struct Uses<'a> {
     xref: &'a XRef,
     /// The objects looked at already.
     seen: HashSet<ObjectIdentifier>,
     /// The page tree nodes whose resources were walked for the pages that inherit them.
     inherited: HashSet<ObjectIdentifier>,
-    /// The references to each content stream from where content is used.
-    content: HashMap<ObjectIdentifier, usize>,
+    /// The references to each object from where the walk found it.
+    roles: HashMap<ObjectIdentifier, usize>,
+    /// Each content stream, and the objects the walk went through to find it (anywhere).
+    content: HashMap<ObjectIdentifier, HashSet<ObjectIdentifier>>,
+    /// The objects the walk is inside, below the page.
+    path: Vec<ObjectIdentifier>,
+    /// How many resource dictionaries the walk is inside.
+    depth: usize,
 }
 
 impl<'a> Uses<'a> {
-    /// The object `o` is or refers to, the first time it is met (`None` after that).
+    /// The object `o` is or refers to, the first time it is met (`None` after that); a
+    /// reference is counted each time.
     fn first(&mut self, o: MaybeRef<Object<'a>>) -> Option<Object<'a>> {
         match o {
             MaybeRef::Ref(r) => {
                 let id = ObjectIdentifier::from(r);
+                *self.roles.entry(id).or_default() += 1;
                 if self.seen.insert(id) { self.xref.get::<Object<'a>>(id) } else { None }
             }
             MaybeRef::NotRef(o) => Some(o),
         }
     }
 
-    /// The dictionary `o` is or refers to, the first time it is met.
-    fn dict(&mut self, o: Option<MaybeRef<Object<'a>>>) -> Option<Dict<'a>> {
-        match self.first(o?)? {
-            Object::Dict(d) => Some(d),
+    /// The dictionary `o` is or refers to, the first time it is met, and the object it is.
+    fn dict(&mut self, o: Option<MaybeRef<Object<'a>>>) -> Option<(Dict<'a>, Option<ObjectIdentifier>)> {
+        let o = o?;
+        let id = o.as_obj_ref().map(ObjectIdentifier::from);
+        match self.first(o)? {
+            Object::Dict(d) => Some((d, id)),
             _ => None,
+        }
+    }
+
+    /// `f`, inside the object `id` (when it is one).
+    fn within(&mut self, id: Option<ObjectIdentifier>, f: impl FnOnce(&mut Self)) {
+        self.path.extend(id);
+        f(self);
+        if id.is_some() {
+            self.path.pop();
         }
     }
 
@@ -227,10 +256,11 @@ impl<'a> Uses<'a> {
         let MaybeRef::Ref(r) = o else { return false };
         let id = ObjectIdentifier::from(*r);
         let Some(Object::Stream(s)) = self.xref.get::<Object<'a>>(id) else { return false };
+        *self.roles.entry(id).or_default() += 1;
         if kind(s.dict()) {
-            *self.content.entry(id).or_default() += 1;
+            self.content.entry(id).or_default().extend(self.path.iter().copied());
             if self.seen.insert(id) {
-                self.resources(s.dict().get_raw::<Object<'a>>(b"Resources"));
+                self.within(Some(id), |u| u.resources(s.dict().get_raw::<Object<'a>>(b"Resources")));
             }
         }
         true
@@ -243,9 +273,10 @@ impl<'a> Uses<'a> {
         if self.content(&o, any) {
             return;
         }
+        let id = o.as_obj_ref().map(ObjectIdentifier::from);
         match self.first(o) {
-            Some(Object::Array(a)) if !in_dict => items(&a).for_each(|i| _ = self.content(&i, any)),
-            Some(Object::Dict(d)) if in_dict => values(&d).for_each(|v| _ = self.content(&v, any)),
+            Some(Object::Array(a)) if !in_dict => self.within(id, |u| items(&a).for_each(|i| _ = u.content(&i, any))),
+            Some(Object::Dict(d)) if in_dict => self.within(id, |u| values(&d).for_each(|v| _ = u.content(&v, any))),
             _ => {}
         }
     }
@@ -257,7 +288,8 @@ impl<'a> Uses<'a> {
         self.streams(page.get_raw::<Object<'a>>(b"Contents"), false);
         // Its own resources, or those of the nearest node above it (walked once for all its pages).
         let mut node = page.clone();
-        for _ in 0..64 {
+        let mut above = HashSet::new();
+        for _ in 0..MAX_PAGE_TREE {
             if let Some(res) = node.get_raw::<Object<'a>>(b"Resources") {
                 if node.obj_id() == page.obj_id() || node.obj_id().is_some_and(|id| self.inherited.insert(id)) {
                     self.resources(Some(res));
@@ -265,49 +297,76 @@ impl<'a> Uses<'a> {
                 break;
             }
             let Some(parent) = node.get::<Dict<'a>>(b"Parent") else { break };
+            if parent.obj_id().is_some_and(|id| !above.insert(id)) {
+                break;
+            }
             node = parent;
         }
+        let annots_id = page.get_ref(b"Annots").map(ObjectIdentifier::from);
         let Some(Object::Array(annots)) = page.get_raw::<Object<'a>>(b"Annots").and_then(|a| self.first(a)) else { return };
-        for annot in items(&annots) {
-            let Some(annot) = self.dict(Some(annot)) else { continue };
-            let Some(ap) = self.dict(annot.get_raw::<Object<'a>>(b"AP")) else { continue };
-            for key in [&b"N"[..], b"R", b"D"] {
-                let Some(a) = ap.get_raw::<Object<'a>>(key) else { continue };
-                if !self.content(&a, any) {
-                    self.streams(Some(a), true);
-                }
+        self.within(annots_id, |u| {
+            for annot in items(&annots) {
+                let Some((annot, annot_id)) = u.dict(Some(annot)) else { continue };
+                u.within(annot_id, |u| {
+                    let Some((ap, ap_id)) = u.dict(annot.get_raw::<Object<'a>>(b"AP")) else { return };
+                    u.within(ap_id, |u| {
+                        for key in [&b"N"[..], b"R", b"D"] {
+                            let Some(a) = ap.get_raw::<Object<'a>>(key) else { continue };
+                            if !u.content(&a, any) {
+                                u.streams(Some(a), true);
+                            }
+                        }
+                    });
+                });
             }
-        }
+        });
     }
 
     fn resources(&mut self, res: Option<MaybeRef<Object<'a>>>) {
-        let Some(res) = self.dict(res) else { return };
-        if let Some(x) = self.dict(res.get_raw::<Object<'a>>(b"XObject")) {
-            values(&x).for_each(|v| _ = self.content(&v, form));
+        if self.depth >= MAX_CONTENT_NESTING {
+            return;
         }
-        if let Some(p) = self.dict(res.get_raw::<Object<'a>>(b"Pattern")) {
-            values(&p).for_each(|v| _ = self.content(&v, |d| d.get::<u8>(b"PatternType") == Some(1)));
+        let Some((res, id)) = self.dict(res) else { return };
+        self.depth += 1;
+        self.within(id, |u| u.resources_in(&res));
+        self.depth -= 1;
+    }
+
+    fn resources_in(&mut self, res: &Dict<'a>) {
+        if let Some((x, id)) = self.dict(res.get_raw::<Object<'a>>(b"XObject")) {
+            self.within(id, |u| values(&x).for_each(|v| _ = u.content(&v, form)));
         }
-        if let Some(fonts) = self.dict(res.get_raw::<Object<'a>>(b"Font")) {
-            for f in values(&fonts) {
-                let Some(f) = self.dict(Some(f)) else { continue };
-                if f.get::<Name<'_>>(b"Subtype").is_some_and(|s| s.as_ref() == b"Type3") {
-                    if let Some(procs) = self.dict(f.get_raw::<Object<'a>>(b"CharProcs")) {
-                        values(&procs).for_each(|v| _ = self.content(&v, any));
+        if let Some((p, id)) = self.dict(res.get_raw::<Object<'a>>(b"Pattern")) {
+            self.within(id, |u| values(&p).for_each(|v| _ = u.content(&v, |d| d.get::<u8>(b"PatternType") == Some(1))));
+        }
+        if let Some((fonts, id)) = self.dict(res.get_raw::<Object<'a>>(b"Font")) {
+            self.within(id, |u| {
+                for f in values(&fonts) {
+                    let Some((f, font_id)) = u.dict(Some(f)) else { continue };
+                    if f.get::<Name<'_>>(b"Subtype").is_some_and(|s| s.as_ref() == b"Type3") {
+                        u.within(font_id, |u| {
+                            if let Some((procs, procs_id)) = u.dict(f.get_raw::<Object<'a>>(b"CharProcs")) {
+                                u.within(procs_id, |u| values(&procs).for_each(|v| _ = u.content(&v, any)));
+                            }
+                            u.resources(f.get_raw::<Object<'a>>(b"Resources"));
+                        });
                     }
-                    self.resources(f.get_raw::<Object<'a>>(b"Resources"));
                 }
-            }
+            });
         }
-        if let Some(states) = self.dict(res.get_raw::<Object<'a>>(b"ExtGState")) {
-            for gs in values(&states) {
-                let Some(gs) = self.dict(Some(gs)) else { continue };
-                if let Some(mask) = self.dict(gs.get_raw::<Object<'a>>(b"SMask"))
-                    && let Some(g) = mask.get_raw::<Object<'a>>(b"G")
-                {
-                    self.content(&g, any);
+        if let Some((states, id)) = self.dict(res.get_raw::<Object<'a>>(b"ExtGState")) {
+            self.within(id, |u| {
+                for gs in values(&states) {
+                    let Some((gs, gs_id)) = u.dict(Some(gs)) else { continue };
+                    u.within(gs_id, |u| {
+                        if let Some((mask, mask_id)) = u.dict(gs.get_raw::<Object<'a>>(b"SMask"))
+                            && let Some(g) = mask.get_raw::<Object<'a>>(b"G")
+                        {
+                            u.within(mask_id, |u| _ = u.content(&g, any));
+                        }
+                    });
                 }
-            }
+            });
         }
     }
 }
