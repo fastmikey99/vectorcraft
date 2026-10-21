@@ -63,6 +63,16 @@ impl ImageBlob {
 }
 
 impl ImageBlob {
+    /// Whether every decoded pixel is fully opaque. Decode failure remains unknown.
+    pub fn is_opaque(&self) -> Option<bool> {
+        Some(self.decoded()?.pixels().all(|p| p.0[3] == 255))
+    }
+
+    /// Exact pixel uniformity, used to prove that a bitmap opacity mask is a no-op.
+    pub fn all_pixels_equal(&self, rgba: [u8; 4]) -> Option<bool> {
+        Some(self.decoded()?.pixels().all(|p| p.0 == rgba))
+    }
+
     /// The colour around pixel (`x`, `y`) (pixel space): the alpha-weighted average of the `size` ×
     /// `size` pixels centred on it, clipped to the image, as straight RGBA. `None` outside the
     /// image, where every pixel is transparent, or when the image can't be decoded. The last image
@@ -133,7 +143,8 @@ impl ImageBlob {
     }
 
     /// The decoded pixels (the last image decoded is kept for the next sample).
-    fn decoded(&self) -> Option<Arc<image::RgbaImage>> {
+    /// Bounded decoded straight RGBA samples. CMYK/spot callers must use their ink planes.
+    pub fn decoded(&self) -> Option<Arc<image::RgbaImage>> {
         thread_local! {
             static LAST: std::cell::RefCell<Option<(String, Arc<image::RgbaImage>)>> = const { std::cell::RefCell::new(None) };
         }

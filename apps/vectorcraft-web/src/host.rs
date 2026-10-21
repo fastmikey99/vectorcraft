@@ -64,8 +64,6 @@ use wasm_bindgen::closure::Closure;
 
 use crate::protocol;
 
-type Inbox = vectorcraft_ui_egui::HostInbox;
-
 #[derive(Clone)]
 pub struct Bridge {
     window: web_sys::Window,
@@ -75,16 +73,8 @@ pub struct Bridge {
     reported: Rc<Cell<Option<bool>>>,
     /// The selection last reported to the parent, and the document revision it was read at.
     selection: Rc<Cell<Option<(u64, usize, protocol::Selection)>>>,
-    /// Exports the parent asked for, run on the next frame (they need the app).
-    exports: Rc<RefCell<Vec<(JsValue, protocol::Export)>>>,
-    /// Files the parent asked to place, run on the next frame.
-    places: Rc<RefCell<Vec<(JsValue, protocol::Place)>>>,
-    /// Soft pixels the parent asked to remove, run on the next frame.
-    solidifies: Rc<RefCell<Vec<(JsValue, protocol::Solidify)>>>,
-    /// Preferences the parent handed back, put on at the next frame (the last one wins).
-    prefs: Rc<RefCell<Option<String>>>,
-    /// The files the parent hands over (`Services::host_inbox`), which outlive graphics restarts.
-    inbox: Inbox,
+    /// Every parent operation, in arrival order, drained once per frame.
+    operations: Rc<RefCell<Vec<(JsValue, crate::operations::Operation)>>>,
     ready: Rc<Cell<bool>>,
 }
 
@@ -97,26 +87,14 @@ impl Bridge {
             return None;
         }
         let origin = window.location().origin().ok().filter(|o| !protocol::is_opaque(o))?;
-        Some(Self {
-            window,
-            parent,
-            origin,
-            reported: Rc::default(),
-            selection: Rc::default(),
-            exports: Rc::default(),
-            places: Rc::default(),
-            solidifies: Rc::default(),
-            prefs: Rc::default(),
-            inbox: Inbox::default(),
-            ready: Rc::default(),
-        })
+        Some(Self { window, parent, origin, reported: Rc::default(), selection: Rc::default(), operations: Rc::default(), ready: Rc::default() })
     }
 
     /// Send what VectorCraft would download to the parent instead (each time the services are
     /// made, also after a graphics restart).
     pub fn connect(&self, services: &mut Services) {
         services.single_document = true;
-        services.host_inbox = Some(self.inbox.clone());
+
         services.recovery_store = None;
         let bridge = self.clone();
         services.host_open_result = Some(Box::new(move |result| match result {
@@ -143,6 +121,7 @@ impl Bridge {
             ("rasterEffectsResolution", true.into()),
             ("units", true.into()),
             ("solidify", true.into()),
+            ("separationMarks", true.into()),
         ]);
     }
 
@@ -157,58 +136,36 @@ impl Bridge {
         self.send(&[("type", "vectorcraft:failed".into()), ("error", error.into()), ("id", id.clone())]);
     }
 
-    /// Each frame: write the exports the parent asked for and send them back.
+    /// Execute and reply in arrival order, so export observes preceding mutations.
     pub fn run_exports(&self, app: &mut VectorcraftApp) {
-        let asked = std::mem::take(&mut *self.exports.borrow_mut());
-        for (id, export) in asked {
-            match crate::operations::write_export(app, &export) {
-                Ok((name, bytes, bounds, native)) => match self.post_file(&name, &bytes, Some(&id), bounds, native, export.preserve_source) {
-                    Ok(()) => {
-                        if export.mark_saved
-                            && let Some(st) = app.session.active_mut()
-                        {
-                            st.mark_saved();
+        for (id, operation) in std::mem::take(&mut *self.operations.borrow_mut()) {
+            match crate::operations::execute(app, operation) {
+                Ok(crate::operations::Reply::Export { name, bytes, bounds, native, mark_saved, preserve_source }) => {
+                    match self.post_file(&name, &bytes, Some(&id), bounds, native, preserve_source) {
+                        Ok(()) => {
+                            if mark_saved && let Some(st) = app.session.active_mut() {
+                                st.mark_saved();
+                            }
                         }
+                        Err(error) => self.post_export_failed(&id, &error),
                     }
-                    Err(e) => self.post_export_failed(&id, &e),
-                },
-                Err(error) => self.post_export_failed(&id, &error),
-            }
-        }
-        let asked = std::mem::take(&mut *self.places.borrow_mut());
-        for (id, place) in asked {
-            match crate::operations::place_file(app, &place) {
-                Ok(ids) => {
-                    let ids: js_sys::Array = ids.into_iter().map(|i| JsValue::from_f64(i as f64)).collect();
-                    self.send(&[("type", "vectorcraft:placed".into()), ("id", id), ("ids", ids.into())]);
                 }
-                Err(error) => self.post_export_failed(&id, &error),
-            }
-        }
-        let asked = std::mem::take(&mut *self.solidifies.borrow_mut());
-        for (id, request) in asked {
-            match crate::operations::solidify(app, &request) {
-                Ok(done) => {
-                    let ids: js_sys::Array = done.ids.into_iter().map(|i| JsValue::from_f64(i as f64)).collect();
-                    self.send(&[
-                        ("type", "vectorcraft:solidified".into()),
-                        ("id", id),
-                        ("ids", ids.into()),
-                        ("form", done.form.as_str().into()),
-                        ("level", (done.level as f64).into()),
-                        ("softPixels", (done.soft as f64).into()),
-                        ("clearPixels", (done.clear as f64).into()),
-                        ("opaquePixels", (done.opaque as f64).into()),
-                    ]);
+                Ok(crate::operations::Reply::Message { kind, value }) => {
+                    match js_sys::JSON::parse(&value.to_string()) {
+                        Ok(data) => {
+                            if let Some(object) = data.dyn_ref::<js_sys::Object>() {
+                                let _ = js_sys::Reflect::set(object, &"type".into(), &kind.into()); // Fresh plain object.
+                                let _ = js_sys::Reflect::set(object, &"id".into(), &id); // Fresh plain object.
+                                let _ = self.parent.post_message(object, &self.origin); // Parent may have closed.
+                            }
+                        }
+                        Err(_) => self.post_export_failed(&id, "couldn't encode operation reply"),
+                    }
                 }
+                Ok(crate::operations::Reply::None) => {}
                 Err(error) => self.post_export_failed(&id, &error),
             }
         }
-    }
-
-    /// Preferences the parent handed back since the last frame, if any.
-    pub fn take_prefs(&self) -> Option<String> {
-        self.prefs.borrow_mut().take()
     }
 
     /// Hand the parent the preferences and workspace (they changed); false if it couldn't be sent.
@@ -238,7 +195,7 @@ impl Bridge {
         self.selection.set(Some((key.0, key.1, now)));
     }
 
-    /// After each frame: tell the parent when unsaved changes appear or go away.
+    /// Report changes to the document's dirty state.
     pub fn report_dirty(&self, app: &VectorcraftApp) {
         let dirty = app.session.documents().iter().any(|d| d.is_dirty());
         if self.reported.get() != Some(dirty) && self.send(&[("type", "vectorcraft:dirty".into()), ("dirty", dirty.into())]) {
@@ -273,6 +230,10 @@ impl Bridge {
         {
             fields.push(("bounds", o.into()));
         }
+        let summary = crate::operations::saved_marks(name, bytes)?;
+        let marks = js_sys::JSON::parse(&summary.to_string()).map_err(|_| "couldn't encode separation marks".to_string())?;
+        fields.push(("marks", marks));
+        fields.push(("markUnits", "pt".into()));
         let message = message(&fields).ok_or_else(|| "couldn't build the message".to_string())?;
         self.parent
             .post_message_with_transfer(&message, &self.origin, &js_sys::Array::of1(&buffer))
@@ -292,6 +253,22 @@ impl Bridge {
             if !protocol::accepts(&bridge.origin, &event.origin(), from_parent, string(&data, "type").as_deref()) {
                 return;
             }
+            if let Some(kind) = string(&data, "type").filter(|k| k.starts_with("vectorcraft:sep.mark.")) {
+                let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
+                let mark = js_sys::Reflect::get(&data, &JsValue::from_str("mark"))
+                    .ok()
+                    .and_then(|m| js_sys::JSON::stringify(&m).ok())
+                    .and_then(|m| m.as_string())
+                    .and_then(|m| serde_json::from_str(&m).ok());
+                match protocol::mark_command(&kind, mark) {
+                    Ok((command, params)) => {
+                        bridge.operations.borrow_mut().push((id, crate::operations::Operation::Mark(command.into(), params)));
+                        wake();
+                    }
+                    Err(error) => bridge.post_export_failed(&id, &error),
+                }
+                return;
+            }
             if string(&data, "type").as_deref() == Some("vectorcraft:export") {
                 let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
                 let flag = |k: &str| js_sys::Reflect::get(&data, &JsValue::from_str(k)).ok().and_then(|v| v.as_bool());
@@ -308,7 +285,7 @@ impl Bridge {
                         });
                 match request {
                     Ok(export) => {
-                        bridge.exports.borrow_mut().push((id, export));
+                        bridge.operations.borrow_mut().push((id, crate::operations::Operation::Export(export)));
                         wake();
                     }
                     Err(error) => bridge.post_export_failed(&id, &error),
@@ -324,7 +301,7 @@ impl Bridge {
             if string(&data, "type").as_deref() == Some("vectorcraft:prefs") {
                 match protocol::prefs(string(&data, "prefs")) {
                     Ok(text) => {
-                        *bridge.prefs.borrow_mut() = Some(text);
+                        bridge.operations.borrow_mut().push((JsValue::UNDEFINED, crate::operations::Operation::Prefs(text)));
                         wake();
                     }
                     Err(error) => bridge.post_failed(&error),
@@ -340,7 +317,7 @@ impl Bridge {
                 }
                 match protocol::place_copies(string(&data, "name"), bytes(&data), rect(&data, "at"), copies.and_then(|v| v.as_bool())) {
                     Ok(place) => {
-                        bridge.places.borrow_mut().push((id, place));
+                        bridge.operations.borrow_mut().push((id, crate::operations::Operation::Place(place)));
                         wake();
                     }
                     Err(error) => bridge.post_export_failed(&id, &error),
@@ -355,7 +332,7 @@ impl Bridge {
                 let copies = given("copies").map(|v| v.as_bool());
                 match protocol::solidify(level, copies) {
                     Ok(request) => {
-                        bridge.solidifies.borrow_mut().push((id, request));
+                        bridge.operations.borrow_mut().push((id, crate::operations::Operation::Solidify(request)));
                         wake();
                     }
                     Err(error) => bridge.post_export_failed(&id, &error),
@@ -421,15 +398,18 @@ impl Bridge {
                             }
                         }
                     };
-                    bridge.inbox.lock().unwrap_or_else(|e| e.into_inner()).push(vectorcraft_ui_egui::HostOpen {
-                        name: open.name,
-                        bytes: open.bytes,
-                        print_production: flag.as_bool().unwrap_or(false),
-                        separations,
-                        raster_effects_ppi,
-                        units,
-                        stroke_units,
-                    });
+                    bridge.operations.borrow_mut().push((
+                        JsValue::UNDEFINED,
+                        crate::operations::Operation::Open(vectorcraft_ui_egui::HostOpen {
+                            name: open.name,
+                            bytes: open.bytes,
+                            print_production: flag.as_bool().unwrap_or(false),
+                            separations,
+                            raster_effects_ppi,
+                            units,
+                            stroke_units,
+                        }),
+                    ));
                     wake();
                 }
                 Err(error) => {

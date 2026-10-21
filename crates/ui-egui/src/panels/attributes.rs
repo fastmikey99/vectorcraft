@@ -61,6 +61,7 @@ fn pair<T: Copy + PartialEq>(ui: &mut Ui, enabled: bool, current: Option<T>, ite
 }
 
 pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
+    separation_marks(app, ui);
     let (info, paths) = state(app, ui.ctx());
     let has = !info.ids.is_empty();
     ui.horizontal(|ui| {
@@ -256,5 +257,95 @@ mod tests {
         assert!(opened.borrow().is_empty());
         open_url(&mut app, &json!({"url": "https://example.com/b"})).unwrap();
         assert_eq!(*opened.borrow(), ["https://example.com/b"]);
+    }
+}
+
+/// Small artist-facing controls; list identifiers are library identifiers, not translated prose.
+fn separation_marks(app: &mut VectorcraftApp, ui: &mut Ui) {
+    egui::CollapsingHeader::new(tl!("Separation marks")).default_open(true).show(ui, |ui| {
+        ui.add_enabled_ui(selection_len(app) > 0, |ui| {
+            ui.menu_button(tl!("Metallic"), |ui| {
+                egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                    let mut inks: Vec<(String, String)> =
+                        (1..=28).filter(|i| *i != 2).map(|i| (format!("M-{i}"), format!("Set M-{i} objects"))).collect();
+                    inks.insert(1, ("M-2 (NZ_US)".into(), "Set M-2 objects (NZ_US)".into()));
+                    inks.insert(2, ("M-2 (UK)".into(), "Set M-2 objects (UK)".into()));
+                    inks.extend(["M-SPOT", "M-FLOOD"].map(|ink| (ink.into(), format!("Set {ink} objects"))));
+                    inks.extend((871..=877).map(|i| (format!("PMS {i}"), format!("Set PMS {i} objects"))));
+                    for (label, list) in inks {
+                        if ui.button(label).clicked() {
+                            // app.run reports errors in the status bar.
+                            let _ = app.run("sep.mark.set", json!({"mark":{"type":"metallic","list":format!("(2a) Apply Metallic Colour/{list}")}}));
+                            ui.close();
+                        }
+                    }
+                });
+            });
+            if ui.button(tl!("No trap (no bleed)")).clicked() {
+                // app.run reports errors in the status bar.
+                let _ = app.run("sep.mark.set", json!({"mark":{"type":"noTrap"}}));
+            }
+            if ui.button(tl!("Clear separation mark")).clicked() {
+                // app.run reports errors in the status bar.
+                let _ = app.run("sep.mark.clear", json!({}));
+            }
+        });
+    });
+}
+
+#[cfg(test)]
+mod separation_tests {
+    use super::*;
+    #[test]
+    fn canvas_with_separation_marks() {
+        let mut app = VectorcraftApp::new(vectorcraft_engine::Session::new(), Default::default());
+        app.run("file.new", json!({"width":480,"height":360})).unwrap();
+        app.run("shape.rectangle", json!({"x":60,"y":80,"width":130,"height":100})).unwrap();
+        app.run("paint.setFill", json!({"color":"#b98735"})).unwrap();
+        app.run("sep.mark.set", json!({"mark":{"type":"metallic","list":"(2a) Apply Metallic Colour/Set M-1 objects"}})).unwrap();
+        app.run("shape.ellipse", json!({"x":240,"y":100,"width":120,"height":120})).unwrap();
+        app.run("paint.setFill", json!({"color":"#4486b6"})).unwrap();
+        app.run("sep.mark.set", json!({"mark":{"type":"noTrap"}})).unwrap();
+        app.run("window.panel.float", json!({"panel":"attributes","x":780,"y":130,"width":390,"height":470})).unwrap();
+        let builder = egui_kittest::Harness::builder().with_size(egui::vec2(1280., 800.));
+        let mut h = builder.build_ui_state(
+            |ui, app: &mut VectorcraftApp| {
+                app.logic(ui.ctx());
+                app.ui(ui);
+            },
+            app,
+        );
+        h.run_steps(5);
+        assert_eq!(h.state_mut().run("sep.mark.list", json!({})).unwrap()["marks"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn panel_offers_selection_marks() {
+        let mut app = VectorcraftApp::new(vectorcraft_engine::Session::new(), Default::default());
+        app.session.execute("file.new", &json!({})).unwrap();
+        app.session.execute("shape.rectangle", &json!({"x":0,"y":0,"width":10,"height":10})).unwrap();
+        let ctx = egui::Context::default();
+        let mut labels = Vec::new();
+        fn text(shape: &egui::Shape, labels: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(t) => labels.push(t.galley.text().into()),
+                egui::Shape::Vec(v) => {
+                    for s in v {
+                        text(s, labels);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| show(&mut app, ui));
+            out.textures_delta.clear();
+            for shape in out.shapes {
+                text(&shape.shape, &mut labels);
+            }
+        }
+        for label in ["Separation marks", "Metallic", "No trap (no bleed)", "Clear separation mark"] {
+            assert!(labels.iter().any(|l| l == label), "{label}: {labels:?}");
+        }
     }
 }

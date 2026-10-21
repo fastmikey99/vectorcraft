@@ -16,6 +16,36 @@ fn circle(cx: f64, cy: f64, r: f64) -> PathData {
     PathData::from_bezpath(&kurbo::Circle::new((cx, cy), r).to_path(1e-4))
 }
 
+#[test]
+fn paint_stack_preserves_paint_order_and_independent_fill_rules() {
+    let back = rect(0., 0., 30., 20.);
+    let cover = rect(5., 0., 20., 20.);
+    let mut ring = rect(10., 0., 10., 20.);
+    ring.subpaths.extend(rect(12., 2., 6., 16.).subpaths);
+    let stack = [(&back, NZ, true), (&cover, NZ, false), (&ring, FillRule::EvenOdd, true)];
+    let result = try_paint_stack(&stack).unwrap();
+    let mut expected = PathData::default();
+    for (path, rule, add) in stack {
+        expected = try_boolean(&expected, NZ, path, rule, if add { BoolOp::Union } else { BoolOp::Difference }, DEFAULT_PRECISION).unwrap();
+    }
+    assert!((area(&result, NZ) - 304.).abs() < 1e-6);
+    assert!(try_boolean(&expected, NZ, &result, NZ, BoolOp::Xor, DEFAULT_PRECISION).unwrap().is_empty());
+    assert!(try_paint_stack(&[]).unwrap().is_empty());
+    assert!(try_paint_stack(&[(&back, NZ, false)]).unwrap().is_empty());
+    let invalid = rect(f64::NAN, 0., 10., 10.);
+    assert!(try_paint_stack(&[(&invalid, NZ, true)]).is_err());
+}
+
+#[test]
+fn paint_stack_ten_thousand_shapes_is_not_quadratic() {
+    let paths: Vec<_> = (0..10_000).map(|i| rect(f64::from(i % 100) * 3., f64::from(i / 100) * 3., 2., 2.)).collect();
+    let refs: Vec<_> = paths.iter().map(|p| (p, NZ, true)).collect();
+    let start = std::time::Instant::now();
+    let result = try_paint_stack(&refs).unwrap();
+    assert_eq!(result.subpaths.len(), 10_000);
+    assert!(start.elapsed().as_secs_f64() < 30., "10k disjoint paths took {:?}", start.elapsed());
+}
+
 fn ar(p: &PathData) -> f64 {
     area(p, NZ)
 }
@@ -483,4 +513,52 @@ fn remove_anchor_at_an_end_drops_its_segment_and_rejects_bad_input() {
     bad.anchors[0].h_out = Point::new(5.0, f64::NAN);
     assert!(remove_anchor(&mut bad, 1));
     assert_eq!(bad.anchors.len(), 2);
+}
+
+#[test]
+fn bulk_sweep_stops_on_intersection_budget_and_mid_sweep_cancellation() {
+    let mut paths = Vec::new();
+    for i in 0..100 {
+        paths.push(rect(f64::from(i) * 2., 0., 1., 200.));
+        paths.push(rect(0., f64::from(i) * 2., 200., 1.));
+    }
+    let refs: Vec<_> = paths.iter().map(|p| (p, NZ, true)).collect();
+    let budget = GeometryBudget { input_segments: 10_000, output_segments: 2_000, work_steps: 100_000, ..GeometryBudget::default() };
+    assert_eq!(try_paint_stack_with_control(&refs, budget, || false), Err(PathOpsError::IntersectionBudget));
+    let timed = GeometryBudget { time_limit: std::time::Duration::ZERO, ..GeometryBudget::default() };
+    assert_eq!(try_paint_stack_with_control(&refs, timed, || false), Err(PathOpsError::TimeBudget));
+    let memory = GeometryBudget { winding_bytes: 1024, ..GeometryBudget::default() };
+    assert_eq!(try_paint_stack_with_control(&refs, memory, || false), Err(PathOpsError::IntersectionBudget));
+    let mut polls = 0;
+    let result = try_paint_stack_with_control(&refs, GeometryBudget::default(), || {
+        polls += 1;
+        polls > 1_000
+    });
+    assert_eq!(result, Err(PathOpsError::Cancelled));
+    assert!(polls > 1_000, "cancellation was polled inside the sweep, after input collection");
+    let budget = GeometryBudget { input_segments: 10, ..GeometryBudget::default() };
+    assert_eq!(try_paint_stack_with_control(&refs, budget, || false), Err(PathOpsError::SegmentBudget));
+}
+
+#[test]
+fn binary_crossing_grids_obey_topology_budget_and_cancel_inside_sweep() {
+    let mut a = PathData::default();
+    let mut b = PathData::default();
+    for i in 0..100 {
+        a.subpaths.extend(rect(i as f64 * 2., 0., 1., 200.).subpaths);
+        b.subpaths.extend(rect(0., i as f64 * 2., 200., 1.).subpaths);
+    }
+    let budget = GeometryBudget { output_segments: 2_000, ..GeometryBudget::default() };
+    assert_eq!(try_boolean_with_control(&a, NZ, &b, NZ, BoolOp::Difference, budget, || false), Err(PathOpsError::IntersectionBudget));
+    let small = GeometryBudget { input_segments: 16, ..GeometryBudget::default() };
+    assert_eq!(try_boolean_with_control(&a, NZ, &b, NZ, BoolOp::Difference, small, || false), Err(PathOpsError::SegmentBudget));
+    let mut polls = 0;
+    assert_eq!(
+        try_boolean_with_control(&a, NZ, &b, NZ, BoolOp::Difference, GeometryBudget::default(), || {
+            polls += 1;
+            polls > 1000
+        }),
+        Err(PathOpsError::Cancelled)
+    );
+    assert_eq!(polls, 1001);
 }

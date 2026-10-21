@@ -543,7 +543,7 @@ fn pdf_jpeg_decode_polarity_and_original_encoding_survive_export() {
     old.bytes = ImageBlob::cmyk_tiff(&Inks::new(16, 16, flat([0, 0, 0, 255], 256)).unwrap()).unwrap().bytes;
     let changed = export(&doc, &opts(json!({}))).unwrap();
     assert_ne!(written(&changed)[0].data, jpg);
-    assert!(blobs(&import(&changed).unwrap())[0].cmyk().unwrap().data.chunks_exact(4).all(|p| p == [0, 0, 0, 255]));
+    assert!(blobs(&import(&changed).unwrap())[0].cmyk().unwrap().data.as_chunks::<4>().0.iter().all(|p| *p == [0, 0, 0, 255]));
 }
 
 #[test]
