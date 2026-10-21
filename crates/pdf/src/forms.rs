@@ -293,9 +293,15 @@ fn write_layers(
         let name = l.name.clone().unwrap_or_else(|| format!("Layer {}", siblings.len()));
         let printable = matches!(l.kind, NodeKind::Layer { printable: true, .. });
         let on = |b: bool| if b { "ON" } else { "OFF" };
+        let processing = if l.extras().processing_white { "/GTS_Metadata<</GTS_ProcStepsGroup/White>>" } else { "" };
         let g = patch.add_object(
-            format!("<</Type/OCG/Name{}/Usage<</View<</ViewState/{}>>/Print<</PrintState/{}>>>>>>", text_string(&name), on(l.visible), on(printable))
-                .into_bytes(),
+            format!(
+                "<</Type/OCG{processing}/Name{}/Usage<</View<</ViewState/{}>>/Print<</PrintState/{}>>>>>>",
+                text_string(&name),
+                on(l.visible),
+                on(printable)
+            )
+            .into_bytes(),
         );
         groups.insert(i, g);
         all.push(g);

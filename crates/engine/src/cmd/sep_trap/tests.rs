@@ -323,25 +323,27 @@ fn gradient_eligibility_requires_a_proven_constant_ink_predicate() {
 #[test]
 fn white_no_bleed_masks_suppress_coincident_edges_in_both_trap_outputs() {
     for task in [false, true] {
-        for front in [false, true] {
-            let mut s = session(Color::cmyk(1.0, 0.0, 0.0, 0.0));
-            s.edit("Trap", |d, _| {
-                let layer = d.layers[0].id;
-                let mut mask = Node::path(
-                    d.alloc_id(),
-                    shapes::rectangle(Rect::new(5.0, 5.0, 25.0, 25.0)),
-                    Appearance::basic(Paint::solid(Color::cmyk(0.0, 0.0, 0.0, 0.0)), Paint::None, 0.0),
-                );
-                mask.name = Some("LIGHT NO BLEED".into());
-                d.insert(Some(layer), if front { usize::MAX } else { 0 }, mask)?;
-                Ok(())
-            })
-            .unwrap();
-            let result = if task { trap_task(&mut s) } else { s.execute(C, &json!({"blackThreshold":0.7})) }.unwrap();
-            if front {
-                assert_eq!(result["pixels"], 0);
-            } else {
-                assert!(result["pixels"].as_u64().unwrap() > 0, "a white mask behind the art must not suppress visible ink");
+        for name in ["LIGHT NO BLEED", "NO WHP NO BLEED", "NO POWDER NO BLEED", "NO WHP OR POWDER NO BLEED"] {
+            for front in [false, true] {
+                let mut s = session(Color::cmyk(1.0, 0.0, 0.0, 0.0));
+                s.edit("Trap", |d, _| {
+                    let layer = d.layers[0].id;
+                    let mut mask = Node::path(
+                        d.alloc_id(),
+                        shapes::rectangle(Rect::new(5.0, 5.0, 25.0, 25.0)),
+                        Appearance::basic(Paint::solid(Color::cmyk(0.0, 0.0, 0.0, 0.0)), Paint::None, 0.0),
+                    );
+                    mask.name = Some(name.into());
+                    d.insert(Some(layer), if front { usize::MAX } else { 0 }, mask)?;
+                    Ok(())
+                })
+                .unwrap();
+                let result = if task { trap_task(&mut s) } else { s.execute(C, &json!({"blackThreshold":0.7})) }.unwrap();
+                if front {
+                    assert_eq!(result["pixels"], 0);
+                } else {
+                    assert!(result["pixels"].as_u64().unwrap() > 0, "a white mask behind the art must not suppress visible ink");
+                }
             }
         }
     }
