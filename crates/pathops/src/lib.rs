@@ -15,8 +15,8 @@ mod pathfinder;
 mod planar;
 
 pub use boolean::{
-    BoolOp, DEFAULT_PRECISION, GeometryBudget, area, boolean, boolean_n, normalize, try_boolean, try_normalize, try_paint_stack,
-    try_paint_stack_with_control, unite_all,
+    BoolOp, DEFAULT_PRECISION, GeometryBudget, area, boolean, boolean_n, normalize, try_boolean, try_boolean_with_control, try_normalize,
+    try_paint_stack, try_paint_stack_with_control, unite_all,
 };
 pub use edit::{
     AverageAxis, SimplifyOptions, add_anchor_points, average, join, remove_anchor, remove_redundant_points, simplify, simplify_with, smooth,

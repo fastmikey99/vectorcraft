@@ -539,3 +539,26 @@ fn bulk_sweep_stops_on_intersection_budget_and_mid_sweep_cancellation() {
     let budget = GeometryBudget { input_segments: 10, ..GeometryBudget::default() };
     assert_eq!(try_paint_stack_with_control(&refs, budget, || false), Err(PathOpsError::SegmentBudget));
 }
+
+#[test]
+fn binary_crossing_grids_obey_topology_budget_and_cancel_inside_sweep() {
+    let mut a = PathData::default();
+    let mut b = PathData::default();
+    for i in 0..100 {
+        a.subpaths.extend(rect(i as f64 * 2., 0., 1., 200.).subpaths);
+        b.subpaths.extend(rect(0., i as f64 * 2., 200., 1.).subpaths);
+    }
+    let budget = GeometryBudget { output_segments: 2_000, ..GeometryBudget::default() };
+    assert_eq!(try_boolean_with_control(&a, NZ, &b, NZ, BoolOp::Difference, budget, || false), Err(PathOpsError::IntersectionBudget));
+    let small = GeometryBudget { input_segments: 16, ..GeometryBudget::default() };
+    assert_eq!(try_boolean_with_control(&a, NZ, &b, NZ, BoolOp::Difference, small, || false), Err(PathOpsError::SegmentBudget));
+    let mut polls = 0;
+    assert_eq!(
+        try_boolean_with_control(&a, NZ, &b, NZ, BoolOp::Difference, GeometryBudget::default(), || {
+            polls += 1;
+            polls > 1000
+        }),
+        Err(PathOpsError::Cancelled)
+    );
+    assert_eq!(polls, 1001);
+}

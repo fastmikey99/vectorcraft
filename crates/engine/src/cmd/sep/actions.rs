@@ -48,7 +48,9 @@ impl Player<'_> {
             }
             "RemoveFill" => {
                 let targets = leaf_targets(self.doc()?, &ids);
+                let images = super::images::prepare(self.doc()?, &targets, &Paint::None)?;
                 self.session.edit("Appearance", |d, _| {
+                    super::images::apply(d, images)?;
                     for id in &targets {
                         if let Some(n) = d.node_mut(*id) {
                             n.appearance.items.retain(|item| !matches!(item, AppearanceItem::Fill(_)));
@@ -623,11 +625,23 @@ impl Player<'_> {
         } else {
             None
         };
+        let image_ids: std::collections::BTreeSet<_> = targets
+            .iter()
+            .copied()
+            .filter(|id| self.doc().ok().and_then(|d| d.node(*id)).is_some_and(|n| matches!(n.kind, NodeKind::Image(_))))
+            .collect();
+        if flat && update && !stroke && !image_ids.is_empty() {
+            return Err(error("updating selected image ink channels is not implemented"));
+        }
+        let images = if !stroke && let Some(paint) = &paint { super::images::prepare(self.doc()?, &targets, paint)? } else { Vec::new() };
         let inks = self.inks.clone();
         self.session.edit("Appearance", |d, _| {
+            super::images::apply(d, images)?;
             for id in targets {
                 let Some(n) = d.node_mut(id) else { continue };
-                if let Some(new) = &paint {
+                if let Some(new) = &paint
+                    && (stroke || !image_ids.contains(&id))
+                {
                     let old = if stroke { n.appearance.stroke_paint() } else { n.appearance.fill_paint() };
                     let new = if update { updated_paint(&old, new, &inks, percentage)? } else { new.clone() };
                     if stroke {

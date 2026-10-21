@@ -733,6 +733,34 @@ pub fn try_boolean(a: &PathData, a_rule: FillRule, b: &PathData, b_rule: FillRul
     Ok(all_contours_to_path(&c, &tidy))
 }
 
+/// Bounded binary operation for optional geometric refinements. Cancellation is checked
+/// inside topology construction, before intersection growth can exhaust memory.
+pub fn try_boolean_with_control(
+    a: &PathData,
+    a_rule: FillRule,
+    b: &PathData,
+    b_rule: FillRule,
+    op: BoolOp,
+    budget: GeometryBudget,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<PathData, PathOpsError> {
+    // Refuse oversized inputs before allocating their Bezier copies, as the bulk
+    // sweep does. An anchor contributes at most one segment, plus MoveTo/ClosePath.
+    let mut elements = 0usize;
+    for subpath in a.subpaths.iter().chain(&b.subpaths) {
+        if cancelled() {
+            return Err(PathOpsError::Cancelled);
+        }
+        elements = elements.saturating_add(subpath.anchors.len().saturating_add(2));
+        if elements > budget.input_segments {
+            return Err(PathOpsError::SegmentBudget);
+        }
+    }
+    let arr = Arrangement::new_controlled(vec![(fill_bezpath(a), a_rule), (fill_bezpath(b), b_rule)], budget, cancelled)?;
+    let c = arr.contours(|m| op.apply(m[0], m[1]));
+    Ok(all_contours_to_path(&c, &arr.tidy))
+}
+
 /// Resolve an opaque paint stack, back to front, in one arrangement. A `true` input adds
 /// its filled area; a `false` input knocks it out. The last covering input owns each face.
 /// Unlike `boolean_n`, this reads sparse winding entries rather than allocating and scanning

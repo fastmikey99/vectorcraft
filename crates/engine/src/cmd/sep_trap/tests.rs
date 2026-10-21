@@ -401,3 +401,33 @@ fn trap_ink_boundary_and_adjacent_floats_match_shared_presence() {
         assert_eq!(eligible, vectorcraft_doc::inks::present(value, epsilon));
     }
 }
+
+#[test]
+fn adversarial_ownership_falls_back_and_cancellation_is_not_swallowed() {
+    let mut d = Document::new(1000., 1000.);
+    let layer = d.default_layer().unwrap();
+    for vertical in [true, false] {
+        let mut path = PathData::default();
+        for i in 0..200 {
+            let rect = if vertical {
+                Rect::new(i as f64 * 2., 0., i as f64 * 2. + 1., 400.)
+            } else {
+                Rect::new(0., i as f64 * 2., 400., i as f64 * 2. + 1.)
+            };
+            path.subpaths.extend(shapes::rectangle(rect).subpaths);
+        }
+        let n = Node::path(
+            d.alloc_id(),
+            path,
+            Appearance::basic(Paint::solid(if vertical { Color::BLACK } else { Color::rgb(1., 0., 0.) }), Paint::None, 0.),
+        );
+        d.insert(Some(layer), usize::MAX, n).unwrap();
+    }
+    let mut nearest = vec![Some(0)];
+    assert!(colour::samples(&d, &mut nearest, 1, Rect::new(0., 0., 1., 1.), 0.7).unwrap().is_none());
+    assert_eq!(nearest, [Some(0)], "renderer samples survive a complexity fallback");
+    let token = crate::cancel::CancelToken::new();
+    token.cancel();
+    let result = crate::cancel::scope(&token, None, || colour::samples(&d, &mut nearest, 1, Rect::new(0., 0., 1., 1.), 0.7));
+    assert!(matches!(result, Err(crate::EngineError::Cancelled)));
+}

@@ -264,9 +264,9 @@ selectors are valid and preserve the Dark behavior. Missing IDs are errors.
 The PAL, not the intent handler, renames selected art `LIGHT`, builds the white
 `LIGHT NO BLEED` mask, applies the trap ticket and later handles WHP and cleanup.
 No additional PAL action types are required. Both `sep.trap` and TrapTask respect
-the visible white mask. When that mask is present, nearest rendered ownership is
-used instead of nearest-outline colour ties; a mask behind artwork does not
-suppress its visible ink. WHP's existing actions convert the mask to 50% K and
+the visible white mask. Flat opaque masks participate in visible-paint ownership;
+covered outlines cannot lend them ink. Complex masks use renderer sampling, and
+a mask behind artwork does not suppress its visible ink. WHP's existing actions convert the mask to 50% K and
 move it back/front, excluding covered dark-style WHP while retaining the choked
 light-style pass. CLEAN UP deletes the temporary mask.
 
@@ -507,25 +507,39 @@ warnings stop at Export. Preparation explicitly restores retained page blending
 and output intent settings after the requested colour conversion, before validating
 the final output.
 
-Ink selection reads CMYK/DeviceN image planes. Conversion/deletion of affected
+Ink selection reads CMYK/DeviceN image planes and evaluates RGB/Gray process
+samples through the document CMS. Spot-only queries use channel metadata without
+requiring a CMYK decoder. Unreadable samples stop when the query needs them.
+Conversion/deletion of affected
 nonzero image channels currently stops before any paint or swatch is changed.
 Provably empty spot channels are removed exactly along with their unused swatches;
-unsupported or undecodable image channel selection also stops. Registration `/All`
+image fill replacement/removal makes a new blob for selected instances only.
+A zero replacement clears every process and spot sample and drops empty spot
+channels, preserving placement, intrinsic alpha and external masks. Previously
+generated underprints remain intact. Registration `/All`
 images are refused because the image storage model cannot retain every-output-colorant
 semantics. Marked meshes are never coalesced into one shading.
 
 Underprint checks the full ancestor composition, including cached trap footprints.
 Zero opacity contributes nothing; opacity one, Normal blending and proven no-op
-effects are accepted. Mask coverage is proved over the clipped content using
-geometry and exact decoded image samples. Partial, zero or unknown coverage stops
+effects are accepted. Mask coverage uses conservative containment of original
+geometry and exact decoded image samples, independently of cleaned/refitted
+underprint outlines. Exact rectangle coverage and Bezier control bounds retain
+thin gaps; uncertain coverage is not proven. Partial, zero or unknown coverage stops
 unless a selected additive contribution is already wholly inside the established
 underprint, making its mask irrelevant to the union. That exception never applies
 to unselected knockout art or ordinary path operations, and the source mask remains
 on the exported artwork. Synthetic tests cover opaque, partial, zero, disabled,
-inverted and clipped masks, bitmap coverage and redundant selected contributions.
+inverted and clipped masks, bitmap coverage and redundant selected contributions,
+including uncovered strips of 0.005 pt and 1e-9 pt.
 
 Trap boundary ownership excludes opaque paint covered by later paint and uses
-frontmost ties. Unresolvable compositions use renderer sampling. Bulk paint geometry
+frontmost ties, including flat no-bleed covers. Its optional subtraction is bounded
+before Bezier allocation and inside the intersection sweep: 100,000 input/topology
+elements, 300,000 work steps, 16 MB winding storage and two seconds per operation,
+with a three-million-step shared allowance across subtractions. Complexity/budget limits retain
+renderer sampling; cancellation propagates. Unresolvable compositions also use
+renderer sampling. Bulk paint geometry
 has limits of 5 million input elements, 5 million generated topology segments,
 15 million work steps and 500 million winding-storage bytes, calibrated at 7.6–9.6
 times the measured large-art workload. Cancellation and a ten-minute wall-clock
@@ -536,7 +550,7 @@ The web bridge processes all parent operations in one ordered queue, including
 mutation followed by export.
 
 Validation (22 October 2026): engine, PDF, document, pathops and web suites pass
-(3,799 tests passed, three ignored); native/all-target and wasm clippy pass with
+(3,806 tests passed, three ignored); native/all-target and wasm clippy pass with
 `-D warnings`. Changed Rust files pass formatting and the diff passes whitespace
 checks. No customer fixtures or profiles are checked in.
 
@@ -548,15 +562,20 @@ its masked white border lies over opaque white backing, and removing both source
 masks changes no source colorant pixels at either 600 or 1,200 dpi. The underprint
 union is already covered geometrically.
 
-Of the completed jobs, 40 have identical 600 dpi Ghostscript plates against the
-base tree. Two metallic jobs retain nonzero image spot samples previously omitted
-by ink selection, and two mixed jobs correct covered-paint trap ownership. The
-metallic Silver and M-1 plates are slightly further from shipped; WHP is unchanged
-in one job and slightly further in the other. One job already lacks shipped WHP
-in both baseline and current output. Complete plate deltas, comparison methods and
-job identities remain in the local corpus report; production parity is not claimed.
-The large performance input completes within the calibrated geometry limits in
-92.37 seconds, versus 90.82 seconds for the baseline.
+The round-one rerun compares against a frozen executable from `a9a9dd93`.
+Of the 44 completed regular jobs, 42 have identical 600 dpi Ghostscript plates.
+Two metallic jobs lose their residual M-1 trap plate, matching its absence in
+shipped output, and retain Silver. Their real-file residual came from forcing
+renderer sampling for flat no-bleed covers; image fill replacement alone did not
+remove it. Silver is slightly closer to shipped in both jobs; WHP is unchanged
+in one and slightly closer in the other. The unchanged job already lacks shipped
+WHP in both baseline and current output. Corrected flat ownership also changes
+one job's Cyan and Yellow trap samples: its integrated ink error against shipped
+increases slightly, and WP differs by one additional registered pixel. Complete
+plate deltas, comparison methods and job identities remain in the local corpus
+report; production parity is not claimed.
+The large performance input completes without a budget stop in 97.13 seconds,
+versus 90.76 seconds for `a9a9dd93` in sequential idle measurements (7.0% slower).
 
 Standalone trapping on shipped Artwork retains its existing colour result across
 all eleven dark files: shared-trap mean error 0.0389 percentage points, 99.913% within

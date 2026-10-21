@@ -1,7 +1,9 @@
 //! Headless PAL player for preparation and vector separation geometry.
 mod actions;
 mod clean;
+mod coverage;
 mod geometry;
+mod images;
 mod intents;
 mod marks;
 mod metallic;
