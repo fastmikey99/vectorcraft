@@ -657,6 +657,16 @@ pub fn try_boolean(a: &PathData, a_rule: FillRule, b: &PathData, b_rule: FillRul
     Ok(all_contours_to_path(&c, &tidy))
 }
 
+/// Resolve an opaque paint stack, back to front, in one arrangement. A `true` input adds
+/// its filled area; a `false` input knocks it out. The last covering input owns each face.
+/// Unlike `boolean_n`, this reads sparse winding entries rather than allocating and scanning
+/// a flag for every input at every edge. Each path retains its own fill rule and winding.
+pub fn try_paint_stack(paths: &[(&PathData, FillRule, bool)]) -> Result<PathData, PathOpsError> {
+    let arr = Arrangement::new(paths.iter().map(|(p, rule, _)| (fill_bezpath(p), *rule)).collect())?;
+    let contours = arr.contours_where(|w| arr.covered(w).next_back().and_then(|i| paths.get(i)).is_some_and(|p| p.2));
+    Ok(all_contours_to_path(&contours, &arr.tidy))
+}
+
 /// N-ary boolean: the area where `pred(inside_flags)` holds, `inside_flags[i]` telling whether a
 /// point is inside `paths[i]` under its fill rule.
 pub fn boolean_n(paths: &[(&PathData, FillRule)], pred: impl Fn(&[bool]) -> bool) -> PathData {
