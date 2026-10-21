@@ -514,3 +514,28 @@ fn remove_anchor_at_an_end_drops_its_segment_and_rejects_bad_input() {
     assert!(remove_anchor(&mut bad, 1));
     assert_eq!(bad.anchors.len(), 2);
 }
+
+#[test]
+fn bulk_sweep_stops_on_intersection_budget_and_mid_sweep_cancellation() {
+    let mut paths = Vec::new();
+    for i in 0..100 {
+        paths.push(rect(f64::from(i) * 2., 0., 1., 200.));
+        paths.push(rect(0., f64::from(i) * 2., 200., 1.));
+    }
+    let refs: Vec<_> = paths.iter().map(|p| (p, NZ, true)).collect();
+    let budget = GeometryBudget { input_segments: 10_000, output_segments: 2_000, work_steps: 100_000, ..GeometryBudget::default() };
+    assert_eq!(try_paint_stack_with_control(&refs, budget, || false), Err(PathOpsError::IntersectionBudget));
+    let timed = GeometryBudget { time_limit: std::time::Duration::ZERO, ..GeometryBudget::default() };
+    assert_eq!(try_paint_stack_with_control(&refs, timed, || false), Err(PathOpsError::TimeBudget));
+    let memory = GeometryBudget { winding_bytes: 1024, ..GeometryBudget::default() };
+    assert_eq!(try_paint_stack_with_control(&refs, memory, || false), Err(PathOpsError::IntersectionBudget));
+    let mut polls = 0;
+    let result = try_paint_stack_with_control(&refs, GeometryBudget::default(), || {
+        polls += 1;
+        polls > 1_000
+    });
+    assert_eq!(result, Err(PathOpsError::Cancelled));
+    assert!(polls > 1_000, "cancellation was polled inside the sweep, after input collection");
+    let budget = GeometryBudget { input_segments: 10, ..GeometryBudget::default() };
+    assert_eq!(try_paint_stack_with_control(&refs, budget, || false), Err(PathOpsError::SegmentBudget));
+}

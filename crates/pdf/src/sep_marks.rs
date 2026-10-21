@@ -62,6 +62,45 @@ mod tests {
         assert!(unmarked > 0);
     }
     #[test]
+    fn marked_mesh_children_are_not_batched_without_editing_data() {
+        use std::sync::Arc;
+        use vectorcraft_doc::{NodeKind, live::GradientMesh};
+        let mut doc = Document::new(100., 100.);
+        let layer = doc.default_layer().unwrap();
+        let mut children = Vec::new();
+        for i in 0..2 {
+            let mesh =
+                GradientMesh::from_surface(1, 1, &|u, v| vectorcraft_geom::Point::new(10. + f64::from(i) * 40. + u * 30., 10. + v * 30.), &|_, _| {
+                    Color::cmyk(0., 1., 0., 0.)
+                });
+            let mut node = Node::new(doc.alloc_id(), NodeKind::Mesh(mesh));
+            if i == 0 {
+                node.extras_mut().sep_mark = Some(SepMark::NoTrap);
+            }
+            children.push(Arc::new(node));
+        }
+        let group = Node::group(doc.alloc_id(), children);
+        doc.insert(Some(layer), 0, group).unwrap();
+        let bytes = crate::export(&doc, &Default::default()).unwrap();
+        assert!(crate::editing(&bytes).is_none());
+        let imported = crate::import(&bytes).unwrap();
+        let mut marked = Vec::new();
+        let mut unmarked = Vec::new();
+        imported.walk(|n| {
+            if matches!(n.kind, NodeKind::Mesh(_)) {
+                if n.extras().sep_mark == Some(SepMark::NoTrap) {
+                    marked.push(n.geometric_bounds().unwrap());
+                } else {
+                    unmarked.push(n.geometric_bounds().unwrap());
+                }
+            }
+        });
+        assert!(!marked.is_empty());
+        assert!(!unmarked.is_empty());
+        assert!(marked.iter().all(|b| b.x1 < 45.));
+        assert!(unmarked.iter().all(|b| b.x0 > 45.));
+    }
+    #[test]
     fn hostile_and_unknown_tags_are_ignored() {
         for tag in [b"VectorCraftSep1_F".as_slice(), b"VectorCraftSep1_zz", b"VectorCraftSep2_00", b"VectorCraftSep1_7B7D"] {
             assert!(parse(tag).is_none());

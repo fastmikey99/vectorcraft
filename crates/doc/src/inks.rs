@@ -10,6 +10,14 @@ use vectorcraft_color::{Color, Paint};
 
 use crate::{AppearanceItem, Document, Node, NodeKind};
 
+/// PAL ink-presence threshold, represented in the same precision as stored coverage.
+pub const PRESENCE_EPSILON: f32 = 0.005;
+
+/// The threshold itself is ink-bearing; only smaller amounts count as no ink.
+pub fn present(coverage: f32, epsilon: f32) -> bool {
+    coverage >= epsilon
+}
+
 /// Ink coverage of one paint colour.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Inks {
@@ -154,5 +162,16 @@ pub fn map_document_colors(doc: &mut Document, f: &mut dyn FnMut(&Color, Link) -
     }
     for s in &mut doc.symbols {
         map_node_colors(Arc::make_mut(&mut s.art), f);
+    }
+}
+
+#[cfg(test)]
+mod presence_tests {
+    #[test]
+    fn exact_presence_boundary() {
+        let e = super::PRESENCE_EPSILON;
+        assert!(!super::present(f32::from_bits(e.to_bits() - 1), e));
+        assert!(super::present(e, e));
+        assert!(super::present(f32::from_bits(e.to_bits() + 1), e));
     }
 }

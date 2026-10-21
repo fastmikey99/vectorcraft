@@ -133,6 +133,9 @@ fn decode_ranges(d: &Dict<'_>, count: usize) -> Vec<(f32, f32)> {
 pub(crate) fn cmyk(st: &Stream<'_>, width: u32, height: u32, colors: &mut Colors<'_>) -> Result<Option<ImageBlob>, &'static str> {
     let d = st.dict();
     let Some(Channels { plates, spots }) = channels(d, colors)? else { return Ok(None) };
+    if plates.iter().any(|p| matches!(p, Plate::All)) {
+        return Err("registration /All image cannot preserve coverage on every output colorant, including document spots");
+    }
     let unread = if spots.is_empty() { UNREAD } else { INK_UNREAD };
     let count = plates.len();
     let ranges = decode_ranges(d, count);

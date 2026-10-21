@@ -88,11 +88,12 @@ impl Player<'_> {
                         if rules.is_empty() {
                             return Err(error("SelectObjectsByAttributes requires a rule"));
                         }
+                        selection::combine_rules(&[], p.value("Operator").unwrap_or("All"))?;
                         let mut found = Vec::new();
                         for id in all {
                             let n = d.node(id).ok_or_else(|| error("selected object disappeared"))?;
                             let matches = rules.iter().map(|r| selection::rule(d, &ids, Some(n), r)).collect::<Result<Vec<_>>>()?;
-                            if matches.iter().all(|v| *v) {
+                            if selection::combine_rules(&matches, p.value("Operator").unwrap_or("All"))? {
                                 found.push(id);
                             }
                         }
@@ -367,6 +368,39 @@ impl Player<'_> {
                     .collect();
                 let cms = profiles::document_cms(self.doc()?);
                 let all = selection::all_objects(self.doc()?, false);
+                // Prepare all replacements before changing paints or deleting swatches.
+                // Empty spot channels can be pruned exactly. Positive image ink changes
+                // require compositing/conversion semantics not yet implemented here.
+                let mut images = std::collections::BTreeMap::new();
+                for id in &all {
+                    let Some(n) = self.doc()?.node(*id) else { continue };
+                    let NodeKind::Image(image) = &n.kind else { continue };
+                    let used = selection::inks(self.doc()?, n)?;
+                    if used.iter().any(|(name, value)| inks.contains(name) && *value > 0.0 && (delete || process(name).is_none())) {
+                        return Err(error(format!("{} cannot safely transform nonzero image ink channels on object {}", a.kind, id)));
+                    }
+                    let blob = self.doc()?.images.get(&image.key).ok_or_else(|| error("missing image data"))?;
+                    if blob.spot_names().iter().any(|name| inks.contains(name)) {
+                        let spots = blob.spot_inks().ok_or_else(|| error("undecodable image spot channels"))?;
+                        let keep: Vec<_> = spots.names.iter().enumerate().filter(|(_, name)| !inks.contains(name)).map(|(i, _)| i).collect();
+                        let process = blob.cmyk().ok_or_else(|| error("undecodable image process channels"))?;
+                        let replacement = if keep.is_empty() {
+                            vectorcraft_doc::ImageBlob::cmyk_tiff(&process)
+                        } else {
+                            let data = spots
+                                .data
+                                .chunks_exact(spots.names.len())
+                                .flat_map(|pixel| keep.iter().filter_map(|i| pixel.get(*i).copied()))
+                                .collect();
+                            let names = keep.iter().filter_map(|i| spots.names.get(*i).cloned()).collect();
+                            let spots = vectorcraft_doc::cmyk::SpotInks::new(spots.width, spots.height, names, data)
+                                .ok_or_else(|| error("invalid retained image spot channels"))?;
+                            vectorcraft_doc::ImageBlob::cmyk_spot_tiff(&process, &spots)
+                        }
+                        .ok_or_else(|| error("could not encode retained image ink channels"))?;
+                        images.insert(image.key.clone(), replacement);
+                    }
+                }
                 let affected = self.session.edit("Recolor Artwork", |d, _| {
                     let mut affected = 0;
                     for id in all {
@@ -382,6 +416,7 @@ impl Player<'_> {
                             affected += usize::from(n.appearance != before);
                         }
                     }
+                    d.images.extend(images);
                     d.swatches.retain(|s| !s.spot || !inks.contains(&s.name));
                     Ok(affected)
                 })?;

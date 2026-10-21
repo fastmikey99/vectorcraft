@@ -49,6 +49,88 @@ fn rect(r: vectorcraft_geom::Rect) -> [f64; 4] {
     [r.x0, r.y0, r.x1, r.y1]
 }
 
+/// A non-device page blending space is immaterial when no printed content composites
+/// transparency. Keep this exact diagnostic distinct from a fidelity-loss warning.
+pub(crate) const IRRELEVANT_BLEND_SPACE: &str =
+    "Info: unsupported page transparency blending space is irrelevant: printed artwork has no transparency";
+
+fn printed_transparency(doc: &Document, n: &vectorcraft_doc::Node, page: vectorcraft_geom::Rect, depth: usize) -> (bool, Option<String>) {
+    if depth > 256 {
+        return (true, Some("recursive pattern transparency cannot be resolved".into()));
+    }
+    use vectorcraft_color::{BlendMode, Paint};
+    use vectorcraft_doc::{AppearanceItem, NodeKind};
+    if !n.visible || n.opacity == 0.0 || matches!(n.kind, NodeKind::Layer { printable: false, .. } | NodeKind::Path { guide: true, .. }) {
+        return (false, None);
+    }
+    let Some(bounds) = n.visual_bounds() else { return (false, None) };
+    if bounds.intersect(page).is_zero_area() {
+        return (false, None);
+    }
+    let children = n.children().filter(|_| !matches!(n.kind, NodeKind::Compound { .. }));
+    let page = if n.clips() { bounds.intersect(page) } else { page };
+    let descendants: Vec<_> =
+        children.into_iter().flatten().skip(usize::from(n.clips())).map(|c| printed_transparency(doc, c, page, depth + 1)).collect();
+    // Empty containers and unpainted paths do not composite anything.
+    let painted = descendants.iter().any(|(painted, _)| *painted)
+        || matches!(n.kind, NodeKind::Image(_) | NodeKind::Mesh(_) | NodeKind::Text(_))
+        || n.appearance.items.iter().any(|item| match item {
+            AppearanceItem::Fill(f) => f.visible && f.opacity != 0.0 && f.paint != Paint::None,
+            AppearanceItem::Stroke(s) => s.visible && s.opacity != 0.0 && s.paint != Paint::None,
+        });
+    if !painted {
+        return (false, None);
+    }
+    let reason = if n.opacity != 1.0 {
+        Some(format!("opacity {}", n.opacity))
+    } else if n.blend != BlendMode::Normal {
+        Some(format!("blend {:?}", n.blend))
+    } else if n.knockout == vectorcraft_doc::Knockout::On {
+        Some("knockout group".into())
+    } else if n.extras().mask.as_ref().is_some_and(|m| !m.disabled) {
+        Some("soft mask".into())
+    } else if n.appearance.effects.iter().any(|e| !e.is_noop()) {
+        Some("appearance effect".into())
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        return (true, Some(format!("{reason} on printed object {}", n.id)));
+    }
+    for item in &n.appearance.items {
+        let (visible, opacity, blend, effects, paint) = match item {
+            AppearanceItem::Fill(f) => (f.visible, f.opacity, f.blend, &f.effects, &f.paint),
+            AppearanceItem::Stroke(s) => (s.visible, s.opacity, s.blend, &s.effects, &s.paint),
+        };
+        if !visible || opacity == 0.0 || *paint == Paint::None {
+            continue;
+        }
+        let transparent_paint = match paint {
+            Paint::Gradient(g) => g.gradient.stops.iter().any(|s| s.opacity != 1.0),
+            Paint::Pattern { pattern, .. } => doc
+                .patterns
+                .iter()
+                .find(|p| &p.name == pattern)
+                .is_none_or(|p| p.art.iter().any(|n| printed_transparency(doc, n, p.tile, depth + 1).1.is_some())),
+            _ => false,
+        };
+        if opacity != 1.0 || blend != BlendMode::Normal || effects.iter().any(|e| !e.is_noop()) || transparent_paint {
+            return (true, Some(format!("paint transparency (opacity {opacity}, blend {blend:?}) on printed object {}", n.id)));
+        }
+    }
+    if let NodeKind::Image(im) = &n.kind
+        && doc.images.get(&im.key).and_then(|blob| blob.is_opaque()) != Some(true)
+    {
+        return (true, Some(format!("image alpha on printed object {}", n.id)));
+    }
+    if let NodeKind::Mesh(mesh) = &n.kind
+        && mesh.points.iter().any(|p| p.opacity != 1.0)
+    {
+        return (true, Some(format!("mesh opacity on printed object {}", n.id)));
+    }
+    (true, descendants.into_iter().find_map(|(_, reason)| reason))
+}
+
 /// Store recognized, bounded public print settings with the native document.
 pub(crate) fn capture(doc: &mut Document, pdf: &Pdf, selected: &[usize], crop: CropTo, warnings: &mut Vec<String>) {
     let mut state = State::default();
@@ -67,15 +149,21 @@ pub(crate) fn capture(doc: &mut Document, pdf: &Pdf, selected: &[usize], crop: C
         boxes.entry("MediaBox".into()).or_insert_with(|| rect(crate::pages::page_box(page, CropTo::Media)));
         boxes.entry("CropBox".into()).or_insert_with(|| rect(crate::pages::page_box(page, CropTo::Crop)));
         let group = page.raw().get::<Dict<'_>>(b"Group").and_then(|g| {
-            let Some(name) = g.get::<Name<'_>>(b"CS") else {
-                warnings.push("the imported page transparency group has an unsupported blending space".into());
+            let name = g.get::<Name<'_>>(b"CS");
+            let space = name.as_ref().map(|n| n.as_str());
+            let Some(space) = space.filter(|space| matches!(*space, "DeviceRGB" | "DeviceCMYK" | "DeviceGray")) else {
+                let printed: Vec<_> = doc.layers.iter().map(|n| printed_transparency(doc, n, board.rect, 0)).collect();
+                let reason = if g.get::<bool>(b"K").unwrap_or(false) && printed.iter().any(|(painted, _)| *painted) {
+                    Some("page knockout group".into())
+                } else {
+                    printed.into_iter().find_map(|(_, reason)| reason)
+                };
+                warnings.push(match reason {
+                    Some(reason) => format!("the imported page transparency group has an unsupported blending space affecting {reason}"),
+                    None => IRRELEVANT_BLEND_SPACE.into(),
+                });
                 return None;
             };
-            let space = name.as_str();
-            if !matches!(space, "DeviceRGB" | "DeviceCMYK" | "DeviceGray") {
-                warnings.push("the imported page transparency group's blending space cannot be retained".into());
-                return None;
-            }
             Some(Group { space: space.into(), isolate: g.get::<bool>(b"I").unwrap_or(false), knockout: g.get::<bool>(b"K").unwrap_or(false) })
         });
         let source = crate::pages::page_box(page, crop);
@@ -317,6 +405,29 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_page_space_is_info_only_without_printed_transparency() {
+        for (content, state, knockout, stops) in [
+            ("0 0 0 1 k 10 10 20 20 re f", "", false, false),
+            ("/Gs gs 0 0 0 1 k 10 10 20 20 re f", "/ca 1 /BM /Normal", false, false),
+            ("/Gs gs 0 0 0 1 k 10 10 20 20 re f", "/ca 0", false, false),
+            ("/Gs gs 0 0 0 1 k 10 10 20 20 re f", "/ca 0.5", false, true),
+            ("/Gs gs 0 0 0 1 k 10 10 20 20 re f", "/BM /Multiply", false, true),
+            ("0 0 0 1 k 10 10 20 20 re f", "", true, true),
+            ("", "", true, false),
+        ] {
+            let mut page = PdfPage::new(100., 100., content);
+            page.entries = format!("/Group << /S /Transparency /CS [/CalRGB << /WhitePoint [0.9505 1 1.089] >>] /K {knockout} >>");
+            page.resources = format!("/ExtGState << /Gs << {state} >> >>");
+            let read = import_with_report(&pdf_with(&[page], &[], None), &ImportOptions::default()).unwrap();
+            let diagnostic = read.warnings.iter().find(|w| w.contains("blending space")).unwrap();
+            assert_eq!(crate::classify_diagnostic(diagnostic) == crate::DiagnosticClass::FidelityLoss, stops, "{diagnostic}");
+            if !stops {
+                assert_eq!(diagnostic, IRRELEVANT_BLEND_SPACE);
+            }
+        }
+    }
+
+    #[test]
     fn page_boxes_and_blending_survive_native_save_and_export() {
         let read = import_with_report(&fixture(), &ImportOptions::default()).unwrap();
         let native = serde_json::to_vec(&read.document).unwrap();
@@ -429,6 +540,24 @@ mod tests {
     }
 
     #[test]
+    fn preparation_restores_print_settings_after_explicit_colour_conversion() {
+        let mut doc = import_with_report(&fixture(), &ImportOptions::default()).unwrap().document;
+        let board = doc.artboards[0].rect;
+        let boxes = BTreeMap::from([("MediaBox".into(), board), ("ArtBox".into(), board)]);
+        set_preparation_boxes(&mut doc, &boxes).unwrap();
+        let mut opts = PdfOptions::default();
+        opts.settings.output.conversion = ColorConversion::PreserveNumbers;
+        let exported = crate::export_with_report(&doc, &opts).unwrap();
+        assert!(exported.warnings.iter().any(|w| w.contains("not restored")));
+        let bytes = preparation_output(exported.bytes, &boxes, &doc).unwrap();
+        let pdf = crate::pages::open(&bytes, None).unwrap();
+        let group = pdf.pages()[0].raw().get::<Dict<'_>>(b"Group").unwrap();
+        assert_eq!(group.get::<Name<'_>>(b"CS").unwrap().as_str(), "DeviceRGB");
+        assert_eq!(group.get::<bool>(b"I"), Some(true));
+        assert_eq!(pdf.pages()[0].raw().get::<[f64; 4]>(b"ArtBox"), Some([0., 0., board.width(), board.height()]));
+    }
+
+    #[test]
     fn resizing_or_explicit_discard_does_not_restore_stale_boxes() {
         let mut doc = import_with_report(&fixture(), &ImportOptions::default()).unwrap().document;
         let opts = PdfOptions { settings: crate::PdfSettings { discard_imported_print_settings: true, ..Default::default() }, ..Default::default() };
@@ -476,6 +605,14 @@ pub fn set_preparation_boxes(doc: &mut Document, boxes: &BTreeMap<String, vector
 /// Boxes use the document's top-left, y-down coordinates. Unpainted inks are resources only;
 /// declaring an ink does not add marks or separation geometry to the artwork.
 pub fn preparation_output(pdf: Vec<u8>, boxes: &BTreeMap<String, vectorcraft_geom::Rect>, doc: &Document) -> Result<Vec<u8>, PdfError> {
+    // Colour conversion has already happened. Preparation explicitly retains the source
+    // page's declared blend space and output intents while replacing its page boxes.
+    let mut warnings = Vec::new();
+    let pdf = finish(pdf, doc, &PdfOptions::default(), &[1.0], &mut warnings)?;
+    if !warnings.is_empty() {
+        return Err(error(&warnings.join("; ")));
+    }
+
     let parsed = crate::linearize::parse(&pdf).map_err(error)?;
     if parsed.pages.len() != 1 {
         return Err(error("preparation output requires one page"));

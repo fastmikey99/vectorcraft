@@ -161,15 +161,19 @@ fn separation_images_and_all_and_none_channels_print_on_their_plates() {
     assert_eq!((s.names.as_slice(), s.data.as_slice()), (&["Spot A".to_string()][..], &[0, 128, 255][..]));
     assert_eq!(spot_swatches(&r.document), ["Spot A"]);
 
-    // All prints on every plate the image has; None on none.
-    let space = "[/DeviceN [/Spot#20A /All /None] /DeviceCMYK 7 0 R]";
-    let tint = stream("/FunctionType 4 /Domain [0 1 0 1 0 1] /Range [0 1 0 1 0 1 0 1]", b"{ pop pop pop 0 0 0 0 }");
-    let dict = format!("/Width 2 /Height 1 /BitsPerComponent 8 /ColorSpace {space}");
-    let r = import_with_report(&pdf((&dict, &[200, 0, 255, 0, 51, 255]), &[tint]), &ImportOptions::default()).unwrap();
-    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
-    let b = blob(&r.document, image_nodes(&r.document)[0]);
-    assert_eq!(b.cmyk().unwrap().data, [0, 0, 0, 0, 51, 51, 51, 51]);
-    assert_eq!(b.spot_inks().unwrap().data, [200, 51]);
+    // /All must include document spots not named in the image. The current raster
+    // model cannot retain that semantic, so production must receive a fatal diagnostic.
+    for space in [
+        "[/DeviceN [/Spot#20A /All /None] /DeviceCMYK 7 0 R]",
+        "[/Separation /All /DeviceCMYK << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 1 1 1] /N 1 >>]",
+    ] {
+        let tint = stream("/FunctionType 4 /Domain [0 1 0 1 0 1] /Range [0 1 0 1 0 1 0 1]", b"{ pop pop pop 0 0 0 0 }");
+        let dict = format!("/Width 2 /Height 1 /BitsPerComponent 8 /ColorSpace {space}");
+        let r = import_with_report(&pdf((&dict, &[200, 0, 255, 0, 51, 255]), &[tint]), &ImportOptions::default()).unwrap();
+        assert!(spot_swatches(&r.document).contains(&"Spot A".into()));
+        let warning = r.warnings.iter().find(|w| w.contains("registration /All")).unwrap();
+        assert_eq!(classify_diagnostic(warning), DiagnosticClass::FidelityLoss);
+    }
 }
 
 #[test]

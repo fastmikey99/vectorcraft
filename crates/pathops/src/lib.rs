@@ -14,7 +14,10 @@ mod offset;
 mod pathfinder;
 mod planar;
 
-pub use boolean::{BoolOp, DEFAULT_PRECISION, area, boolean, boolean_n, normalize, try_boolean, try_normalize, try_paint_stack, unite_all};
+pub use boolean::{
+    BoolOp, DEFAULT_PRECISION, GeometryBudget, area, boolean, boolean_n, normalize, try_boolean, try_normalize, try_paint_stack,
+    try_paint_stack_with_control, unite_all,
+};
 pub use edit::{
     AverageAxis, SimplifyOptions, add_anchor_points, average, join, remove_anchor, remove_redundant_points, simplify, simplify_with, smooth,
     split_into_grid,
@@ -30,6 +33,14 @@ pub use planar::{
 /// Errors from fallible operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PathOpsError {
+    #[error("geometry input segment budget exceeded")]
+    SegmentBudget,
+    #[error("geometry intersection/topology budget exceeded")]
+    IntersectionBudget,
+    #[error("geometry wall-clock budget exceeded (bulk sweep time limit)")]
+    TimeBudget,
+    #[error("geometry operation cancelled")]
+    Cancelled,
     #[error("input contains NaN or infinite coordinates")]
     NonFinite,
     #[error("input path could not be closed")]

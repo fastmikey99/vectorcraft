@@ -44,12 +44,13 @@ fn specialty_name(name: &str) -> bool {
     name.contains("NEON")
 }
 
-const INK_EPSILON: f32 = 0.005;
+const INK_EPSILON: f32 = vectorcraft_doc::inks::PRESENCE_EPSILON;
 
 fn paint_ink(doc: &Document, color: &Color, swatch: Option<&str>, tint: f32, threshold: f32) -> (vectorcraft_doc::inks::Inks, bool) {
     let ink = vectorcraft_doc::inks::inks(doc, &vectorcraft_color::cms::active(), color, swatch.map(|name| (name, tint)), Default::default());
     // PAL Any / NotUsing: a spot's tint, not its alternate, is its actual coverage.
-    let no_ink = ink.cmyk.iter().all(|v| *v < INK_EPSILON) && ink.spot.as_ref().is_none_or(|(_, tint)| *tint < INK_EPSILON);
+    let no_ink = ink.cmyk.iter().all(|v| !vectorcraft_doc::inks::present(*v, INK_EPSILON))
+        && ink.spot.as_ref().is_none_or(|(_, tint)| !vectorcraft_doc::inks::present(*tint, INK_EPSILON));
     let alternate = swatch.and_then(|name| vectorcraft_doc::inks::spot_color(doc, name));
     let k = alternate.unwrap_or(*color).to_cmyk()[3];
     (ink, !no_ink && k < threshold)
@@ -84,9 +85,9 @@ fn gradient_eligibility(g: &vectorcraft_color::gradient::GradientPaint, threshol
             *hi = hi.max(v);
         }
     }
-    if low[3] >= threshold || high.iter().all(|v| *v < INK_EPSILON) {
+    if low[3] >= threshold || high.iter().all(|v| !vectorcraft_doc::inks::present(*v, INK_EPSILON)) {
         Some(false)
-    } else if high[3] < threshold && low.iter().any(|v| *v >= INK_EPSILON) {
+    } else if high[3] < threshold && low.iter().any(|v| vectorcraft_doc::inks::present(*v, INK_EPSILON)) {
         Some(true)
     } else {
         None

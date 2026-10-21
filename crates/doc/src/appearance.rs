@@ -435,6 +435,22 @@ pub struct Effect {
     pub visible: bool,
 }
 
+impl Effect {
+    /// Effects whose parameters guarantee an unchanged painted result. Missing parameters
+    /// use the effect's defaults, so are deliberately not treated as zero.
+    pub fn is_noop(&self) -> bool {
+        if !self.visible {
+            return true;
+        }
+        let parameter = match self.id.as_str() {
+            "blur.gaussian" | "stylize.feather" | "stylize.roundCorners" => "radius",
+            "path.offsetPath" => "offset",
+            _ => return false,
+        };
+        self.params.get(parameter).and_then(serde_json::Value::as_f64) == Some(0.0)
+    }
+}
+
 fn yes() -> bool {
     true
 }

@@ -3,10 +3,11 @@
 use super::*;
 use vectorcraft_color::BlendMode;
 use vectorcraft_doc::AppearanceItem;
-use vectorcraft_geom::Point;
+use vectorcraft_geom::{FillRule, Point};
 
 struct Feature {
     path: PathData,
+    rule: FillRule,
     bounds: Rect,
     ink: vectorcraft_doc::inks::Inks,
     eligible: bool,
@@ -66,7 +67,7 @@ fn collect(node: &Node, doc: &Document, threshold: f32, inherited: bool, out: &m
                 let Paint::Solid { color, swatch, tint } = &fill.paint else {
                     return Ok(false);
                 };
-                let (mut path, _) = super::super::pathops::node_path(node).ok_or_else(|| bad(C, "missing colour outline"))?;
+                let (mut path, rule) = super::super::pathops::node_path(node).ok_or_else(|| bad(C, "missing colour outline"))?;
                 // Filled open subpaths have an implicit closing edge (also used by the renderer).
                 for subpath in &mut path.subpaths {
                     subpath.closed = true;
@@ -75,7 +76,7 @@ fn collect(node: &Node, doc: &Document, threshold: f32, inherited: bool, out: &m
                     let (ink, eligible) = paint_ink(doc, color, swatch.as_deref(), *tint, threshold);
                     // Include the source/destination cell uncertainty of the raster band.
                     let padding = 0.2 * MM + 2.0 / SCALE;
-                    out.push(Feature { path, bounds: bounds.inflate(padding, padding), ink, eligible: eligible && permission });
+                    out.push(Feature { path, rule, bounds: bounds.inflate(padding, padding), ink, eligible: eligible && permission });
                 }
             }
         }
@@ -87,16 +88,56 @@ fn collect(node: &Node, doc: &Document, threshold: f32, inherited: bool, out: &m
 /// Complex appearances retain the existing renderer sampling. A flat opaque object has one
 /// unambiguous ink value, so only its geometric boundary is needed to choose that value.
 pub(super) fn samples(doc: &Document, nearest: &mut [Option<u32>], w: usize, region: Rect, threshold: f32) -> Result<Option<Samples>> {
+    if nearest.iter().all(Option::is_none) {
+        return Ok(None);
+    }
     let mut features = Vec::new();
     for layer in &doc.layers {
         if !collect(layer, doc, threshold, true, &mut features)? {
             return Ok(None);
         }
     }
+    // Remove paint hidden by later opaque fills. A covered outline has no colour
+    // ownership, even when its distance ties the front outline exactly.
+    let mut visibility_checks = 0usize;
+    for back in 0..features.len() {
+        crate::cancel::check()?;
+        let mut visible = features.get(back).map(|f| f.path.clone()).unwrap_or_default();
+        let mut rule = features.get(back).map_or(FillRule::NonZero, |f| f.rule);
+        for front in features.iter().skip(back + 1) {
+            crate::cancel::check()?;
+            visibility_checks += 1;
+            // Very large overlap stacks retain renderer sampling. Geometry ownership
+            // is optional; it must not turn a bounded raster task into quadratic work.
+            if visibility_checks > 1_000_000 {
+                return Ok(None);
+            }
+            if visible.bounds().zip(front.path.bounds()).is_some_and(|(a, b)| a.intersect(b).area() > 0.0) {
+                visible = match vectorcraft_pathops::try_boolean(
+                    &visible,
+                    rule,
+                    &front.path,
+                    front.rule,
+                    vectorcraft_pathops::BoolOp::Difference,
+                    vectorcraft_pathops::DEFAULT_PRECISION,
+                ) {
+                    Ok(path) => {
+                        rule = FillRule::NonZero;
+                        path
+                    }
+                    // Degenerate intersections cannot establish ownership; the renderer can.
+                    Err(_) => return Ok(None),
+                };
+            }
+        }
+        if let Some(feature) = features.get_mut(back) {
+            feature.path = visible;
+        }
+    }
     if w == 0 {
         return Err(bad(C, "invalid colour sample grid"));
     }
-    let index = super::index::Index::new(features.iter().enumerate().map(|(i, f)| (i, f.path.clone())));
+    let index = super::index::Index::new(features.iter().enumerate().rev().map(|(i, f)| (i, f.path.clone())));
     let mut pixels = Vec::new();
     for (i, sample) in nearest.iter_mut().enumerate() {
         if i % 16384 == 0 {

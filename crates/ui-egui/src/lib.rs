@@ -505,6 +505,7 @@ pub struct VectorcraftApp {
     /// the answer.
     font_check: Option<(std::sync::mpsc::Receiver<bool>, bool)>,
     /// When installed fonts were last checked in line (app time, s).
+    #[cfg(not(target_arch = "wasm32"))]
     font_install_check_at: f64,
     /// Keyboard pastes of something other than text (see [`shortcuts::PasteChord`]).
     pub(crate) paste_chord: shortcuts::PasteChord,
@@ -552,6 +553,7 @@ struct PendingScreenshot {
 /// Seconds between two looks at the system clipboard for [`VectorcraftApp::system_paste`].
 const SYSTEM_CLIPBOARD_POLL: f64 = 0.25;
 /// Seconds between looks for fonts a font manager activated while the app stays in front (#2576).
+#[cfg(not(target_arch = "wasm32"))]
 const FONT_INSTALL_POLL: f64 = 2.0;
 
 impl VectorcraftApp {
@@ -617,6 +619,7 @@ impl VectorcraftApp {
             picks: picks::Picks::default(),
             screen_sampler: None,
             font_check: None,
+            #[cfg(not(target_arch = "wasm32"))]
             font_install_check_at: f64::NEG_INFINITY,
             paste_chord: Default::default(),
             background: Default::default(),
@@ -1123,49 +1126,8 @@ impl VectorcraftApp {
                 io::report_open_error(self, &name, &e);
             }
         }
-        for HostOpen { name, bytes, print_production, separations, raster_effects_ppi, units, stroke_units } in handed {
-            if let Some(c) = &separations
-                && let Err(e) = c.validate()
-            {
-                io::report_open_error(self, &name, &e);
-                continue;
-            }
-            // Acknowledge only after both the document and its panel context are installed.
-            let report = self.services.host_open_result.take();
-            let before: Vec<u64> = self.session.documents().iter().map(|d| d.uid).collect();
-            // Applied to the document this open makes, now or after a dialog ([`Self::apply_raster_floor`]).
-            self.raster_floor = raster_effects_ppi.filter(|p| (1..=2400).contains(p)).map(|p| (f64::from(p), before.clone()));
-            // Every open from the page sets the units for its job: one that names no Stroke unit
-            // goes back to the preference ([`Self::apply_host_units`]).
-            self.host_units = Some(HostUnits { general: units, stroke: stroke_units, before: before.clone() });
-            let opened = if print_production {
-                io::open_document(self, &name, &bytes, None, &serde_json::json!({"printProduction": true}))
-            } else {
-                io::open_bytes(self, &name, &bytes, None)
-            };
-            let opened = opened.and_then(|r| {
-                if let Some(c) = separations {
-                    let context = serde_json::to_value(c).map_err(|e| e.to_string())?;
-                    self.run("production.separations.configure", serde_json::json!({"context":context}))?;
-                    self.run("window.panel.activate", serde_json::json!({"panel":"productionSeparations"}))?;
-                }
-                Ok(r)
-            });
-            self.services.host_open_result = report;
-            if opened.is_ok()
-                && let Some(report) = &self.services.host_open_result
-            {
-                report(Ok(()));
-            }
-            match opened {
-                // It takes the place of what was open (a file that opens later, after a dialog,
-                // does when it arrives: `keep_one_document`).
-                Ok(_) if self.services.single_document && self.session.documents().len() > before.len() => {
-                    self.close_documents(&before);
-                }
-                Ok(_) => {}
-                Err(e) => io::report_open_error(self, &name, &e),
-            }
+        for request in handed {
+            self.open_from_host(request);
         }
         self.apply_raster_floor();
         self.apply_host_units();
@@ -1173,6 +1135,58 @@ impl VectorcraftApp {
             self.keep_one_document();
         }
         place::drain(self);
+    }
+
+    /// Apply one parent operation synchronously, preserving order with subsequent exports.
+    pub fn open_from_host(&mut self, request: HostOpen) {
+        let HostOpen { name, bytes, print_production, separations, raster_effects_ppi, units, stroke_units } = request;
+        if let Some(c) = &separations
+            && let Err(e) = c.validate()
+        {
+            io::report_open_error(self, &name, &e);
+            return;
+        }
+        // Acknowledge only after both the document and its panel context are installed.
+        let report = self.services.host_open_result.take();
+        let before: Vec<u64> = self.session.documents().iter().map(|d| d.uid).collect();
+        // Applied to the document this open makes, now or after a dialog ([`Self::apply_raster_floor`]).
+        self.raster_floor = raster_effects_ppi.filter(|p| (1..=2400).contains(p)).map(|p| (f64::from(p), before.clone()));
+        // Every open from the page sets the units for its job: one that names no Stroke unit
+        // goes back to the preference ([`Self::apply_host_units`]).
+        self.host_units = Some(HostUnits { general: units, stroke: stroke_units, before: before.clone() });
+        let opened = if print_production {
+            io::open_document(self, &name, &bytes, None, &serde_json::json!({"printProduction": true}))
+        } else {
+            io::open_bytes(self, &name, &bytes, None)
+        };
+        let opened = opened.and_then(|r| {
+            if let Some(c) = separations {
+                let context = serde_json::to_value(c).map_err(|e| e.to_string())?;
+                self.run("production.separations.configure", serde_json::json!({"context":context}))?;
+                self.run("window.panel.activate", serde_json::json!({"panel":"productionSeparations"}))?;
+            }
+            Ok(r)
+        });
+        self.services.host_open_result = report;
+        if opened.is_ok()
+            && let Some(report) = &self.services.host_open_result
+        {
+            report(Ok(()));
+        }
+        match opened {
+            // It takes the place of what was open (a file that opens later, after a dialog,
+            // does when it arrives: `keep_one_document`).
+            Ok(_) if self.services.single_document && self.session.documents().len() > before.len() => {
+                self.close_documents(&before);
+            }
+            Ok(_) => {}
+            Err(e) => io::report_open_error(self, &name, &e),
+        }
+        self.apply_raster_floor();
+        self.apply_host_units();
+        if self.services.single_document {
+            self.keep_one_document();
+        }
     }
 
     /// Raise a document the page's open made to the page's raster-effects floor, as the file

@@ -74,19 +74,19 @@ pub(super) fn merge<T: PartialEq + Clone>(old: &mut Vec<T>, found: Vec<T>, mode:
     }
     Ok(())
 }
-fn paint_inks(doc: &Document, p: &Paint, out: &mut BTreeMap<String, f64>) -> Result<()> {
-    let mut add = |name: &str, value: f64| {
+fn paint_inks(doc: &Document, p: &Paint, out: &mut BTreeMap<String, f32>) -> Result<()> {
+    let mut add = |name: &str, value: f32| {
         let n = out.entry(name.into()).or_default();
         *n = n.max(value);
     };
     match p {
         Paint::None => {}
-        Paint::Solid { swatch: Some(name), tint, .. } if doc.swatch(name).is_some_and(|w| w.spot) => add(name, f64::from(*tint)),
+        Paint::Solid { swatch: Some(name), tint, .. } if doc.swatch(name).is_some_and(|w| w.spot) => add(name, *tint),
         Paint::Solid { color, .. } => {
             for (name, v) in
                 ["Cyan", "Magenta", "Yellow", "Black"].into_iter().zip(super::profiles::cmyk(*color, super::profiles::document_cms(doc).as_ref()))
             {
-                add(name, f64::from(v));
+                add(name, v);
             }
         }
         Paint::Gradient(g) => {
@@ -98,13 +98,30 @@ fn paint_inks(doc: &Document, p: &Paint, out: &mut BTreeMap<String, f64>) -> Res
     }
     Ok(())
 }
-pub(super) fn inks(doc: &Document, n: &Node) -> Result<BTreeMap<String, f64>> {
+pub(super) fn inks(doc: &Document, n: &Node) -> Result<BTreeMap<String, f32>> {
     let mut out = BTreeMap::new();
     for item in &n.appearance.items {
         match item {
             AppearanceItem::Fill(f) if f.visible => paint_inks(doc, &f.paint, &mut out)?,
             AppearanceItem::Stroke(s) if s.visible && s.width > 0.0 => paint_inks(doc, &s.paint, &mut out)?,
             _ => {}
+        }
+    }
+    if let NodeKind::Image(image) = &n.kind {
+        let blob = doc.images.get(&image.key).ok_or_else(|| error("image ink selection: missing image data"))?;
+        if let Some(process) = blob.cmyk() {
+            for (i, name) in ["Cyan", "Magenta", "Yellow", "Black"].iter().enumerate() {
+                out.insert((*name).into(), f32::from(process.data.iter().skip(i).step_by(4).copied().max().unwrap_or(0)) / 255.0);
+            }
+        } else {
+            return Err(error("image ink selection requires decodable CMYK image channels"));
+        }
+        let names = blob.spot_names();
+        if !names.is_empty() {
+            let spots = blob.spot_inks().ok_or_else(|| error("image ink selection: undecodable spot channels"))?;
+            for (i, name) in spots.names.iter().enumerate() {
+                out.insert(name.clone(), f32::from(spots.channel(i).max().unwrap_or(0)) / 255.0);
+            }
         }
     }
     if let NodeKind::Mesh(mesh) = &n.kind {
@@ -164,7 +181,7 @@ pub(super) fn rule(doc: &Document, ids: &[NodeId], node: Option<&Node>, r: &Elem
             let epsilon = r
                 .value("Epsilon")
                 .unwrap_or("0.005")
-                .parse::<f64>()
+                .parse::<f32>()
                 .ok()
                 .filter(|v| v.is_finite() && *v >= 0.0)
                 .ok_or_else(|| error("invalid separation epsilon"))?;
@@ -185,8 +202,8 @@ pub(super) fn rule(doc: &Document, ids: &[NodeId], node: Option<&Node>, r: &Elem
                 }
             }
             match required(r, "SeparationRelation")? {
-                "Using" => Ok(values.iter().any(|v| *v > epsilon)),
-                "NotUsing" => Ok(values.iter().all(|v| *v <= epsilon)),
+                "Using" => Ok(values.iter().any(|v| vectorcraft_doc::inks::present(*v, epsilon))),
+                "NotUsing" => Ok(values.iter().all(|v| !vectorcraft_doc::inks::present(*v, epsilon))),
                 v => Err(error(format!("unsupported SeparationRelation {v}"))),
             }
         }
@@ -195,10 +212,13 @@ pub(super) fn rule(doc: &Document, ids: &[NodeId], node: Option<&Node>, r: &Elem
 }
 pub(super) fn condition(doc: &Document, ids: &[NodeId], p: &Element) -> Result<bool> {
     let rules = p.children.iter().filter(|e| e.name == "Rule").map(|r| rule(doc, ids, None, r)).collect::<Result<Vec<_>>>()?;
-    match p.value("Operator").unwrap_or("All") {
+    combine_rules(&rules, p.value("Operator").unwrap_or("All"))
+}
+pub(super) fn combine_rules(rules: &[bool], operator: &str) -> Result<bool> {
+    match operator {
         "All" => Ok(rules.iter().all(|v| *v)),
         "Any" => Ok(rules.iter().any(|v| *v)),
         "None" => Ok(rules.iter().all(|v| !*v)),
-        v => Err(error(format!("unsupported conditional operator {v}"))),
+        v => Err(error(format!("unsupported selection operator {v}"))),
     }
 }
