@@ -1,4 +1,4 @@
-use super::{Action, Player, Result, clean, error, flag, number, required, selection};
+use super::{Action, Player, Result, clean, error, flag, number, profiles, required, selection};
 use serde_json::json;
 use vectorcraft_color::{Color, Paint, Swatch};
 use vectorcraft_doc::{AppearanceItem, Document, LineJoin, Node, NodeId, NodeKind, StrokeLayer};
@@ -331,6 +331,7 @@ impl Player<'_> {
                     .filter(|s| s.spot && inks.contains(&s.name))
                     .filter_map(|s| s.paint.color().map(|c| (s.name.clone(), c)))
                     .collect();
+                let cms = profiles::document_cms(self.doc()?);
                 let all = selection::all_objects(self.doc()?, false);
                 let affected = self.session.edit("Recolor Artwork", |d, _| {
                     let mut affected = 0;
@@ -342,7 +343,7 @@ impl Player<'_> {
                                     AppearanceItem::Fill(f) => &mut f.paint,
                                     AppearanceItem::Stroke(s) => &mut s.paint,
                                 };
-                                convert_paint(paint, &inks, custom, delete, &alternates);
+                                convert_paint(paint, &inks, custom, delete, &alternates, cms.as_ref());
                             }
                             affected += usize::from(n.appearance != before);
                         }
@@ -365,15 +366,20 @@ impl Player<'_> {
             | "SetStrokeCorners" => self.paint(a),
             "AssignDocumentProfile" => {
                 let name = required(p, "Profile")?.to_string();
-                if vectorcraft_color::cms::profile(&name).is_none() {
-                    let message = format!("document profile unavailable: {name}");
-                    if p.value("MessageSeverity") == Some("Error") {
-                        return Err(error(message));
+                let resolved = self.resolve_profile(&name);
+                let profile = match resolved {
+                    Ok(Some(profile)) => profile,
+                    other => {
+                        let detail = other.err().map(|e| format!(" ({e})")).unwrap_or_default();
+                        let message = format!("document profile unavailable: {name}; set VECTORCRAFT_PROFILES or profiles to an ICC folder{detail}");
+                        if p.value("MessageSeverity") == Some("Error") {
+                            return Err(error(message));
+                        }
+                        self.messages.push(message);
+                        return Ok(0);
                     }
-                    self.messages.push(message);
-                    return Ok(0);
-                }
-                self.call("edit.assignProfile", json!({"cmyk":name}))?;
+                };
+                self.call("edit.assignProfile", json!({"cmyk":profile}))?;
                 Ok(0)
             }
             "SetPageBoxSizeByContent" | "SetPageBoxSizeRelative" => {
@@ -595,11 +601,18 @@ fn updated_paint(old: &Paint, new: &Paint, inks: &[String], t: f32) -> Result<Pa
         _ => Err(error("updating this paint would require a mixed-ink paint")),
     }
 }
-fn convert_paint(p: &mut Paint, inks: &[String], custom: Option<Color>, delete: bool, alternates: &std::collections::BTreeMap<String, Color>) {
+fn convert_paint(
+    p: &mut Paint,
+    inks: &[String],
+    custom: Option<Color>,
+    delete: bool,
+    alternates: &std::collections::BTreeMap<String, Color>,
+    cms: Option<&vectorcraft_color::cms::Cms>,
+) {
     match p {
         Paint::Solid { color, swatch: Some(name), tint } if inks.contains(name) => {
             let c = custom.or_else(|| alternates.get(name).copied()).unwrap_or(*color);
-            let [c, m, y, k] = c.to_cmyk();
+            let [c, m, y, k] = profiles::cmyk(c, cms);
             *p = if delete {
                 Paint::solid(Color::cmyk(0.0, 0.0, 0.0, 0.0))
             } else {
@@ -607,7 +620,7 @@ fn convert_paint(p: &mut Paint, inks: &[String], custom: Option<Color>, delete: 
             };
         }
         Paint::Solid { color, swatch: None, .. } if delete => {
-            let mut c = color.to_cmyk();
+            let mut c = profiles::cmyk(*color, cms);
             for n in inks {
                 if let Some(i) = process(n)
                     && let Some(v) = c.get_mut(i)
@@ -620,7 +633,7 @@ fn convert_paint(p: &mut Paint, inks: &[String], custom: Option<Color>, delete: 
         Paint::Gradient(g) => {
             for s in &mut g.gradient.stops {
                 let mut p = Paint::Solid { color: s.color, swatch: s.swatch.clone(), tint: s.tint };
-                convert_paint(&mut p, inks, custom, delete, alternates);
+                convert_paint(&mut p, inks, custom, delete, alternates, cms);
                 if let Paint::Solid { color, swatch, tint } = p {
                     s.color = color;
                     s.swatch = swatch;

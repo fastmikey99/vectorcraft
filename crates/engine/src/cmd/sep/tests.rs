@@ -36,6 +36,7 @@ fn player(s: &mut Session) -> Player<'_> {
     Player {
         session: s,
         root: PathBuf::new(),
+        profiles: None,
         stack: vec![],
         layers: vec![],
         inks: vec![],

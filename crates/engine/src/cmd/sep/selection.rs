@@ -83,7 +83,9 @@ fn paint_inks(doc: &Document, p: &Paint, out: &mut BTreeMap<String, f64>) -> Res
         Paint::None => {}
         Paint::Solid { swatch: Some(name), tint, .. } if doc.swatch(name).is_some_and(|w| w.spot) => add(name, f64::from(*tint)),
         Paint::Solid { color, .. } => {
-            for (name, v) in ["Cyan", "Magenta", "Yellow", "Black"].into_iter().zip(color.to_cmyk()) {
+            for (name, v) in
+                ["Cyan", "Magenta", "Yellow", "Black"].into_iter().zip(super::profiles::cmyk(*color, super::profiles::document_cms(doc).as_ref()))
+            {
                 add(name, f64::from(v));
             }
         }

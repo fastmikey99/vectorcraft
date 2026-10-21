@@ -5124,3 +5124,10 @@ mark-style	Japanese	Japońskie
 @msg	unsupported SpreadTarget {0}	unsupported SpreadTarget {0}
 @msg	unsupported Shaper operation {0}	unsupported Shaper operation {0}
 @msg	not implemented for nonempty selection: {0}	not implemented for nonempty selection: {0}
+
+# Local PAL profile discovery
+@msg	profiles must be a nonempty folder path	profiles must be a nonempty folder path
+@msg	ambiguous document profile: {want}	ambiguous document profile: {want}
+@msg	profile folder exceeds 4096 entries	profile folder exceeds 4096 entries
+@msg	PAL profile folders are unavailable on the web	PAL profile folders are unavailable on the web
+@msg	document profile unavailable: {name}; set VECTORCRAFT_PROFILES or profiles to an ICC folder{detail}	document profile unavailable: {name}; set VECTORCRAFT_PROFILES or profiles to an ICC folder{detail}

@@ -15,6 +15,23 @@ extension. Backslashes are accepted. Folder-qualified calls resolve from the
 root; bare calls resolve from the calling list's folder. Calls cannot escape the
 root. XML size, nesting, recursion and total execution are bounded.
 
+`profiles` optionally names a local folder of `.icc`/`.icm` files; it overrides
+`VECTORCRAFT_PROFILES`. `AssignDocumentProfile` matches CMYK profile descriptions,
+ignoring case, whitespace and punctuation, and allowing an omitted parenthetical
+qualifier. Exact descriptions win; ambiguous matches are reported, never guessed.
+Only the matched profile is loaded through `color.loadProfile` and assigned through
+`edit.assignProfile`. The configured folder is authoritative; without one, already
+registered profiles remain available. No ICC files are bundled.
+
+The assigned profile is used for RGB ink selection, PDF-alternate conversion and
+process-ink deletion, and for remaining RGB at PDF export; existing CMYK values and
+spot tints are preserved. `ConvertToCMYK` follows `Option=UseFromPDF` or the explicit
+`Custom` values. Esko's documented action has no rendering-intent or BPC settings;
+these PAL variants do not supply them. Profile conversions use the existing
+`edit.colorSettings` intent and BPC (defaults: relative colorimetric, BPC on), not an
+inferred Esko default. Missing profiles retain the PAL severity and mention
+`VECTORCRAFT_PROFILES` in the diagnostic.
+
 The result contains `status` (`completed` or `stopped`), `stoppedAt` (list, one-based
 position, action and reason), `traceLength`, `trace`, `layers`, `spots`, `artwork`,
 `warnings`, `importWarnings` and `messages`. Each trace entry also prints to stderr,
@@ -90,3 +107,8 @@ catalogue (Add White Underprint, p. 427; Create Shape on Selection, p. 434;
 Set Object Size, pp. 457–458). Tests generate
 small synthetic PDFs and PALs inline; no production artwork or action-library
 files are included in the repository.
+
+Profile semantics: the same guide, Color Management (pp. 88–90), Convert to CMYK
+(pp. 130–131, 430).
+
+Revision: 2026-10-21 — local ICC discovery and assigned-profile conversion.
