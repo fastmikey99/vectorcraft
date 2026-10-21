@@ -7,7 +7,11 @@ fn process(name: &str) -> Option<usize> {
     PROCESS.iter().position(|n| *n == name)
 }
 pub(super) fn roots(d: &Document, ids: &[NodeId]) -> Vec<NodeId> {
-    ids.iter().copied().filter(|id| d.node(*id).is_some() && !d.ancestry(*id).is_some_and(|v| v.iter().any(|p| p != id && ids.contains(p)))).collect()
+    let members: std::collections::BTreeSet<_> = ids.iter().copied().collect();
+    ids.iter()
+        .copied()
+        .filter(|id| d.node(*id).is_some() && !d.ancestry(*id).is_some_and(|v| v.iter().any(|p| p != id && members.contains(p))))
+        .collect()
 }
 pub(super) fn leaf_targets(d: &Document, ids: &[NodeId]) -> Vec<NodeId> {
     let mut out = Vec::new();

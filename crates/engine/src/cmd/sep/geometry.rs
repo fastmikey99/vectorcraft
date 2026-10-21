@@ -11,6 +11,38 @@ use vectorcraft_pathops::{self as po, BoolOp, Join};
 fn combine(a: &PathData, b: &PathData, op: BoolOp) -> Result<PathData> {
     po::try_boolean(a, FillRule::NonZero, b, FillRule::NonZero, op, po::DEFAULT_PRECISION).map_err(error)
 }
+
+fn paint_stack(paths: &[(PathData, bool)]) -> Result<PathData> {
+    // A solid rectangle that contains every input is already their union. This is exact,
+    // not a bounds approximation: reject curves, holes, diagonal edges and knockout inputs.
+    // It also avoids sweeping coincident copies of previously generated white footprints.
+    if paths.iter().all(|(p, add)| *add || p.is_empty()) {
+        let bounds = paths.iter().fold(None, |bounds, (p, _)| vectorcraft_geom::union_opt(bounds, p.bounds()));
+        if let Some(bounds) = bounds {
+            for (p, _) in paths {
+                if solid_rectangle(p).is_some_and(|r| r.contains_rect(bounds)) {
+                    return Ok(p.clone());
+                }
+            }
+        }
+    }
+    po::try_paint_stack(&paths.iter().map(|(p, chosen)| (p, FillRule::NonZero, *chosen)).collect::<Vec<_>>()).map_err(error)
+}
+
+fn solid_rectangle(path: &PathData) -> Option<vectorcraft_geom::Rect> {
+    let [sp] = path.subpaths.as_slice() else { return None };
+    let [a, b, c, d] = sp.anchors.as_slice() else { return None };
+    if !sp.closed || sp.anchors.iter().any(|a| a.p != a.h_in || a.p != a.h_out || !a.p.x.is_finite() || !a.p.y.is_finite()) {
+        return None;
+    }
+    let axis_aligned = (a.p.x == b.p.x && b.p.y == c.p.y && c.p.x == d.p.x && d.p.y == a.p.y)
+        || (a.p.y == b.p.y && b.p.x == c.p.x && c.p.y == d.p.y && d.p.x == a.p.x);
+    if !axis_aligned || a.p.x == c.p.x || a.p.y == c.p.y {
+        return None;
+    }
+    Some(vectorcraft_geom::Rect::from_points(a.p, c.p))
+}
+
 fn offset_options(p: &Element, choke: bool) -> Result<(f64, Join, f64)> {
     let distance = number(p, "Distance")?;
     if !(0.0..=10_000.0).contains(&distance) {
@@ -148,7 +180,7 @@ impl Player<'_> {
             "Opaque White".into()
         };
         let doc = self.doc()?;
-        let selected = actions::leaf_targets(doc, &self.ids()?);
+        let selected: std::collections::BTreeSet<_> = actions::leaf_targets(doc, &self.ids()?).into_iter().collect();
         let all = actions::leaf_targets(doc, &selection::all_objects(doc, false));
         let cached: std::collections::BTreeMap<_, _> = self
             .trap_footprints
@@ -167,7 +199,15 @@ impl Player<'_> {
             .collect();
         let brushes = vectorcraft_brush::library(self.doc()?);
         self.session.edit("Offset Path", |d, sel| {
+            let started = std::time::Instant::now();
+            // Precision cleanup after each boolean is not associative. Keep that established
+            // operation order for small stacks; only detailed art needs the bulk sweep to
+            // avoid repeatedly processing an ever-growing outline.
+            let batched = all.len() > 1024;
             let mut region = PathData::default();
+            let mut paths = Vec::new();
+            let mut has_selected = false;
+            let mut operations = 0;
             for id in &all {
                 vectorcraft_doc::cancel::check().map_err(error)?;
                 let mut n = d.node(*id).cloned().ok_or_else(|| error("PAL object disappeared"))?;
@@ -178,7 +218,7 @@ impl Player<'_> {
                     continue;
                 }
                 let chosen = selected.contains(id) && (!white || selection::inks(d, &n)?.values().any(|t| *t > 0.0));
-                if !chosen && (!exclude || region.is_empty()) {
+                if !chosen && (!exclude || if batched { !has_selected } else { region.is_empty() }) {
                     continue;
                 }
                 if !chosen {
@@ -191,9 +231,42 @@ impl Player<'_> {
                 }
                 let path = match cached.get(id) {
                     Some(path) => path.clone(),
-                    None => clipped_footprint(d, &n, &brushes)?,
+                    None => match clipped_footprint(d, &n, &brushes) {
+                        Ok(path) => path,
+                        // As in the sequential fold, a cover after an empty region is irrelevant.
+                        Err(_) if batched && !chosen && paint_stack(&paths)?.is_empty() => {
+                            paths.clear();
+                            has_selected = false;
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    },
                 };
-                region = combine(&region, &path, if chosen { BoolOp::Union } else { BoolOp::Difference })?;
+                has_selected |= chosen && !path.is_empty();
+                operations += 1;
+                if batched {
+                    paths.push((path, chosen));
+                } else {
+                    region = combine(&region, &path, if chosen { BoolOp::Union } else { BoolOp::Difference })?;
+                }
+            }
+            let prepared = started.elapsed();
+            if batched {
+                region = paint_stack(&paths)?;
+            }
+            if std::env::var_os("VECTORCRAFT_SEP_PROFILE").is_some() {
+                writeln!(
+                    std::io::stderr(),
+                    "[underprint] objects={} selected={} inputs={} batched={} anchors={} prepare_ms={} sweep_ms={}",
+                    all.len(),
+                    selected.len(),
+                    operations,
+                    batched,
+                    paths.iter().flat_map(|(p, _)| &p.subpaths).map(|p| p.anchors.len()).sum::<usize>(),
+                    prepared.as_millis(),
+                    started.elapsed().saturating_sub(prepared).as_millis()
+                )
+                .map_err(error)?;
             }
             let region = offset(&region, options)?;
             sel.clear();
@@ -306,5 +379,30 @@ impl Player<'_> {
             }
             Ok(usize::from(!path.is_empty()))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vectorcraft_geom::{Point, Rect, shapes};
+
+    #[test]
+    fn containing_rectangle_union_requires_solid_geometry_and_additive_inputs() {
+        let outer = shapes::rectangle(Rect::new(0., 0., 20., 20.));
+        let inner = shapes::rectangle(Rect::new(5., 5., 15., 15.));
+        assert_eq!(paint_stack(&[(inner.clone(), true), (outer.clone(), true)]).unwrap(), outer);
+        let cut = paint_stack(&[(outer.clone(), true), (inner.clone(), false)]).unwrap();
+        assert!((po::area(&cut, FillRule::NonZero) - 300.).abs() < 1e-6);
+        assert!(solid_rectangle(&cut).is_none(), "a rectangular outline with a hole is not solid");
+        let mut curved = outer.clone();
+        curved.subpaths[0].anchors[0].h_out = Point::new(3., 2.);
+        assert!(solid_rectangle(&curved).is_none());
+        let mut bowtie = outer.clone();
+        bowtie.subpaths[0].anchors.swap(1, 2);
+        assert!(solid_rectangle(&bowtie).is_none());
+        let beyond = shapes::rectangle(Rect::new(19., 5., 25., 15.));
+        let joined = paint_stack(&[(outer, true), (beyond, true)]).unwrap();
+        assert!((po::area(&joined, FillRule::NonZero) - 450.).abs() < 1e-6);
     }
 }

@@ -320,6 +320,57 @@ fn underprint_chokes_union_once_and_selects_only_new_art() {
     step(&mut p, "Choke", "<Distance>100</Distance><JoinType>Round</JoinType><SpreadTarget>OriginalPath</SpreadTarget>").unwrap();
     assert!(p.ids().unwrap().is_empty());
 }
+
+#[test]
+fn underprint_small_stack_retains_intermediate_precision_cleanup() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    let back = rect(&mut s, 0., 0., 100., 10.);
+    rect(&mut s, 0.005, 0., 100., 10.);
+    let front = rect(&mut s, 0.005, 0., 1., 10.);
+    s.doc_mut().unwrap().selection.set([back, front]);
+    let mut p = player(&mut s);
+    under(&mut p, true, 0.);
+    let n = p.doc().unwrap().node(p.ids().unwrap()[0]).unwrap();
+    let (path, _) = super::super::pathops::node_path(n).unwrap();
+    // The thin remainder of the back object is removed before the front joins it.
+    assert!((path.bounds().unwrap().x0 - 0.005).abs() < 1e-8);
+}
+
+#[test]
+fn underprint_ten_thousand_selected_shapes_finishes_within_budget() {
+    use vectorcraft_color::{Color, Paint};
+    use vectorcraft_doc::{Appearance, Node};
+    use vectorcraft_geom::{PathData, Rect, Shape};
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    s.edit("synthetic art", |d, sel| {
+        let layer = d.add_layer(Some("Artwork"));
+        let mut ids = Vec::new();
+        for i in 0..10_000 {
+            let x = f64::from(i % 100) * 3.;
+            let y = f64::from(i / 100) * 3.;
+            let path = PathData::from_bezpath(&Rect::new(x, y, x + 2., y + 2.).to_path(0.01));
+            let mut app = Appearance::default();
+            app.set_fill(Paint::solid(Color::cmyk(1., 0., 0., 0.)));
+            app.set_stroke(Paint::None);
+            let id = d.alloc_id();
+            d.insert(Some(layer), usize::MAX, Node::path(id, path, app))?;
+            ids.push(id);
+        }
+        sel.set(ids);
+        Ok(())
+    })
+    .unwrap();
+    let start = std::time::Instant::now();
+    let mut p = player(&mut s);
+    under(&mut p, true, 0.);
+    let elapsed = start.elapsed();
+    let n = p.doc().unwrap().node(p.ids().unwrap()[0]).unwrap();
+    let (path, _) = super::super::pathops::node_path(n).unwrap();
+    assert_eq!(path.subpaths.len(), 10_000);
+    assert!(elapsed.as_secs_f64() < 60., "10k underprint took {elapsed:?}");
+}
 #[test]
 fn shaper_copy_and_empty_difference_are_valid() {
     let mut s = Session::new();

@@ -106,7 +106,7 @@ pub fn try_offset_path(path: &PathData, delta: f64, join: Join, miter_limit: f64
     // winding, leaving faces uncovered that are really within `d` of the path. Every face of the
     // true offset is bounded by arrangement edges, so a contour is spurious iff a point deep inside
     // it lies closer than `d`: holes when growing, islands when insetting.
-    let src = path.to_bezpath();
+    let src = NearIndex::new(&path.to_bezpath());
     let drop_outer = delta < 0.0;
     // The deep point is looked for in the face a contour bounds: the contour with the contours
     // directly inside it (an outline with its holes, a hole with its islands). Looked for in the
@@ -133,7 +133,7 @@ pub fn try_offset_path(path: &PathData, delta: f64, join: Join, miter_limit: f64
     // closer, but a point picked near the face's edge is only just either: so a face is spurious
     // only when none of several points spread through it is `d` away (the widest spans first;
     // the first point that is settles it, so a good face usually costs one distance).
-    let near = |p: kurbo::Point| dist_to(&src, p) < d * (1.0 - 1e-4) - 1e-6;
+    let near = |p: kurbo::Point| src.within(p, d * (1.0 - 1e-4) - 1e-6);
     let spurious: Vec<bool> = all
         .iter()
         .enumerate()
@@ -210,9 +210,66 @@ fn deep_points(bp: &BezPath) -> Vec<kurbo::Point> {
     spans.into_iter().take(8).map(|(_, p)| p).collect()
 }
 
-fn dist_to(bp: &BezPath, p: kurbo::Point) -> f64 {
-    use kurbo::ParamCurveNearest;
-    bp.segments().map(|s| s.nearest(p, 1e-6).distance_sq).fold(f64::INFINITY, f64::min).sqrt()
+/// Offset cleanup only needs to know whether *any* source segment is within the threshold.
+/// A balanced tree of control-point hulls prunes distant curves, retaining the same nearest
+/// calculation and strict comparison as the former full scan. Hulls (not sampled curves)
+/// conservatively contain every segment, including loops and extrema between anchors.
+struct NearIndex {
+    bounds: kurbo::Rect,
+    kind: NearKind,
+}
+enum NearKind {
+    Leaf(Vec<kurbo::PathSeg>),
+    Branch(Box<NearIndex>, Box<NearIndex>),
+}
+impl NearIndex {
+    fn new(path: &BezPath) -> Self {
+        let segments = path
+            .segments()
+            .map(|s| {
+                let bounds = match s {
+                    kurbo::PathSeg::Line(s) => kurbo::Rect::from_points(s.p0, s.p1),
+                    kurbo::PathSeg::Quad(s) => kurbo::Rect::from_points(s.p0, s.p2).union_pt(s.p1),
+                    kurbo::PathSeg::Cubic(s) => kurbo::Rect::from_points(s.p0, s.p3).union_pt(s.p1).union_pt(s.p2),
+                };
+                (bounds, s)
+            })
+            .collect::<Vec<_>>();
+        Self::build(segments)
+    }
+    fn build(mut segments: Vec<(kurbo::Rect, kurbo::PathSeg)>) -> Self {
+        let bounds = segments.iter().map(|s| s.0).reduce(|a, b| a.union(b)).unwrap_or(kurbo::Rect::ZERO);
+        let kind = if segments.len() <= 8 {
+            NearKind::Leaf(segments.into_iter().map(|s| s.1).collect())
+        } else {
+            let x = bounds.width() >= bounds.height();
+            let center = |r: kurbo::Rect| if x { r.x0 * 0.5 + r.x1 * 0.5 } else { r.y0 * 0.5 + r.y1 * 0.5 };
+            let mid = segments.len() / 2;
+            segments.select_nth_unstable_by(mid, |a, b| center(a.0).total_cmp(&center(b.0)));
+            let right = segments.split_off(mid);
+            NearKind::Branch(Box::new(Self::build(segments)), Box::new(Self::build(right)))
+        };
+        Self { bounds, kind }
+    }
+    fn within(&self, p: kurbo::Point, distance: f64) -> bool {
+        if distance <= 0.0 {
+            return false;
+        }
+        // Round the pruning window outwards; a near-threshold curve must still get the exact
+        // distance test below, even when subtracting the window radius loses a few ulps.
+        let pad = 1e-9 + f64::EPSILON * 16.0 * p.x.abs().max(p.y.abs()).max(distance);
+        let r = self.bounds.inflate(distance + pad, distance + pad);
+        if p.x < r.x0 || p.x > r.x1 || p.y < r.y0 || p.y > r.y1 {
+            return false;
+        }
+        match &self.kind {
+            NearKind::Leaf(segments) => {
+                use kurbo::ParamCurveNearest;
+                segments.iter().any(|s| s.nearest(p, 1e-6).distance_sq.sqrt() < distance)
+            }
+            NearKind::Branch(left, right) => left.within(p, distance) || right.within(p, distance),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -220,6 +277,28 @@ mod tests {
     use kurbo::Shape;
 
     use super::*;
+
+    #[test]
+    fn indexed_offset_distance_matches_full_scan_at_thresholds_and_curve_extrema() {
+        use kurbo::ParamCurveNearest;
+        let mut bp = BezPath::new();
+        for i in 0..100 {
+            let x = f64::from(i) * 20.;
+            bp.move_to((x, 0.));
+            bp.line_to((x + 8., 3.));
+            bp.quad_to((x - 10., 40.), (x + 12., 7.));
+            bp.curve_to((x - 30., -40.), (x + 60., 50.), (x, 0.));
+            bp.close_path();
+        }
+        let index = NearIndex::new(&bp);
+        for i in 0..160 {
+            let p = kurbo::Point::new(f64::from(i) * 13.1 - 40., f64::from(i % 17) * 3. - 20.);
+            let distance = bp.segments().map(|s| s.nearest(p, 1e-6).distance_sq).fold(f64::INFINITY, f64::min).sqrt();
+            for threshold in [0., 0.01, 1., 30., distance, distance - 1e-10, distance + 1e-10] {
+                assert_eq!(index.within(p, threshold), distance < threshold, "{p:?}, {distance}, {threshold}");
+            }
+        }
+    }
 
     #[test]
     fn stroke_region_unites_outlines_whatever_their_winding() {
