@@ -632,6 +632,14 @@ proptest! {
     #![proptest_config(config())]
 
     #[test]
+    fn pdf_separation_mark_payloads_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..5000), version in 0u8..4) {
+        let hex: String = bytes.iter().map(|b| format!("{b:02X}")).collect();
+        let content = format!("/VectorCraftSep{version}_{hex} BMC 0 1 0 0 k 10 10 20 20 re f EMC");
+        let pdf = handmade_pdf(&content, "<< >>", "[0 0 100 100]");
+        survive("separation mark payload", || vectorcraft_pdf::import(&pdf).ok())?;
+    }
+
+    #[test]
     fn pdf_garbage_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..600)) {
         let mut b = b"%PDF-1.7\n".to_vec();
         b.extend(bytes);

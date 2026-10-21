@@ -88,6 +88,24 @@ pub(super) fn read(p: &Value) -> Result<Intents> {
     Ok(Intents { no_trap, metallic })
 }
 
+/// Resolve attributes on the prepared objects, never ids retained by the host.
+pub(super) fn from_marks(d: &Document) -> Intents {
+    let mut metallic: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut no_trap = Vec::new();
+    for id in actions::leaf_targets(d, &selection::layer_ids(d)) {
+        if let Some(mark) = d.ancestry(id).unwrap_or_default().into_iter().rev().find_map(|id| d.node(id)?.extras().sep_mark.as_ref()) {
+            match mark {
+                vectorcraft_doc::SepMark::Metallic { list } => metallic.entry(list.clone()).or_default().push(id.0),
+                vectorcraft_doc::SepMark::NoTrap => no_trap.push(id),
+            }
+        }
+    }
+    Intents {
+        metallic: metallic.into_iter().map(|(list, ids)| Intent { list, objects: Some(Selector::Ids(Ids { ids })) }).collect(),
+        no_trap: (!no_trap.is_empty()).then_some(NoTrap { object_ids: no_trap, rectangles: vec![] }),
+    }
+}
+
 fn select(d: &Document, selector: &Selector) -> Result<Vec<NodeId>> {
     let all = selection::all_objects(d, true);
     let ids = match selector {

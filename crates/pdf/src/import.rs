@@ -889,6 +889,7 @@ struct Builder<'p> {
     unsure: bool,
     /// The marked-content sequences open: the group each marks.
     marked: Vec<Option<usize>>,
+    sep_marks: Vec<Option<vectorcraft_doc::SepMark>>,
     /// A transparency group was just pushed: a form's (whose flags come next) or an image's.
     pending: bool,
     nested: u32,
@@ -1045,6 +1046,7 @@ impl<'p> Builder<'p> {
             route,
             unsure: false,
             marked: vec![],
+            sep_marks: vec![],
             pending: false,
             nested: 0,
             white_images: false,
@@ -1091,6 +1093,7 @@ impl<'p> Builder<'p> {
         self.mask = None;
         self.masked.clear();
         self.marked.clear();
+        self.sep_marks.clear();
         self.pending = false;
         (self.scan, self.tag_at, self.group_at, self.aligned, self.paint_at) = (scan, 0, 0, true, 0);
     }
@@ -1170,7 +1173,12 @@ impl<'p> Builder<'p> {
 
     /// Add `n` to the open frame; `group`: the optional content group it was drawn in, if it
     /// knows one (else the current one).
-    fn emit(&mut self, n: Arc<Node>, group: Option<usize>) {
+    fn emit(&mut self, mut n: Arc<Node>, group: Option<usize>) {
+        if n.extras().sep_mark.is_none()
+            && let Some(mark) = self.sep_marks.iter().rev().find_map(|m| m.as_ref())
+        {
+            Arc::make_mut(&mut n).extras_mut().sep_mark = Some(mark.clone());
+        }
         let root = self.stack.len() == 1;
         let current = self.current_group();
         let Some(f) = self.stack.last_mut() else { return };
@@ -2120,6 +2128,12 @@ impl<'a> Device<'a> for Builder<'_> {
         if self.nested > 0 {
             return;
         }
+        let sep = crate::sep_marks::parse(tag);
+        if sep.is_some() {
+            self.flush();
+            self.last_fill = None;
+        }
+        self.sep_marks.push(sep);
         let at = self.tag_at;
         self.tag_at += 1;
         let group = match self.scan.tags.get(at) {
@@ -2153,9 +2167,12 @@ impl<'a> Device<'a> for Builder<'_> {
             return;
         }
         // The runs gathered within a layer's sequence are its art: finish them before it ends.
-        if self.marked.last().copied().flatten().is_some() {
+        if self.marked.last().copied().flatten().is_some() || self.sep_marks.last().is_some_and(Option::is_some) {
             self.flush();
         }
         self.marked.pop();
+        if self.sep_marks.pop().flatten().is_some() {
+            self.last_fill = None;
+        }
     }
 }

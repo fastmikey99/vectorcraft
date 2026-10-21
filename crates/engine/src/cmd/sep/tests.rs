@@ -49,6 +49,7 @@ fn player(s: &mut Session) -> Player<'_> {
         messages: vec![],
         no_trap: None,
         crosshair: None,
+        marked_intents: false,
     }
 }
 fn step(p: &mut Player<'_>, kind: &str, params: &str) -> Result<usize> {
@@ -1033,4 +1034,97 @@ fn white_processing_step_survives_native_and_pdf_export_and_none_clears_it() {
     step(&mut p, "SetLayerType", "<ProcessingStep>None</ProcessingStep>").unwrap();
     assert!(!p.doc().unwrap().node(layer).unwrap().extras().processing_white);
     assert!(step(&mut p, "SetLayerType", "<ProcessingStep>Unknown</ProcessingStep>").is_err());
+}
+
+/// Print rendering always reads public PDF drawing, with native editing data absent.
+fn assert_same_plates(a: &[u8], b: &[u8]) {
+    let a = vectorcraft_pdf::import(a).unwrap();
+    let b = vectorcraft_pdf::import(b).unwrap();
+    let mut plates = vec!["Cyan".into(), "Magenta".into(), "Yellow".into(), "Black".into()];
+    plates.extend(a.swatches.iter().chain(&b.swatches).filter(|w| w.spot).map(|w| w.name.clone()));
+    plates.sort();
+    plates.dedup();
+    for plate in plates {
+        let options = vectorcraft_render::RenderOptions {
+            background: Some([255; 4]),
+            artboards: false,
+            anti_alias: vectorcraft_render::AntiAlias::None,
+            smooth_images: false,
+            image_mips: false,
+            overprint_preview: true,
+            proof: Some(vectorcraft_render::proof::ProofSetup { separations: Some(vec![plate.clone()]), ..Default::default() }),
+            ..Default::default()
+        };
+        let mut renderer = vectorcraft_render::Renderer::new();
+        let bounds = a.artboards[0].rect;
+        let aa = renderer.render_region_with(&a, bounds, 600. / 72., &options).pixels;
+        let bb = vectorcraft_render::Renderer::new().render_region_with(&b, bounds, 600. / 72., &options).pixels;
+        let changed = aa.iter().zip(&bb).filter(|(a, b)| a != b).count();
+        assert!(aa.len() == bb.len() && changed == 0, "plate {plate}: {changed} changed channels");
+    }
+}
+
+#[test]
+fn separation_marks_public_pdf_plates_and_builder_match_explicit_intents() {
+    let f = Fixture::new();
+    f.pal(
+        "prepare",
+        &[
+            a("SelectAllObjects", ""),
+            a(
+                "CleanObjects",
+                "<ExecuteClip>1</ExecuteClip><CleanUpGroupsAndClippingMasks>1</CleanUpGroupsAndClippingMasks><OutlineStrokes>1</OutlineStrokes>",
+            ),
+            a("CreateLayerOnTop", "<LayerName>Artwork</LayerName>"),
+            a("MoveObjectsToLayer", ""),
+        ]
+        .concat(),
+    );
+    f.pal("metal", &[
+        a("SelectObjectsByAttributes", "<SelectionMode>NewSelection</SelectionMode><Rule Type=\"SeparationNameRule\"><SeparationName>Test Metal</SeparationName><SeparationRelation>Using</SeparationRelation></Rule>"),
+        a("CreateSeparation", "<SeparationName>Test Metal</SeparationName><PreviewRed>0.7</PreviewRed><PreviewGreen>0.5</PreviewGreen><PreviewBlue>0.3</PreviewBlue>"),
+        a("SetFillFlatPaint", "<Percentage>100</Percentage>"),
+    ].concat());
+    f.pal("Trapping_Supacolour_Standard", &a("RenameObjects", "<ObjectName>LIGHT</ObjectName>"));
+    let mut s = Session::new();
+    s.execute("file.new", &json!({"width":50,"height":40})).unwrap();
+    let left = rect(&mut s, 5.12, 5.13, 12., 12.);
+    let right = rect(&mut s, 28.23, 5.17, 12., 12.);
+    s.execute("paint.setFill", &json!({"ids":[left,right],"color":{"c":0.2,"m":0.6,"y":0.1,"k":0.1}})).unwrap();
+    let export = |s: &Session| {
+        super::super::fileio::encode_with_warnings(&s.doc().unwrap().doc, "pdf", &json!({"preserveEditing":false,"output":{"conversion":"none"}}))
+            .unwrap()
+            .0
+    };
+    let plain = export(&s);
+    // The artist opens an existing original, then saves again with marks. This exercises
+    // the page-coordinate round trip as well as the metadata carrier.
+    s.execute("document.open", &json!({"name":"original.pdf","dataBase64":vectorcraft_format::base64_encode(&plain),"printProduction":true}))
+        .unwrap();
+    let paths = actions::leaf_targets(&s.doc().unwrap().doc, &selection::layer_ids(&s.doc().unwrap().doc));
+    let left = *paths.iter().find(|id| s.doc().unwrap().doc.bounds_of(&[**id], true).is_some_and(|b| b.x0 < 20.)).unwrap();
+    let right = *paths.iter().find(|id| s.doc().unwrap().doc.bounds_of(&[**id], true).is_some_and(|b| b.x0 > 20.)).unwrap();
+    s.execute("sep.mark.set", &json!({"ids":[left],"mark":{"type":"metallic","list":"metal"}})).unwrap();
+    s.execute("sep.mark.set", &json!({"ids":[right],"mark":{"type":"noTrap"}})).unwrap();
+    let marked = export(&s);
+    assert_same_plates(&plain, &marked);
+    std::fs::write(f.0.join("marked.pdf"), &marked).unwrap();
+    std::fs::write(f.0.join("plain.pdf"), &plain).unwrap();
+    let mut params = json!({"root":f.0,"lists":["prepare","Trapping_Supacolour_Standard","TrapTask"],"input":f.0.join("marked.pdf"),"output":f.0.join("auto.pdf")});
+    let auto = s.execute("sep.runActionList", &params).unwrap();
+    assert_eq!(auto["status"], "completed", "{auto}");
+    let mm = 25.4 / 72.;
+    params["input"] = json!(f.0.join("plain.pdf"));
+    params["output"] = json!(f.0.join("explicit.pdf"));
+    params["intents"] = json!({"metallic":[{"list":"metal","objects":{"rectMm":[0.,0.,22.*mm,30.*mm]}}],"noTrap":{"rectangles":[{"x":25.*mm,"y":0.,"width":25.*mm,"height":30.*mm}]}});
+    let explicit = s.execute("sep.runActionList", &params).unwrap();
+    assert_eq!(explicit["status"], "completed", "{explicit}");
+    assert_same_plates(&std::fs::read(f.0.join("auto.pdf")).unwrap(), &std::fs::read(f.0.join("explicit.pdf")).unwrap());
+    // An explicit empty intents object suppresses both kinds of persisted mark.
+    params["input"] = json!(f.0.join("marked.pdf"));
+    params["output"] = json!(f.0.join("override.pdf"));
+    params["intents"] = json!({});
+    let overridden = s.execute("sep.runActionList", &params).unwrap();
+    assert_eq!(overridden["status"], "completed", "{overridden}");
+    assert!(!overridden["trace"].as_array().unwrap().iter().any(|step| step["action"] == "SelectIntent" || step["action"] == "SelectNoTrap"));
 }

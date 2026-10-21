@@ -51,6 +51,7 @@ pub(super) fn clean(d: &mut Document, mut n: Node, o: &Options, brushes: &[vecto
         && let Some(mut outline) = pathops::outline_strokes(d, brushes, &n)
     {
         outline.id = n.id;
+        outline.extras_mut().sep_mark = n.extras().sep_mark.clone();
         n = outline;
         changed += 1;
     }
@@ -110,6 +111,7 @@ fn intersect(d: &mut Document, mut n: Node, clip: &PathData, rule: FillRule, bru
     // preserves the painted region, including strokes crossing the clipping boundary.
     if let Some(mut out) = pathops::outline_strokes(d, brushes, &n) {
         out.id = n.id;
+        out.extras_mut().sep_mark = n.extras().sep_mark.clone();
         n = out;
     }
     if let Some((path, fill_rule)) = pathops::node_path(&n) {
@@ -148,4 +150,34 @@ fn intersect(d: &mut Document, mut n: Node, clip: &PathData, rule: FillRule, bru
     let mut group = Node::group(id, vec![Arc::new(mask), Arc::new(n)]);
     group.set_clips(true);
     Ok(Some(group))
+}
+
+/// PDF page-space inversion can change a coordinate by a few f64 ulps on save/reopen.
+/// Curve booleans must not turn that numerical noise into different underprint edges.
+/// Canonicalize both explicit-intent and marked inputs before any preparation geometry.
+/// One nanopt is far below the pathops precision and any production sampling grid.
+pub(super) fn stabilize_input(d: &mut Document) {
+    fn visit(n: &mut Node) {
+        if let Some(path) = n.path_data_mut() {
+            for subpath in &mut path.subpaths {
+                for anchor in &mut subpath.anchors {
+                    for point in [&mut anchor.p, &mut anchor.h_in, &mut anchor.h_out] {
+                        for value in [&mut point.x, &mut point.y] {
+                            if value.is_finite() && value.abs() <= 1e9 {
+                                *value = (*value * 1e9).round() / 1e9;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(children) = n.children_mut() {
+            for child in children {
+                visit(Arc::make_mut(child));
+            }
+        }
+    }
+    for layer in &mut d.layers {
+        visit(Arc::make_mut(layer));
+    }
 }

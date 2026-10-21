@@ -343,7 +343,9 @@ The inspected library has these literal selection behaviours:
 - M-1 through M-26 and M-28, including both M-2 variants: AddToSelection of the
   corresponding spot, ignoring case, plus the current artist selection. M-23 is
   an exception: its PAL searches **M-24**, then applies M-23. This is preserved.
-- M-27: NewSelection of M-27, ignoring case; replaces the artist's selection.
+- M-27: NewSelection of M-27, ignoring case, when run as a self-selecting list.
+  An explicit artist selector (including object marks) takes precedence over the
+  opening ink selector, as it does for the other 2a lists.
 - PMS 871–876, M-SPOT and M-FLOOD: current selection only; no self-selection.
 - No PMS 877 list or PANTONE 877 C selection exists in this library snapshot.
   An explicit PANTONE 877 C spot selector can be supplied to the M-1 list.
@@ -384,3 +386,110 @@ whereas no-trap `rectangles` select intersecting geometry and can split paths.
 Neither key is required; unknown keys and invalid payloads are rejected. Synthetic
 combined-intent tests cover preparation, metallic selection/paint, no-trap selection
 and ticket/TrapTask order with bare and folder-qualified ticket names.
+
+
+## Persistent separation marks (slice D)
+
+Revision: 2026-10-22 — object marks, public PDF carrier, editor controls and host
+messages. Uncommitted for lead review.
+
+Each object has an optional native `sep_mark` attribute:
+`{"type":"metallic","list":"(2a) Apply Metallic Colour/Set M-2 objects (NZ_US)"}`
+or `{"type":"noTrap"}`. It is metadata, never paint. Native saves retain it.
+Marking a group applies to its descendants; marking or clearing one descendant
+splits an inherited group mark so its siblings retain their intent. A new mark
+replaces the previous kind, rather than combining Metallic and NoTrap on one object.
+
+Commands (CLI, engine, control and MCP):
+
+- `sep.mark.set {"ids":[12],"mark":{"type":"noTrap"}}`
+- `sep.mark.set {"mark":{"type":"metallic","list":"(2a) Apply Metallic Colour/Set M-1 objects"}}`
+- `sep.mark.clear {"ids":[12]}`
+- `sep.mark.list {}` → `{marks:[{id,mark,bounds:{x,y,width,height}|null}],units:"pt"}`
+
+Omit `ids` to use the current selection. Set and Clear are single undo steps;
+List is read-only. Bounds use document points, x rightward and y downward. IDs in
+summaries are current-session references, not portable selectors. List names are
+bounded relative PAL paths; the library resolver still prevents escaping `root`.
+
+PDFs carry marks in private, versioned marked-content tags around the object's
+drawing, inside non-isolated Form XObjects. The tag is `VectorCraftSep1_` followed
+by hex-encoded JSON; the encoding cannot inject PDF operators. Readers that do not
+understand the tag ignore it. It adds no paint, opacity, colour conversion or
+printable outline. VectorCraft reads it from public page content, including with
+`printProduction:true` and `preserveEditing:false`; the builder never needs the
+Reporter to remember IDs. Native editing data, when enabled, also retains the
+attribute. One editable object may import as several painted objects, each with
+the same mark. Invalid/unknown private tag versions are ignored. External software
+that rewrites the content may remove private tags; preservation through such a
+rewrite is not claimed.
+
+When `intents` is absent, the builder materializes inherited marks before
+preparation and resolves the surviving prepared objects at the metallic boundary.
+It groups metallic objects by exact list name in lexical order and runs each 2a
+list on that selection. The opening ink selector cannot replace or expand an
+explicit artist selection; this also fixes the NewSelection case in M-27. Nested
+cleanup and self-selecting list runs retain their literal PAL semantics. NoTrap
+marks are resolved immediately before the Mixed ticket and use the established
+no-trap path. They require the same one-ticket/immediate-TrapTask sequence as
+explicit noTrap intents. Any explicit `intents` object, including `{}`, overrides
+all file marks; there is no per-key merge.
+
+Before preparation, both marked and explicit-intent inputs canonicalize path
+coordinates to one billionth of a point. PDF page-coordinate inversion otherwise
+introduces tiny floating-point differences that curve booleans can amplify into
+different underprint edges. This normalization is confined to the builder; it
+does not change editor saves or relax the exact pixel comparisons. Separation
+metadata also does not trigger the trap engine's raster fallback.
+
+The Attributes panel's **Separation marks** section offers Metallic (M-1–M-28,
+both M-2 regional variants, M-SPOT, M-FLOOD and PMS 871–877), No trap (no bleed),
+and Clear. Ink/list identifiers are invariant; controls and command labels have
+rows in every catalog. Marked objects have coloured bounds outlines in the canvas
+only. The supplied library still has no PMS 877 list: that choice records the
+intent, but a build reports the missing list rather than substituting an ink.
+
+The same-origin parent bridge accepts:
+
+```json
+{"type":"vectorcraft:sep.mark.set","id":"m1","mark":{"type":"metallic","list":"(2a) Apply Metallic Colour/Set M-1 objects"}}
+{"type":"vectorcraft:sep.mark.set","id":"m2","mark":{"type":"noTrap"}}
+{"type":"vectorcraft:sep.mark.clear","id":"m3"}
+{"type":"vectorcraft:sep.mark.list","id":"m4"}
+```
+
+Set/Clear target the current selection. Each success replies with
+`{type:"vectorcraft:sep.marks",id,marks:[{id,mark,bounds}],units:"pt"}`; failures use
+`vectorcraft:failed` with the request ID. Await the reply before exporting.
+`vectorcraft:ready` advertises `separationMarks:true`. PDF `vectorcraft:save`
+replies (including File > Save) add `marks` and `markUnits:"pt"`, summarized from
+the saved file, so selection-only exports describe only their saved objects.
+Existing source-colour policy and save acknowledgements are unchanged.
+
+Verification: engine library tests pass (2,709 passed, two ignored), document
+tests (242), PDF tests (353 plus two integration tests), web tests (38), and two
+headless UI tests. Synthetic coverage includes native persistence, public PDF
+reimport without editing data, exact 600 dpi plate equality, set/clear undo,
+inherited group marks, authoritative metallic selection, combined Metallic/NoTrap
+builder equivalence and explicit-intent precedence. The command sweep and
+malformed private-tag import property test pass. Workspace/all-target clippy with
+`-D warnings`, changed-file formatting, layering and the wasm check pass. The
+local toolchain's wasm standard library was built from its installed Rust sources
+for that check. The native window could not start in the sandbox; headless egui
+frames and the exported artwork were checked instead.
+
+Local real-file verification used three saved metallic intents (M-1, M-2 NZ_US,
+and M-SPOT), with no editing attachment and independent Ghostscript `tiffsep`
+renders at 600 dpi. Marked versus unmarked exports are pixel-identical on every
+process/spot plate for all three jobs. Against explicit-intent builds from the
+original PDFs, two jobs match every plate (nine and ten plates respectively).
+The third matches Black and all four spot plates, but fails strict equality on
+Cyan, Magenta and Yellow: 2,461, 15,619 and 8,205 pixels respectively differ by
+one 8-bit level. Its composite also differs. The remaining cause is the existing
+public-PDF gradient resampling/coordinate round trip, also present in an unmarked
+save; it is not a metadata paint change. This original-file parity requirement
+remains open. All three automatic builds do match equivalent explicit-intent
+builds from the saved PDFs, both with marks and from an unmarked-save control,
+on every plate and the composite. Customer files, selections and detailed reports stay outside the
+repository. The 50k-path performance budgets pass on the final repeat; the first
+run had a transient zoom-render budget miss (26 ms versus 16 ms; repeat 10 ms).

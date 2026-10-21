@@ -524,6 +524,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
             hidden_chars_overlay(app, &painter, &xf);
         }
     }
+    separation_mark_overlay(app, &painter, &xf, &t);
     draw_overlays(&painter, &xf, &overlays, &t, HandleLook::of(&app.session.prefs));
     if !revolve_edit {
         shaper_widget_overlay(app, &painter, &xf);
@@ -3200,6 +3201,34 @@ const TASK_BAR_REARRANGE_ARTBOARDS: &str = "taskBar.rearrangeArtboards";
 const TASK_BAR_TO_CORNER: &str = "taskBar.toCorner";
 /// The Contextual Task Bar's Smooth button for direct-selected anchors.
 const TASK_BAR_TO_SMOOTH: &str = "taskBar.toSmooth";
+
+/// Separation intent is an editor overlay only, outside every document renderer/export path.
+fn separation_mark_overlay(app: &VectorcraftApp, p: &egui::Painter, xf: &Xf, t: &Tokens) {
+    let Some(st) = app.session.active() else { return };
+    type Cache = ((u64, u64), Vec<(Rect, bool)>);
+    let key = (st.uid, st.revision);
+    let slot = egui::Id::new("separation-mark-outlines");
+    let cached = p.ctx().data(|d| d.get_temp::<Cache>(slot));
+    let bounds = if let Some((_, bounds)) = cached.filter(|(k, _)| *k == key) {
+        bounds
+    } else {
+        let mut bounds = Vec::new();
+        st.doc.walk(|n| {
+            if let Some(mark) = &n.extras().sep_mark
+                && st.doc.is_visible(n.id)
+                && let Some(rect) = st.doc.bounds_of(&[n.id], true)
+            {
+                bounds.push((rect, matches!(mark, vectorcraft_doc::SepMark::NoTrap)));
+            }
+        });
+        p.ctx().data_mut(|d| d.insert_temp(slot, (key, bounds.clone())));
+        bounds
+    };
+    for (bounds, no_trap) in bounds {
+        let color = if no_trap { t.guide } else { t.accent };
+        p.add(egui::Shape::closed_line(xf.quad(bounds.inflate(2.0 / xf.zoom, 2.0 / xf.zoom)), Stroke::new(1.5, color)));
+    }
+}
 
 #[cfg(test)]
 mod tests {
