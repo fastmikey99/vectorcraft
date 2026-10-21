@@ -214,3 +214,22 @@ fn direct_cmyk_compensation_only_remaps_relative_black() {
     }
     assert!(src.to_cmyk_of(&src, &[0.0; 3], relative, true).is_none());
 }
+
+#[test]
+fn rgb_profiles_are_the_same_when_their_colours_are() {
+    let srgb = icc_bytes(SRGB).unwrap();
+    let wide = icc_bytes(WIDE_GAMUT_RGB).unwrap();
+    let p3 = icc_bytes(DISPLAY_P3).unwrap();
+    assert!(same_rgb_profile(&wide, &wide));
+    // The same colorimetry in another file (here: another creation date) is the same profile.
+    let mut again = wide.to_vec();
+    again[24..26].copy_from_slice(&2001u16.to_be_bytes());
+    assert_ne!(&*again, &*wide, "a different file");
+    assert!(same_rgb_profile(&again, &wide));
+    for (a, b) in [(&srgb, &wide), (&wide, &p3), (&p3, &srgb)] {
+        assert!(!same_rgb_profile(a, b));
+    }
+    let cmyk = icc_bytes(GENERIC_CMYK).unwrap();
+    assert!(!same_rgb_profile(&cmyk, &wide), "not RGB");
+    assert!(!same_rgb_profile(b"not a profile", &wide));
+}

@@ -43,6 +43,8 @@ Every message is a plain object with a string `type`. VectorCraft posts only to 
 | `vectorcraft:solidify` | from the parent | `id` (any), `level` (whole number 1–255, optional, 128), `copies` (boolean, optional) | Remove Soft Pixels on the one selected image: every pixel fully opaque or fully clear. |
 | `vectorcraft:solidified` | to the parent | `id`, `ids` (numbers), `form` (`"alpha"` or `"mask"`), `level`, `softPixels`, `clearPixels`, `opaquePixels` (numbers) | The solidify with this `id` is done. |
 | `vectorcraft:save` | to the parent | `name` (string), `bytes` (`ArrayBuffer`, transferred), `id` (when it answers an export), `bounds` (with `selectedOnly`), `native` (`true` when the bytes are an image's own pixels) | Store this file. |
+| `vectorcraft:colorSettings` | from the parent | `id` (any), `profiles` (`[{name?, bytes}]`, optional), `rgb`, `cmyk` (profile names, optional), `intent` (optional), `bpc` (boolean, optional) | Load these ICC profiles and set Edit › Color Settings with them. |
+| `vectorcraft:colorSettingsApplied` | to the parent | `id`, `loaded` (names), `rgb`, `cmyk`, `intent`, `bpc`, `profiles` (every name available) | The colour settings with this `id` are in effect. |
 | `vectorcraft:prefs` | both ways | `prefs` (string: JSON text) | From the editor: its preferences and workspace changed; store them. From the parent: put these on. |
 | `vectorcraft:dirty` | to the parent | `dirty` (boolean) | Unsaved changes appeared (`true`) or went away (`false`). |
 | `vectorcraft:failed` | to the parent | `error` (string), `id` (when it answers an export) | Before `ready`: the app couldn't start. After `ready`: the last `vectorcraft:open` was refused, or with an `id` that export was; the app keeps running. |
@@ -136,7 +138,7 @@ The bridge reads a message only when all of these hold:
 
 1. it comes from `window.parent` (`event.source`), not from another window or frame on the site;
 2. its origin (`event.origin`) is exactly the page's own: same scheme, host and port;
-3. its `type` is `vectorcraft:open`, `vectorcraft:export`, `vectorcraft:place`, `vectorcraft:solidify`, `vectorcraft:prefs` or `vectorcraft:hello`.
+3. its `type` is `vectorcraft:open`, `vectorcraft:export`, `vectorcraft:place`, `vectorcraft:solidify`, `vectorcraft:colorSettings`, `vectorcraft:prefs` or `vectorcraft:hello`.
 
 Anything else is ignored without a reply, so a page on another origin can neither open files in VectorCraft nor learn that it is there. Saves and other replies go only to `window.parent`, with the page's own origin as the target, so the browser delivers them to no other site. A same-origin parent can already script the frame directly, so the bridge gives it nothing it couldn't otherwise do; it only spares it reaching into the app's internals.
 
@@ -197,6 +199,46 @@ ready replies must not reopen the document. Context is supplied on each host ope
 it is not embedded as production recipe authority in the PDF. Named object groups
 persist in native documents; public PDF import cannot reconstruct group roles that
 were flattened or omitted by an exporter.
+
+### Colour settings from the page (Reporter fork)
+
+The ready message advertises `colorSettings: true`. A page whose files are made with particular
+ICC profiles (Supacolour's prep worker: U.S. Web Coated (SWOP) v2, Adobe RGB (1998), sRGB) hands
+the editor the same profiles and settings, so a sep shows, and is saved, in the colours the worker
+made it in. The web build can't read profiles from disk (`color.loadProfile` is native only), and
+without this it works in its defaults: sRGB, VectorCraft Generic CMYK, relative colorimetric.
+
+```js
+post({ type: 'vectorcraft:colorSettings', id: 'cs1',
+  profiles: [{ bytes: swopIcc }, { bytes: adobeRgbIcc }, { bytes: srgbIcc }],
+  cmyk: 'U.S. Web Coated (SWOP) v2', rgb: 'Adobe RGB (1998)', intent: 'perceptual', bpc: true })
+// then vectorcraft:open
+```
+
+- Each profile is registered under `name`, else the description it carries, and then appears
+  under that name in the Separations panel's Color Settings menus. A built-in name is refused.
+  At most 16 profiles of at most 32 MB each.
+- `rgb`, `cmyk`, `intent` (`perceptual`, `relative`, `saturation`, `absolute`) and `bpc` set the
+  working spaces as Edit › Color Settings does; a field left out stays as it is. A space must be a
+  built-in profile or one registered (by this message or earlier).
+- They are applied at the next frame **before** that frame's `vectorcraft:open` is read, so send
+  them before the open: the file is then read in them (see below). They last for the page's
+  life (every later open), like the person's own Color Settings; the page sends them again after
+  a reload. They are not preferences (`vectorcraft:prefs` doesn't carry them) and not an edit:
+  no `dirty: true`, no undo step.
+- Answered with `vectorcraft:colorSettingsApplied`, or `vectorcraft:failed` with the `id` (an
+  unreadable profile, an unknown space, a field of the wrong type, an empty message). Profiles
+  registered before a refused one stay registered; the settings are left unchanged.
+
+**PDFs in the RGB working space keep their numbers.** A PDF's `ICCBased` RGB colours are read
+through their profile into sRGB numbers. With an RGB working space other than sRGB those numbers
+were then taken as working-space numbers, so a file tagged with the working space itself (the
+prep worker's Adobe RGB output, read with Adobe RGB as the working space) came out more
+saturated each time it was read: ΔE2000 about 4–7 per round on Supacolour's seps. Now, when every
+3-component `ICCBased` space of the file has the working space's profile (the same file, or one
+giving the same colours), its numbers are kept as they are. Files with other or mixed RGB
+profiles read as before. This holds for the CLI and desktop app too (any `document.open` or
+place of a PDF).
 
 ### Per-job units (Reporter fork)
 

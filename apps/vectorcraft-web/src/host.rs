@@ -37,6 +37,12 @@
 //!   the same printed size; one undo step. Answered with `vectorcraft:solidified { id, ids, form,
 //!   level, softPixels, clearPixels, opaquePixels }` or `vectorcraft:failed { error, id }`. `ready`
 //!   says `solidify: true`.
+//! - `vectorcraft:colorSettings` (from the parent): `{ id?, profiles?: [{ name?, bytes }], rgb?,
+//!   cmyk?, intent?, bpc? }`, ICC profiles registered (each under `name`, else its own
+//!   description) and Edit › Color Settings set with them, before the frame's open is read; not an
+//!   edit (no dirty, no undo). Answered with `vectorcraft:colorSettingsApplied { id, loaded, rgb,
+//!   cmyk, intent, bpc, profiles }` or `vectorcraft:failed { error, id }`. `ready` says
+//!   `colorSettings: true`.
 //! - `vectorcraft:prefs` (both ways): `{ prefs }`, the preferences and workspace as JSON text. The
 //!   editor sends them when they change (the page stores them for the person signed in); the page
 //!   sends them back before opening a file, and the editor takes them on. In host mode the editor
@@ -81,6 +87,8 @@ pub struct Bridge {
     places: Rc<RefCell<Vec<(JsValue, protocol::Place)>>>,
     /// Soft pixels the parent asked to remove, run on the next frame.
     solidifies: Rc<RefCell<Vec<(JsValue, protocol::Solidify)>>>,
+    /// Colour settings the parent asked for, applied at the next frame before its open.
+    colors: Rc<RefCell<Vec<(JsValue, protocol::ColorSettings)>>>,
     /// Preferences the parent handed back, put on at the next frame (the last one wins).
     prefs: Rc<RefCell<Option<String>>>,
     /// The files the parent hands over (`Services::host_inbox`), which outlive graphics restarts.
@@ -106,6 +114,7 @@ impl Bridge {
             exports: Rc::default(),
             places: Rc::default(),
             solidifies: Rc::default(),
+            colors: Rc::default(),
             prefs: Rc::default(),
             inbox: Inbox::default(),
             ready: Rc::default(),
@@ -143,6 +152,7 @@ impl Bridge {
             ("rasterEffectsResolution", true.into()),
             ("units", true.into()),
             ("solidify", true.into()),
+            ("colorSettings", true.into()),
         ]);
     }
 
@@ -199,6 +209,38 @@ impl Bridge {
                         ("softPixels", (done.soft as f64).into()),
                         ("clearPixels", (done.clear as f64).into()),
                         ("opaquePixels", (done.opaque as f64).into()),
+                    ]);
+                }
+                Err(error) => self.post_export_failed(&id, &error),
+            }
+        }
+    }
+
+    /// Each frame, before the app reads the files the parent handed over: apply the colour settings
+    /// the parent asked for, so a file opened after them is read in them.
+    pub fn run_color_settings(&self, app: &mut VectorcraftApp) {
+        let asked = std::mem::take(&mut *self.colors.borrow_mut());
+        for (id, request) in asked {
+            match crate::operations::apply_color_settings(app, &request) {
+                Ok(done) => {
+                    let loaded: js_sys::Array = done.loaded.iter().map(|n| JsValue::from_str(n)).collect();
+                    let profiles: js_sys::Array = done.settings["profiles"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|p| p["name"].as_str())
+                        .map(JsValue::from_str)
+                        .collect();
+                    let text = |k: &str| JsValue::from_str(done.settings[k].as_str().unwrap_or_default());
+                    self.send(&[
+                        ("type", "vectorcraft:colorSettingsApplied".into()),
+                        ("id", id),
+                        ("loaded", loaded.into()),
+                        ("rgb", text("rgb")),
+                        ("cmyk", text("cmyk")),
+                        ("intent", text("intent")),
+                        ("bpc", done.settings["bpc"].as_bool().unwrap_or(false).into()),
+                        ("profiles", profiles.into()),
                     ]);
                 }
                 Err(error) => self.post_export_failed(&id, &error),
@@ -328,6 +370,37 @@ impl Bridge {
                         wake();
                     }
                     Err(error) => bridge.post_failed(&error),
+                }
+                return;
+            }
+            if string(&data, "type").as_deref() == Some("vectorcraft:colorSettings") {
+                let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
+                // A field left out is `None`; one that is there but of the wrong type is `Some(None)`.
+                let given = |key: &str| js_sys::Reflect::get(&data, &JsValue::from_str(key)).ok().filter(|v| !v.is_undefined());
+                let profiles = given("profiles").map(|v| {
+                    v.dyn_ref::<js_sys::Array>().map(|list| {
+                        list.iter()
+                            .map(|p| {
+                                let name =
+                                    js_sys::Reflect::get(&p, &JsValue::from_str("name")).ok().filter(|v| !v.is_undefined()).map(|v| v.as_string());
+                                (name, bytes(&p))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                });
+                let request = protocol::color_settings(
+                    profiles,
+                    given("rgb").map(|v| v.as_string()),
+                    given("cmyk").map(|v| v.as_string()),
+                    given("intent").map(|v| v.as_string()),
+                    given("bpc").map(|v| v.as_bool()),
+                );
+                match request {
+                    Ok(request) => {
+                        bridge.colors.borrow_mut().push((id, request));
+                        wake();
+                    }
+                    Err(error) => bridge.post_export_failed(&id, &error),
                 }
                 return;
             }

@@ -257,6 +257,7 @@ fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_p
     b.taken = taken;
     b.warnings = notes;
     b.colors.uncalibrated_rgb = opts.uncalibrated_rgb && picked.iter().filter_map(|&n| pages.get(n)).any(crate::pages::has_private_data);
+    b.colors.working_rgb = opts.working_rgb.clone();
     let cache = InterpreterCache::new();
     let mut x = 0.0;
     // Where the next page's art may begin (a `.ai` page's art reaches past its artboard).

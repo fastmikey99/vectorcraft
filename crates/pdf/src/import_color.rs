@@ -128,6 +128,10 @@ pub(crate) struct Colors<'p> {
     /// on for an editor's own document (`.ai`), so its art keeps the RGB numbers the file has; off
     /// for PDFs, whose profiles stand.
     pub uncalibrated_rgb: bool,
+    /// The RGB working space's profile (`ImportOptions::working_rgb`), and whether every
+    /// `ICCBased` RGB space of the file is it (found once, when a colour first needs it).
+    pub working_rgb: Option<std::sync::Arc<[u8]>>,
+    in_working_rgb: Option<bool>,
 }
 
 /// `v`'s `Debug` text, or `None` past [`DEBUG_LIMIT`] (formatting stops there).
@@ -161,7 +165,20 @@ pub(crate) fn split_color(t: &str) -> Option<(&str, Vec<f32>)> {
 
 impl<'p> Colors<'p> {
     pub fn new(pdf: &'p Pdf, taken: Vec<String>) -> Self {
-        Self { pdf, taken, scanned: false, spaces: vec![], tied: None, inks: vec![], cmyk: 0, rgb: 0, mixed: false, uncalibrated_rgb: false }
+        Self {
+            pdf,
+            taken,
+            scanned: false,
+            spaces: vec![],
+            tied: None,
+            inks: vec![],
+            cmyk: 0,
+            rgb: 0,
+            mixed: false,
+            uncalibrated_rgb: false,
+            working_rgb: None,
+            in_working_rgb: None,
+        }
     }
 
     /// A solid color in its own model; `None`: use its RGB. `inks`: the colorant names of the
@@ -213,7 +230,7 @@ impl<'p> Colors<'p> {
         match (kind, n) {
             ("DeviceGray" | "ICCBased", 1) => Space::Gray,
             ("DeviceRgb", 3) => Space::Rgb,
-            ("ICCBased", 3) if self.uncalibrated_rgb => Space::IccRgb,
+            ("ICCBased", 3) if self.uncalibrated_rgb || self.icc_rgb_is_working() => Space::IccRgb,
             ("DeviceCmyk" | "ICCBased", 4) => Space::Cmyk,
             ("Separation", 1) | ("DeviceN", _) => {
                 self.scan();
@@ -314,6 +331,29 @@ impl<'p> Colors<'p> {
             }
             _ => Some(Native { color: Color::cmyk(1.0, 1.0, 1.0, 1.0).tinted(t), link: Some((REGISTRATION.to_string(), t)) }),
         }
+    }
+
+    /// Whether the file's `ICCBased` RGB colours are in the RGB working space: it isn't sRGB, and
+    /// every 3-component `ICCBased` space of the file has its profile (a colour's space can't be
+    /// told apart from another `ICCBased` one, so one other profile, or a Lab one, and none
+    /// qualify). Found once.
+    fn icc_rgb_is_working(&mut self) -> bool {
+        if let Some(known) = self.in_working_rgb {
+            return known;
+        }
+        let known = self.working_rgb.clone().is_some_and(|working| {
+            let mut found: Vec<Vec<u8>> = vec![];
+            let mut ok = true;
+            for o in self.pdf.objects() {
+                icc_rgb_profiles(o, 0, &mut found, &mut ok);
+                if !ok {
+                    break;
+                }
+            }
+            ok && !found.is_empty() && found.iter().all(|p| vectorcraft_color::cms::same_rgb_profile(p, &working))
+        });
+        self.in_working_rgb = Some(known);
+        known
     }
 
     /// Find the file's Separation and DeviceN colour spaces (once, when a colour first needs them).
@@ -482,6 +522,51 @@ fn alt_model(o: &Object<'_>) -> Option<Alt> {
             }
         }
         _ => None,
+    }
+}
+
+/// The most different `ICCBased` RGB profiles [`Colors::icc_rgb_is_working`] compares.
+const MAX_ICC_PROFILES: usize = 64;
+
+/// Collect the profiles of the 3-component `ICCBased` spaces in `o` (distinct, decoded) into
+/// `found`; `ok` turns false at one that can't be one of the working space's: a Lab profile, one
+/// that doesn't decode, or past [`MAX_ICC_PROFILES`].
+fn icc_rgb_profiles(o: Object<'_>, depth: u32, found: &mut Vec<Vec<u8>>, ok: &mut bool) {
+    if depth > MAX_DEPTH || !*ok {
+        return;
+    }
+    match o {
+        Object::Array(a) => {
+            let mut it = a.flex_iter();
+            if it.next::<Name<'_>>().is_some_and(|n| n.as_str() == "ICCBased") {
+                if let Some(profile) = it.next::<Stream<'_>>()
+                    && profile.dict().get::<u8>(b"N") == Some(3)
+                {
+                    match profile.decoded() {
+                        Ok(bytes) if !lab_profile(&profile) => {
+                            if !found.iter().any(|f| f[..] == bytes[..]) {
+                                found.push(bytes.into_owned());
+                                *ok = found.len() <= MAX_ICC_PROFILES;
+                            }
+                        }
+                        _ => *ok = false,
+                    }
+                }
+                return;
+            }
+            for item in items(&a).filter_map(direct) {
+                icc_rgb_profiles(item, depth + 1, found, ok);
+            }
+        }
+        Object::Dict(d) => {
+            for v in values(&d) {
+                if let Some(v) = direct(v) {
+                    icc_rgb_profiles(v, depth + 1, found, ok);
+                }
+            }
+        }
+        Object::Stream(s) => icc_rgb_profiles(Object::Dict(s.dict().clone()), depth + 1, found, ok),
+        _ => {}
     }
 }
 

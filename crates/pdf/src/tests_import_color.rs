@@ -476,3 +476,34 @@ fn fractional_process_inks_and_spot_tints_are_not_rounded_on_import() {
     assert_eq!(solid(&paints[1]).2, 0.543219);
     assert_eq!(doc.swatch("PrecisionWhite").unwrap().paint.color().unwrap(), Color::cmyk(0.123456, 0.234567, 0.345678, 0.456789));
 }
+
+#[test]
+fn rgb_in_the_working_space_profile_keeps_its_numbers() {
+    // GUARDS: a PDF tagged with the RGB working space (Supacolour's seps: Adobe RGB both ways) was
+    // read through sRGB, and the sRGB numbers then taken as working-space ones: each re-read came
+    // out more saturated. Its numbers stand only when every ICCBased RGB space is that profile.
+    use vectorcraft_color::cms::{self, DISPLAY_P3, PROPHOTO_RGB, SRGB};
+    let hex = |name: &str| cms::icc_bytes(name).unwrap().iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let stream = |name: &str| {
+        let h = hex(name);
+        format!("<< /N 3 /Filter /ASCIIHexDecode /Length {} >>\nstream\n{h}>\nendstream", h.len() + 1)
+    };
+    let f = first_extra(1);
+    let one = pdf_with(&[page_with(&format!("/CS0 [/ICCBased {f} 0 R]"), &[("CS0", "0.2 0.6 0.4")])], &[&stream(PROPHOTO_RGB)], None);
+    let two = pdf_with(
+        &[page_with(&format!("/CS0 [/ICCBased {f} 0 R] /CS1 [/ICCBased {} 0 R]", f + 1), &[("CS0", "0.2 0.6 0.4"), ("CS1", "0.5 0.5 0.5")])],
+        &[&stream(PROPHOTO_RGB), &stream(SRGB)],
+        None,
+    );
+    let color = |bytes: &[u8], working: Option<&str>| {
+        let working_rgb = working.map(|w| cms::icc_bytes(w).unwrap());
+        solid(&fills(&import_with_report(bytes, &ImportOptions { working_rgb, ..Default::default() }).unwrap().document)[0]).0
+    };
+    let kept = Color::rgb(0.2, 0.6, 0.4);
+    assert!(near(color(&one, Some(PROPHOTO_RGB)), kept), "{:?}", color(&one, Some(PROPHOTO_RGB)));
+    // Another working space, or none (sRGB): through sRGB as before.
+    assert!(!near(color(&one, Some(DISPLAY_P3)), kept), "{:?}", color(&one, Some(DISPLAY_P3)));
+    assert!(!near(color(&one, None), kept));
+    // A file whose RGB spaces aren't all the working one: which colour is in which can't be told.
+    assert!(!near(color(&two, Some(PROPHOTO_RGB)), kept), "{:?}", color(&two, Some(PROPHOTO_RGB)));
+}

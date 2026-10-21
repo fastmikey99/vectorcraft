@@ -135,6 +135,12 @@ pub struct ImportOptions {
     /// The file is an editor's own document (`.ai`): RGB in its `ICCBased` spaces keeps its numbers
     /// (see `Colors::uncalibrated_rgb`). Off for PDFs, whose profiles stand.
     pub uncalibrated_rgb: bool,
+    /// The RGB working space's ICC profile (`cms::working_rgb_icc`; `None` = sRGB): when every
+    /// `ICCBased` RGB space of the file is this profile, their colours are already in the working
+    /// space and keep their numbers (otherwise they go through sRGB, and a working space other
+    /// than sRGB would read those sRGB numbers as its own: an Adobe RGB file re-read in Adobe RGB
+    /// came out more saturated each time).
+    pub working_rgb: Option<std::sync::Arc<[u8]>>,
     /// Refuse artwork exceeding safe nesting limits instead of discarding clips or masks.
     /// Print-production callers must enable this before offering an editable separation.
     pub reject_depth_loss: bool,
@@ -151,6 +157,7 @@ impl Default for ImportOptions {
             text_as: TextAs::default(),
             layers: true,
             uncalibrated_rgb: false,
+            working_rgb: None,
             reject_depth_loss: false,
         }
     }

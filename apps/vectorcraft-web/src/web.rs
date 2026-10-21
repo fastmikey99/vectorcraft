@@ -482,6 +482,10 @@ impl eframe::App for WebShell {
         }
         self.restore_host_prefs();
         let Some(app) = &mut self.app else { return };
+        // Before the app reads this frame's open: a file sent after its colour settings is read in them.
+        if let Some(bridge) = &self.host.bridge {
+            bridge.run_color_settings(app);
+        }
         let pasted = self.host.pasted.borrow_mut().flavour.take();
         if let Some((f, held)) = pasted {
             app.paste_from_host(ctx, f, held);

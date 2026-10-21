@@ -307,6 +307,37 @@ pub fn icc_bytes(name: &str) -> Result<Arc<[u8]>, CmsError> {
     Ok(bytes)
 }
 
+/// The ICC profile of the RGB working space, unless it is sRGB: what a PDF import compares an
+/// `ICCBased` RGB space with, so colours already in the working space keep their numbers instead
+/// of going through sRGB (see [`same_rgb_profile`]). `None` for sRGB (the import's own
+/// conversion target) or a working space that can't be written as a profile.
+pub fn working_rgb_icc() -> Option<Arc<[u8]>> {
+    let st = active_settings();
+    (canonical_name(&st.rgb) != SRGB).then(|| icc_bytes(&st.rgb).ok()).flatten()
+}
+
+/// Whether RGB profiles `a` and `b` (ICC files) describe the same colours: the same bytes, or
+/// `a`'s colours converted into `b` (relative colorimetric) come out with their own numbers, on a
+/// grid through the whole cube. Anything that isn't a readable RGB profile is not the same.
+pub fn same_rgb_profile(a: &[u8], b: &[u8]) -> bool {
+    if a == b {
+        return true;
+    }
+    let (Ok(pa), Ok(pb)) = (IccProfile::from_bytes(None, a), IccProfile::from_bytes(None, b)) else { return false };
+    if pa.kind != ProfileKind::Rgb || pb.kind != ProfileKind::Rgb {
+        return false;
+    }
+    const STEPS: [f32; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
+    STEPS.iter().all(|&r| {
+        STEPS.iter().all(|&g| {
+            STEPS.iter().all(|&bl| {
+                pa.to_rgb_of(&pb, &[r, g, bl], Intent::RelativeColorimetric, false)
+                    .is_some_and(|o| o.iter().zip([r, g, bl]).all(|(x, y)| (x - y).abs() <= 0.5 / 255.0))
+            })
+        })
+    })
+}
+
 /// Load a `.icc`/`.icm` file from disk (native only).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_icc_file(path: &std::path::Path) -> Result<ProfileInfo, CmsError> {
