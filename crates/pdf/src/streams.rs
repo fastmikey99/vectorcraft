@@ -18,6 +18,15 @@ pub(crate) const MAX_DECODED: usize = 256 << 20;
 /// [`MAX_DECODED`]: 1 GB (an A0 sheet scanned at 300 ppi is 418 MB in RGB, 557 MB in CMYK).
 const MAX_IMAGE_DECODED: usize = 1 << 30;
 
+/// The most a content stream (of a page, form, pattern or glyph) may decode to when it is large
+/// already: 1 GB, at most [`MAX_RATIO`] times its encoded size. Real drawings compress 3–10
+/// times (a 22 × 180 in Inkscape page is 128 MB that decodes to 391 MB); a zip bomb expands
+/// hundreds of times, and stays at [`MAX_DECODED`].
+const MAX_CONTENT_DECODED: usize = 1 << 30;
+
+/// The most a content stream past [`MAX_DECODED`] may expand: 32 times its encoded size.
+const MAX_RATIO: usize = 32;
+
 /// The longest row a predictor may have, in bytes.
 const MAX_ROW: usize = 1 << 24;
 
@@ -179,9 +188,13 @@ fn components(dict: &Dict<'_>) -> u64 {
 
 /// The most the stream with dictionary `dict` may decode to: [`MAX_DECODED`], or for an image
 /// XObject the size its width, height, components and bits declare (each row with a predictor's
-/// tag byte), up to [`MAX_IMAGE_DECODED`]: an image's size is known before it is decoded.
-fn budget(dict: &Dict<'_>) -> usize {
+/// tag byte), up to [`MAX_IMAGE_DECODED`]: an image's size is known before it is decoded. Content
+/// `encoded` bytes long may decode to [`MAX_RATIO`] times that, up to [`MAX_CONTENT_DECODED`].
+fn budget(dict: &Dict<'_>, encoded: usize) -> usize {
     if dict.get::<Name<'_>>(b"Subtype").is_none_or(|s| s.as_ref() != b"Image") {
+        if maybe_content(dict) {
+            return encoded.saturating_mul(MAX_RATIO).clamp(MAX_DECODED, MAX_CONTENT_DECODED);
+        }
         return MAX_DECODED;
     }
     let side = |key: &[u8]| dict.get::<u32>(key).map_or(0, u64::from);
@@ -199,7 +212,7 @@ fn budget(dict: &Dict<'_>) -> usize {
 /// (an image's own decoder knows its size).
 fn decode(data: &[u8], dict: &Dict<'_>, keep: bool) -> Result<Option<Vec<u8>>, TooBig> {
     let filters = filters(dict);
-    let max = budget(dict);
+    let max = budget(dict, data.len());
     if !keep && most_after(data.len(), &filters) <= max as u128 {
         return Ok(None);
     }
@@ -390,7 +403,37 @@ mod tests {
             |w: u32, h: u32| format!("<< /Subtype /Image /Width {w} /Height {h} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode >>");
         assert!(decode(&bomb, &dict(&image(1 << 15, 1 << 14)), false).is_ok());
         assert!(matches!(decode(&bomb, &dict(&image(16, 16)), false), Err(TooBig)));
-        assert_eq!(budget(&dict(&image(1 << 20, 1 << 20))), MAX_IMAGE_DECODED);
+        assert_eq!(budget(&dict(&image(1 << 20, 1 << 20)), 0), MAX_IMAGE_DECODED);
+    }
+
+    #[test]
+    fn large_content_may_decode_past_the_cap_at_an_ordinary_ratio() {
+        let form = dict("<< /Type /XObject /Subtype /Form /Filter /FlateDecode >>");
+        // A kilobyte asking for more than the cap is still refused.
+        assert_eq!(budget(&form, 1 << 10), MAX_DECODED);
+        // 100 MB of content may decode to 32 times that, up to 1 GB; a font may not.
+        assert_eq!(budget(&form, 100 << 20), MAX_CONTENT_DECODED);
+        assert_eq!(budget(&form, 10 << 20), 320 << 20);
+        assert_eq!(budget(&dict("<< /Length1 5 /Filter /FlateDecode >>"), 100 << 20), MAX_DECODED);
+        // The zeros bomb (over 500 to one) is refused as a form too.
+        assert!(matches!(decode(&zeros_past_the_cap(), &form, true), Err(TooBig)));
+        // Content past the cap that compresses three to one is read whole.
+        let mut seed = 0x9e37_79b9_u32;
+        let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut row = vec![0u8; 1 << 20];
+        for _ in 0..(MAX_DECODED >> 20) + 16 {
+            for b in &mut row {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                *b = b'0' + (seed & 3) as u8;
+            }
+            std::io::Write::write_all(&mut e, &row).unwrap();
+        }
+        let content = e.finish().unwrap();
+        let ratio = (MAX_DECODED + (16 << 20)) as f64 / content.len() as f64;
+        assert!((2.0..=5.0).contains(&ratio), "{ratio}");
+        assert_eq!(decode(&content, &form, true).ok().flatten().map(|d| d.len()), Some(MAX_DECODED + (16 << 20)));
     }
 
     /// A one-page PDF drawing one flat 8-bit DeviceRGB image of `w` × `h` pixels, Flate-compressed.

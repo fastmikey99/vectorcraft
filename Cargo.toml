@@ -125,7 +125,8 @@ lto = "thin"
 codegen-units = 1
 
 [patch.crates-io]
-hayro-syntax = { git = "https://github.com/fastmikey99/craft-libs", rev = "049a48689e8488148ccd72b5d061baf8bb0810d9" }
+# The craft-libs copy with a 1 GiB ordinary stream limit: vendor/hayro-syntax/VECTORCRAFT-PATCH.md.
+hayro-syntax = { path = "vendor/hayro-syntax" }
 hayro-interpret = { git = "https://github.com/fastmikey99/craft-libs", rev = "049a48689e8488148ccd72b5d061baf8bb0810d9" }
 hayro-jbig2 = { git = "https://github.com/fastmikey99/craft-libs", rev = "049a48689e8488148ccd72b5d061baf8bb0810d9" }
 krilla = { git = "https://github.com/fastmikey99/craft-libs", rev = "049a48689e8488148ccd72b5d061baf8bb0810d9" }
