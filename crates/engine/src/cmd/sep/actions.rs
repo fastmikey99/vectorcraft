@@ -42,6 +42,9 @@ impl Player<'_> {
                 }
                 Ok(0)
             }
+            "TrapTask" => self.trap_task(),
+            "SetTrapTags" | "RemoveTrappingTags" => self.trap_tags(p, a.kind == "RemoveTrappingTags"),
+            "Rasterize" => self.rasterize(p),
             "ShowMessage" => {
                 self.messages.push(p.children.iter().map(|e| format!("{}={}", e.name, e.text)).collect::<Vec<_>>().join(" "));
                 Ok(0)
@@ -483,7 +486,7 @@ impl Player<'_> {
                     Ok(total)
                 })
             }
-            "AddWhiteUnderPrint" | "Choke" | "Spread" | "Shaper" | "Rasterize" | "SetTrapTags" | "RemoveTrappingTags" => self.geometry(a),
+            "AddWhiteUnderPrint" | "Choke" | "Spread" | "Shaper" => self.geometry(a),
             other => Err(error(format!("not implemented: {other}"))),
         }
     }

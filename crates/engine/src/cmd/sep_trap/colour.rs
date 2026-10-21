@@ -17,15 +17,16 @@ pub(super) struct Samples {
     pixels: Vec<(usize, usize)>,
 }
 
-fn collect(node: &Node, doc: &Document, threshold: f32, out: &mut Vec<Feature>) -> Result<bool> {
+fn collect(node: &Node, doc: &Document, threshold: f32, inherited: bool, out: &mut Vec<Feature>) -> Result<bool> {
     crate::cancel::check()?;
+    let permission = node.extras().trap_external.unwrap_or(inherited);
     if !node.visible || node.opacity <= 0.0 || matches!(node.kind, NodeKind::Path { guide: true, .. }) {
         return Ok(true);
     }
     if node.opacity != 1.0
         || node.blend != BlendMode::Normal
         || node.knockout != Default::default()
-        || node.extras != Default::default()
+        || has_render_extras(node)
         || !node.appearance.effects.is_empty()
     {
         return Ok(false);
@@ -36,7 +37,7 @@ fn collect(node: &Node, doc: &Document, threshold: f32, out: &mut Vec<Feature>) 
                 return Ok(false);
             }
             for child in children {
-                if !collect(child, doc, threshold, out)? {
+                if !collect(child, doc, threshold, permission, out)? {
                     return Ok(false);
                 }
             }
@@ -68,7 +69,7 @@ fn collect(node: &Node, doc: &Document, threshold: f32, out: &mut Vec<Feature>) 
                     let (ink, eligible) = paint_ink(doc, color, swatch.as_deref(), *tint, threshold);
                     // Include the source/destination cell uncertainty of the raster band.
                     let padding = 0.2 * MM + 2.0 / SCALE;
-                    out.push(Feature { path, bounds: bounds.inflate(padding, padding), ink, eligible });
+                    out.push(Feature { path, bounds: bounds.inflate(padding, padding), ink, eligible: eligible && permission });
                 }
             }
         }
@@ -82,13 +83,14 @@ fn collect(node: &Node, doc: &Document, threshold: f32, out: &mut Vec<Feature>) 
 pub(super) fn samples(doc: &Document, nearest: &mut [Option<u32>], w: usize, region: Rect, threshold: f32) -> Result<Option<Samples>> {
     let mut features = Vec::new();
     for layer in &doc.layers {
-        if !collect(layer, doc, threshold, &mut features)? {
+        if !collect(layer, doc, threshold, true, &mut features)? {
             return Ok(None);
         }
     }
     if w == 0 {
         return Err(bad(C, "invalid colour sample grid"));
     }
+    let index = super::index::Index::new(features.iter().enumerate().map(|(i, f)| (i, f.path.clone())));
     let mut pixels = Vec::new();
     for (i, sample) in nearest.iter_mut().enumerate() {
         if i % 16384 == 0 {
@@ -98,18 +100,9 @@ pub(super) fn samples(doc: &Document, nearest: &mut [Option<u32>], w: usize, reg
             continue;
         }
         let point = Point::new(region.x0 + ((i % w) as f64 + 0.5) / SCALE, region.y0 + ((i / w) as f64 + 0.5) / SCALE);
-        let mut best = None;
-        let mut distance = f64::INFINITY;
-        for (j, feature) in features.iter().enumerate() {
-            if feature.bounds.contains(point)
-                && let Some((_, _, _, _, d)) = feature.path.nearest(point)
-                && d < distance
-            {
-                distance = d;
-                best = Some(j);
-            }
-        }
-        let j = best.ok_or_else(|| bad(C, "no vector colour owner for band sample"))?;
+        let j = index
+            .nearest(point, |j| features.get(j).is_some_and(|f| f.bounds.contains(point)))
+            .ok_or_else(|| bad(C, "no vector colour owner for band sample"))?;
         let feature = features.get(j).ok_or_else(|| bad(C, "invalid vector colour owner"))?;
         // The same PAL epsilon/K rule applies after geometric ownership, just as it does after
         // raster ownership. An excluded nearer object cannot borrow a more distant object's ink.

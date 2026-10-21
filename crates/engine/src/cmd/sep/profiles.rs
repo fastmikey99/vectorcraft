@@ -91,7 +91,7 @@ impl Player<'_> {
     }
 }
 
-pub(super) fn document_cms(doc: &Document) -> Option<Cms> {
+pub(in crate::cmd) fn document_cms(doc: &Document) -> Option<Cms> {
     let mut settings = cms::active_settings();
     settings.cmyk = doc.color_profiles.cmyk.clone()?;
     if let Some(rgb) = &doc.color_profiles.rgb {
@@ -102,7 +102,7 @@ pub(super) fn document_cms(doc: &Document) -> Option<Cms> {
     Cms::new(&settings).ok()
 }
 
-pub(super) fn cmyk(color: Color, cms: Option<&Cms>) -> [f32; 4] {
+pub(in crate::cmd) fn cmyk(color: Color, cms: Option<&Cms>) -> [f32; 4] {
     let Some(cms) = cms else { return color.to_cmyk() };
     let intent = cms.settings().intent;
     match color {

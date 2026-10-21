@@ -2,11 +2,12 @@
 mod actions;
 mod clean;
 mod geometry;
-mod profiles;
+pub(super) mod profiles;
 mod reader;
 mod selection;
 #[cfg(test)]
 mod tests;
+mod trap;
 
 use super::{CommandSpec, always, cmd};
 use crate::{EngineError, Result, Session};
@@ -59,6 +60,7 @@ struct Player<'a> {
     trace: Vec<Value>,
     stopped: Option<Value>,
     clipboard_empty: bool,
+    trap_footprints: BTreeMap<NodeId, (vectorcraft_doc::Node, vectorcraft_geom::PathData)>,
     messages: Vec<String>,
 }
 impl Player<'_> {
@@ -228,11 +230,27 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         trace: Vec::new(),
         stopped: None,
         clipboard_empty: true,
+        trap_footprints: BTreeMap::new(),
         messages: Vec::new(),
     };
     player.remove_background()?;
     for list in lists {
-        if let Err(e) = player.list(list, None) {
+        let result = if list == "TrapTask" {
+            player.play(
+                &player.root.join("AE"),
+                &[Action {
+                    kind: "TrapTask".into(),
+                    position: 1,
+                    params: Element::default(),
+                    children: vec![],
+                    then_actions: vec![],
+                    else_actions: vec![],
+                }],
+            )
+        } else {
+            player.list(list, None)
+        };
+        if let Err(e) = result {
             player.stopped = Some(json!({"list":list,"reason":e.to_string()}));
         }
         if player.stopped.is_some() {
@@ -263,6 +281,9 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
             let mut strokes = std::collections::BTreeSet::new();
             for id in &leaves {
                 if let Some(node) = doc.node(*id) {
+                    if matches!(node.kind, vectorcraft_doc::NodeKind::Image(_)) && node.appearance.items.is_empty() {
+                        fills.insert(false);
+                    }
                     for item in &node.appearance.items {
                         match item {
                             vectorcraft_doc::AppearanceItem::Fill(f) if !f.paint.is_none() => {

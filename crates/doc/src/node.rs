@@ -537,6 +537,9 @@ pub struct Node {
 /// them stay small ([`Node::extras`]).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NodeExtras {
+    /// External trap permission; absent inherits the enclosing object or ticket.
+    /// The supported ticket uses 0.2 mm outward, no internal traps or pullback.
+    pub trap_external: Option<bool>,
     /// Opacity mask (Transparency panel). Its art lives here, outside the layer tree.
     pub mask: Option<Box<OpacityMask>>,
     /// Image Trace object: `{preset, params, view?}` it was traced with (the Image Trace panel shows
@@ -576,6 +579,7 @@ pub struct NodeExtras {
 
 /// No extras: what [`Node::extras`] gives for a node without any.
 static NO_EXTRAS: NodeExtras = NodeExtras {
+    trap_external: None,
     mask: None,
     trace: None,
     wrap: None,
@@ -724,6 +728,7 @@ impl Serialize for Node {
             e.dimension.is_none(),
             e.intertwine.is_none(),
             e.live_paint_gaps.is_none(),
+            e.trap_external.is_none(),
         ];
         let mut st = s.serialize_struct("Node", skips.iter().filter(|s| !**s).count())?;
         let mut skip = skips.into_iter();
@@ -762,6 +767,7 @@ impl Serialize for Node {
         field!("dimension", &e.dimension);
         field!("intertwine", &e.intertwine);
         field!("live_paint_gaps", &e.live_paint_gaps);
+        field!("trap_external", &e.trap_external);
         st.end()
     }
 }
@@ -771,6 +777,8 @@ impl Serialize for Node {
 #[derive(Deserialize)]
 #[serde(rename = "Node")]
 struct NodeWire {
+    #[serde(default)]
+    trap_external: Option<bool>,
     id: NodeId,
     #[serde(default)]
     name: Option<String>,
@@ -826,6 +834,7 @@ struct NodeWire {
 impl From<NodeWire> for Node {
     fn from(w: NodeWire) -> Self {
         let extras = NodeExtras {
+            trap_external: w.trap_external,
             mask: w.mask,
             trace: w.trace,
             wrap: w.wrap,

@@ -44,6 +44,7 @@ fn player(s: &mut Session) -> Player<'_> {
         trace: vec![],
         stopped: None,
         clipboard_empty: true,
+        trap_footprints: BTreeMap::new(),
         messages: vec![],
     }
 }
@@ -405,4 +406,113 @@ fn minimum_page_shape_uses_physical_size_about_its_center() {
     assert!((b.width() - 19. * 72. / 25.4).abs() < 1e-8);
     assert!((b.height() - 19. * 72. / 25.4).abs() < 1e-8);
     assert!((b.center() - vectorcraft_geom::Point::new(60., 45.)).hypot() < 1e-10);
+}
+
+fn trap_ticket(external: &str) -> String {
+    format!(
+        "<TrapType>Trapping</TrapType><ExternalTrap>{external}</ExternalTrap><ExternalPullback>Never</ExternalPullback><ExternalDirection>Outwards</ExternalDirection><ExternalDistance Mode=\"Set\">0.2</ExternalDistance><InternalTrap>Never</InternalTrap><InternalPullback>Never</InternalPullback><InternalDistance Mode=\"Set\">0</InternalDistance>"
+    )
+}
+fn trap_art() -> Session {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({"width":30,"height":30})).unwrap();
+    let id = rect(&mut s, 5., 5., 20., 20.);
+    let d = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().doc);
+    std::sync::Arc::make_mut(&mut d.layers[0]).name = Some("Artwork".into());
+    d.node_mut(id).unwrap().appearance.set_fill(vectorcraft_color::Paint::solid(vectorcraft_color::Color::cmyk(0.2, 0.8, 0., 0.)));
+    s
+}
+#[test]
+fn trap_task_pal_cleanup_equals_standalone() {
+    let make = || {
+        let mut s = trap_art();
+        let d = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().doc);
+        let color = vectorcraft_color::Color::cmyk(0.1, 0.6, 0.2, 0.0);
+        d.swatches.push(vectorcraft_color::Swatch {
+            name: "Synthetic spot".into(),
+            paint: vectorcraft_color::Paint::solid(color),
+            global: true,
+            spot: true,
+        });
+        let paint = vectorcraft_color::Paint::Solid { color, swatch: Some("Synthetic spot".into()), tint: 0.73 };
+        let n = vectorcraft_doc::Node::path(
+            d.alloc_id(),
+            vectorcraft_geom::shapes::ellipse(Rect::new(18., 3., 27., 12.)),
+            vectorcraft_doc::Appearance::basic(paint, vectorcraft_color::Paint::None, 0.0),
+        );
+        d.insert(Some(d.layers[0].id), usize::MAX, n).unwrap();
+        s
+    };
+    let mut direct = make();
+    direct.execute("sep.trap", &json!({"blackThreshold":0.7})).unwrap();
+    let mut s = make();
+    let mut p = player(&mut s);
+    step(&mut p, "SelectAllObjects", "").unwrap();
+    step(&mut p, "SetTrapTags", &trap_ticket("Always")).unwrap();
+    step(&mut p, "TrapTask", "").unwrap();
+    assert_eq!(p.doc().unwrap().layers.last().unwrap().name.as_deref(), Some("Trap Layer 1"));
+    step(&mut p, "SelectLayerByName", "<LayerName>Trap Layer 1</LayerName>").unwrap();
+    step(&mut p, "RenameLayers", "<LayerName>Auto Trap-1</LayerName>").unwrap();
+    step(&mut p, "SelectObjectsInLayer", "").unwrap();
+    step(&mut p, "Rasterize", "<Resolution>600</Resolution><AntiAliasing>None</AntiAliasing><ConsiderBackground>0</ConsiderBackground>").unwrap();
+    step(&mut p, "SelectObjectsByAttributes", "<Rule Type=\"ObjectTypeRule\"><ObjectType>Path</ObjectType><Option>Clipping</Option></Rule>").unwrap();
+    assert_eq!(p.ids().unwrap().len(), 1);
+    for action in ["Spread", "Choke"] {
+        step(
+            &mut p,
+            action,
+            "<Distance>0.01</Distance><JoinType>Miter</JoinType><MiterLimit>4</MiterLimit><SpreadTarget>OriginalPath</SpreadTarget>",
+        )
+        .unwrap();
+    }
+    assert!(matches!(p.doc().unwrap().node(p.ids().unwrap()[0]).unwrap().kind, vectorcraft_doc::NodeKind::Path { clipping: true, .. }));
+    let layer = |d: &Document| {
+        let mut d = d.clone();
+        d.layers.retain(|n| n.name.as_deref() == Some("Auto Trap-1"));
+        d.drop_lookup_cache();
+        d
+    };
+    let a = layer(&direct.doc().unwrap().doc);
+    let b = layer(p.doc().unwrap());
+    for plate in ["Cyan", "Magenta", "Yellow", "Black", "Synthetic spot"] {
+        let options = vectorcraft_render::RenderOptions {
+            background: Some([255; 4]),
+            artboards: false,
+            anti_alias: vectorcraft_render::AntiAlias::None,
+            smooth_images: false,
+            image_mips: false,
+            overprint_preview: true,
+            proof: Some(vectorcraft_render::proof::ProofSetup { separations: Some(vec![plate.into()]), ..Default::default() }),
+            ..Default::default()
+        };
+        let mut renderer = vectorcraft_render::Renderer::new();
+        assert_eq!(
+            renderer.render_region_with(&a, Rect::new(0., 0., 30., 30.), 600. / 72., &options).pixels,
+            renderer.render_region_with(&b, Rect::new(0., 0., 30., 30.), 600. / 72., &options).pixels,
+            "{plate}"
+        );
+    }
+}
+#[test]
+fn trap_tags_inherit_remove_and_roundtrip_without_overriding_black() {
+    let mut s = trap_art();
+    let mut p = player(&mut s);
+    step(&mut p, "SelectAllObjects", "").unwrap();
+    step(&mut p, "GroupObjects", "").unwrap();
+    step(&mut p, "SetTrapTags", &trap_ticket("Never")).unwrap();
+    let wire = serde_json::to_vec(p.doc().unwrap()).unwrap();
+    let read: Document = serde_json::from_slice(&wire).unwrap();
+    assert_eq!(read.node(p.ids().unwrap()[0]).unwrap().extras().trap_external, Some(false));
+    assert_eq!(step(&mut p, "TrapTask", "").unwrap(), 0);
+    step(&mut p, "RemoveTrappingTags", "<AllLevels>1</AllLevels>").unwrap();
+    assert_eq!(step(&mut p, "TrapTask", "").unwrap(), 1);
+    let mut black = trap_art();
+    let d = std::sync::Arc::make_mut(&mut black.doc_mut().unwrap().doc);
+    vectorcraft_doc::inks::visit_node_colors(std::sync::Arc::make_mut(&mut d.layers[0]), &mut |c, _, _| {
+        *c = vectorcraft_color::Color::cmyk(0.8, 0.7, 0.6, 0.7)
+    });
+    let mut p = player(&mut black);
+    step(&mut p, "SelectAllObjects", "").unwrap();
+    step(&mut p, "SetTrapTags", &trap_ticket("Always")).unwrap();
+    assert_eq!(step(&mut p, "TrapTask", "").unwrap(), 0);
 }
