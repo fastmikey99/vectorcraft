@@ -462,7 +462,10 @@ struct Walker<'w, 'p> {
     visible: Vec<bool>,
     ops: usize,
     max_ops: usize,
-    max_form_bytes: usize,
+    /// What is left of the page's content budget (the interpreter's, `max_form_bytes` in all):
+    /// the decoded bytes of the forms being walked, one inside another, and of the page's contents
+    /// decoded whole, count against it until each is done with, as the interpreter counts them.
+    content_left: usize,
     out: Scan,
     /// A form XObject hidden by its own optional content was met.
     hidden_form: bool,
@@ -648,6 +651,8 @@ impl Walker<'_, '_> {
         let saved = self.states.len();
         self.save();
         let mut content = page.content_reader();
+        // The page's contents decoded whole stay held for the whole page.
+        self.content_left = self.content_left.saturating_sub(content.materialized_len());
         let mut window = Vec::new();
         let limit = max_window();
         let mut exhausted = false;
@@ -805,37 +810,58 @@ impl Walker<'_, '_> {
                         self.out.cut = true;
                         return;
                     }
-                    let Ok(data) = s.decoded() else {
+                    // As the interpreter decodes a form: within what is left of the page's content
+                    // budget, which the forms it is drawn inside still hold.
+                    let left = self.content_left;
+                    if left == 0 {
+                        self.out.cut = true;
+                        return;
+                    }
+                    let Ok(data) = s.decoded_content_within(left) else {
                         self.out.cut = true;
                         return;
                     };
                     // Ordinary filtered form decoders may return a prefix at their limit.
                     // Reaching that bound cannot certify a complete form, even at an operator boundary.
-                    if !s.filters().is_empty() && data.len() >= self.max_form_bytes {
+                    if !s.filters().is_empty() && data.len() >= left {
                         self.out.cut = true;
                         return;
                     }
+                    // Bytes read straight from the file cost nothing, as for the interpreter. A
+                    // decrypted form without filters isn't cut at `left`: past it, the walk stops.
+                    let held = if matches!(data, std::borrow::Cow::Owned(_)) { data.len() } else { 0 };
+                    let Some(rest) = left.checked_sub(held) else {
+                        self.out.cut = true;
+                        return;
+                    };
+                    self.content_left = rest;
                     let oc = d.get::<Dict<'_>>(b"OC");
                     if let Some(oc) = &oc {
                         self.begin_oc(oc, d.get_ref(b"OC").map(ObjectIdentifier::from));
                         self.hidden_form |= !self.is_visible();
                     }
-                    if self.is_visible() {
-                        if let Some(g) = d.get::<Dict<'_>>(b"Group") {
-                            if self.out.groups.len() >= MAX_GROUPS {
-                                self.out.cut = true;
-                                return;
+                    let stop = 'form: {
+                        if self.is_visible() {
+                            if let Some(g) = d.get::<Dict<'_>>(b"Group") {
+                                if self.out.groups.len() >= MAX_GROUPS {
+                                    self.out.cut = true;
+                                    break 'form true;
+                                }
+                                self.out.groups.push((g.get::<bool>(b"I").unwrap_or(false), g.get::<bool>(b"K").unwrap_or(false)));
                             }
-                            self.out.groups.push((g.get::<bool>(b"I").unwrap_or(false), g.get::<bool>(b"K").unwrap_or(false)));
+                            // (Its own resources, or without any those of what draws it: as the interpreter reads them.)
+                            let inner = Resources::from_scope(d.get::<Dict<'_>>(b"Resources"), res.clone());
+                            self.save();
+                            self.walk(data.as_ref(), &inner, depth + 1);
+                            self.restore();
                         }
-                        // (Its own resources, or without any those of what draws it: as the interpreter reads them.)
-                        let inner = Resources::from_scope(d.get::<Dict<'_>>(b"Resources"), res.clone());
-                        self.save();
-                        self.walk(data.as_ref(), &inner, depth + 1);
-                        self.restore();
-                        if self.out.cut {
-                            return;
-                        }
+                        self.out.cut
+                    };
+                    // The form's bytes are given back however the walk of it ended.
+                    drop(data);
+                    self.content_left = self.content_left.saturating_add(held);
+                    if stop {
+                        return;
                     }
                     if oc.is_some() {
                         self.visible.pop();
@@ -883,7 +909,7 @@ fn walk_page<'w, 'p>(page: &Page<'p>, ocgs: &'w mut Ocgs, all_on: bool, fonts: &
         visible: vec![],
         ops: 0,
         max_ops: max_ops(),
-        max_form_bytes,
+        content_left: max_form_bytes,
         out: Scan::default(),
         hidden_form: false,
         states: vec![State::default()],

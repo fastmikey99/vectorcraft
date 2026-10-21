@@ -1782,7 +1782,6 @@ dependencies = [
 [[package]]
 name = "hayro-interpret"
 version = "0.7.0"
-source = "git+https://github.com/fastmikey99/craft-libs?rev=049a48689e8488148ccd72b5d061baf8bb0810d9#049a48689e8488148ccd72b5d061baf8bb0810d9"
 dependencies = [
  "bitflags 2.13.2",
  "hayro-cmap",
@@ -1824,7 +1823,6 @@ checksum = "885c5ef0654933139a9b9546fc2c69e18d37f38aa2520f079092b1be18f1fcaa"
 [[package]]
 name = "hayro-syntax"
 version = "0.7.2"
-source = "git+https://github.com/fastmikey99/craft-libs?rev=049a48689e8488148ccd72b5d061baf8bb0810d9#049a48689e8488148ccd72b5d061baf8bb0810d9"
 dependencies = [
  "flate2",
  "hayro-ccitt",
