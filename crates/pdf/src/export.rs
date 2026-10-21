@@ -816,6 +816,7 @@ fn plain_meshes(children: &[Arc<Node>]) -> Vec<&GradientMesh> {
                     && n.opacity >= 1.0
                     && n.blend == BlendMode::Normal
                     && n.extras().mask.is_none()
+                    && n.extras().sep_mark.is_none()
                     && n.appearance.items.iter().all(|i| match i {
                         AppearanceItem::Fill(f) => f.paint.is_none(),
                         AppearanceItem::Stroke(st) => st.paint.is_none(),

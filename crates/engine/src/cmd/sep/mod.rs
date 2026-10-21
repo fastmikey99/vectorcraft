@@ -1,7 +1,9 @@
 //! Headless PAL player for preparation and vector separation geometry.
 mod actions;
 mod clean;
+mod coverage;
 mod geometry;
+mod images;
 mod intents;
 mod marks;
 mod metallic;
@@ -54,7 +56,7 @@ pub fn specs() -> Vec<CommandSpec> {
         "Run Separation Action Lists",
         [],
         None,
-        "{root?: action-list library folder (default: VECTORCRAFT_ACTION_LISTS), profiles?: ICC folder (default: VECTORCRAFT_PROFILES), lists: [relative list names in execution order], intents?: {noTrap?: {objectIds?: [prepared object ids], rectangles?: [{x, y, width, height in mm}]}, metallic?: [{objects?: {ids: [id]} | {spot: name} | {rectMm: [x,y,width,height]}, list: relative PAL name}]}, input: PDF path, output: PDF path} run PAL actions; returns {status, stoppedAt, traceLength, trace, layers, spots, artwork, warnings}. Trace is also written to stderr. Unsupported actions stop before mutation and write the document so far.",
+        "{root?: action-list library folder (default: VECTORCRAFT_ACTION_LISTS), profiles?: ICC folder (default: VECTORCRAFT_PROFILES), lists: [relative list names in execution order], intents?: {noTrap?: {objectIds?: [prepared object ids], rectangles?: [{x, y, width, height in mm}]}, metallic?: [{objects?: {ids: [id]} | {spot: name} | {rectMm: [x,y,width,height]}, list: relative PAL name}]}, input: PDF path, output: PDF path} run PAL actions; returns {status, stoppedAt, traceLength, trace, layers, spots, artwork, warnings}. Trace is also written to stderr. Unsupported actions and fidelity losses stop without publishing output.",
         always,
         run
     ));
@@ -234,6 +236,19 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     crate::file_access::check_read(&root.to_string_lossy()).map_err(error)?;
     let root = root.canonicalize().map_err(error)?;
     let opened = s.execute("document.open", &json!({"path":input,"printProduction":true,"textAs":"outlines"}))?;
+    if let Some(reason) = opened
+        .get("warnings")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .find(|w| vectorcraft_pdf::classify_diagnostic(w) == vectorcraft_pdf::DiagnosticClass::FidelityLoss)
+    {
+        return Ok(
+            json!({"status":"stopped", "stoppedAt":{"list":"Import","action":"document.open","reason":format!("import fidelity loss: {reason}")},
+            "traceLength":0,"trace":[],"layers":[],"spots":[],"artwork":{},"warnings":[],"messages":[],"importWarnings":opened.get("warnings")}),
+        );
+    }
     s.edit("Clean Up", |d, _| {
         clean::stabilize_input(d);
         Ok(())
@@ -293,7 +308,9 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         crosshair: None,
         marked_intents,
     };
-    player.remove_background()?;
+    if let Err(e) = player.remove_background() {
+        player.stopped = Some(json!({"list":"Preparation","action":"DeleteBackground","reason":e.to_string()}));
+    }
     let intent_position = lists
         .iter()
         .position(|name| {
@@ -302,6 +319,9 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         })
         .unwrap_or(0);
     for (position, list) in lists.into_iter().enumerate() {
+        if player.stopped.is_some() {
+            break;
+        }
         if position == intent_position {
             if marked_intents {
                 intents = intents::from_marks(player.doc()?);
@@ -345,14 +365,41 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     } else {
         json!({"conversion":"none","profiles":"none"})
     };
-    let (bytes, warnings) = super::fileio::encode_with_warnings(
-        doc,
-        "pdf",
-        &json!({"preserveEditing":true,"createLayers":true,
+    let warnings = if player.stopped.is_none() {
+        let encoded = (|| -> Result<(Vec<u8>, Vec<String>)> {
+            let (bytes, mut warnings) = super::fileio::encode_with_warnings(
+                doc,
+                "pdf",
+                &json!({"preserveEditing":true,"createLayers":true,
         "includeNonPrinting":true,"discardImportedPrintSettings":false,"output":output_colors,"advanced":{"overprint":"preserve","outlineText":true}}),
-    )?;
-    let bytes = vectorcraft_pdf::preparation_output(bytes, &player.boxes, doc).map_err(error)?;
-    write_output(output, &bytes)?;
+            )?;
+            let bytes = vectorcraft_pdf::preparation_output(bytes, &player.boxes, doc).map_err(error)?;
+            // The preparation finalizer above restores these settings explicitly after conversion.
+            warnings.retain(|w| {
+                w != "imported PDF print settings were not restored because the export requests a standard, flattening or colour conversion"
+            });
+            Ok((bytes, warnings))
+        })();
+        match encoded {
+            Err(e) => {
+                player.stopped = Some(json!({"list":"Export","action":"document.exportPdf","reason":format!("export refused: {e}")}));
+                Vec::new()
+            }
+            Ok((bytes, warnings)) => {
+                if let Some(reason) =
+                    warnings.iter().find(|w| vectorcraft_pdf::classify_diagnostic(w) == vectorcraft_pdf::DiagnosticClass::FidelityLoss)
+                {
+                    player.stopped = Some(json!({"list":"Export","action":"document.exportPdf","reason":format!("export fidelity loss: {reason}")}));
+                } else {
+                    write_output(output, &bytes)?;
+                }
+                warnings
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let doc = player.doc()?;
     let layers: Vec<_> = selection::layer_ids(doc)
         .into_iter()
         .filter_map(|id| doc.node(id))

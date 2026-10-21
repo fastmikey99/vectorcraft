@@ -101,13 +101,7 @@ fn command_clips_moves_creates_ink_and_stops_without_running_later_actions() {
     let d = &s.doc().unwrap().doc;
     let b = d.bounds_of(&selection::all_objects(d, false), true).unwrap();
     assert!((b.width() - 30.0).abs() < 0.01 && (b.height() - 30.0).abs() < 0.01);
-    let bytes = std::fs::read(f.0.join("output.pdf")).unwrap();
-    assert!(vectorcraft_pdf::import(&bytes).is_ok());
-    assert!(vectorcraft_pdf::editing(&bytes).unwrap().intact, "preparation output must retain editable object names");
-    let reopened = s.execute("document.open", &json!({"path":f.0.join("output.pdf")})).unwrap();
-    assert_eq!(reopened["restored"], true);
-    assert!(s.doc().unwrap().doc.swatches.iter().any(|w| w.spot && w.name == "Base ink"));
-    assert!(String::from_utf8_lossy(&bytes).contains("/PALInk0 [/Separation /#42#61#73#65#20#69#6E#6B"));
+    assert!(!f.0.join("output.pdf").exists(), "stopped jobs must not publish partial plates");
 }
 #[test]
 fn missing_and_recursive_calls_stop_at_the_call_without_executing_following_steps() {
@@ -119,7 +113,7 @@ fn missing_and_recursive_calls_stop_at_the_call_without_executing_following_step
         assert_eq!(v["status"], "stopped");
         assert_eq!(v["traceLength"], 2);
         assert_eq!(v["stoppedAt"]["action"], "CallActionList");
-        assert!(f.0.join("output.pdf").exists());
+        assert!(!f.0.join("output.pdf").exists());
     }
 }
 #[test]
@@ -1127,4 +1121,563 @@ fn separation_marks_public_pdf_plates_and_builder_match_explicit_intents() {
     let overridden = s.execute("sep.runActionList", &params).unwrap();
     assert_eq!(overridden["status"], "completed", "{overridden}");
     assert!(!overridden["trace"].as_array().unwrap().iter().any(|step| step["action"] == "SelectIntent" || step["action"] == "SelectNoTrap"));
+}
+
+#[test]
+fn lossy_images_stop_before_actions_and_preserve_existing_output() {
+    use vectorcraft_testkit::pdf::pdf_with;
+    for (dict, data, reason) in [
+        ("/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /JPXDecode", "bad", "skipped"),
+        (
+            "/ColorSpace [/Separation /SyntheticSpot /DeviceCMYK << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 1 0 0] /N 1 >>] /BitsPerComponent 1",
+            "x",
+            "spot inks",
+        ),
+        (
+            "/ColorSpace [/Separation /All /DeviceCMYK << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 1 1 1] /N 1 >>] /BitsPerComponent 8",
+            "x",
+            "/All",
+        ),
+    ] {
+        let f = Fixture::new();
+        let mut page = PdfPage::new(100., 100., "0 1 0 0 k 10 10 20 20 re f q 10 0 0 10 40 40 cm /Im Do Q");
+        page.resources = "/XObject << /Im 5 0 R >>".into();
+        let stream = format!("<< /Type /XObject /Subtype /Image /Width 1 /Height 1 {dict} /Length {} >>\nstream\n{data}\nendstream", data.len());
+        std::fs::write(f.0.join("input.pdf"), pdf_with(&[page], &[&stream], None)).unwrap();
+        f.pal("main", &a("SelectAllObjects", ""));
+        std::fs::write(f.0.join("output.pdf"), b"previous valid output").unwrap();
+        let result = f.run(&mut Session::new());
+        assert_eq!(result["status"], "stopped", "{result}");
+        assert_eq!(result["stoppedAt"]["list"], "Import", "{result}");
+        assert!(result["stoppedAt"]["reason"].as_str().unwrap().contains(reason), "{result}");
+        assert_eq!(result["traceLength"], 0);
+        assert_eq!(std::fs::read(f.0.join("output.pdf")).unwrap(), b"previous valid output");
+    }
+}
+
+#[test]
+fn devicen_selection_and_ink_mutations_are_atomic_for_image_only_and_mixed_art() {
+    use vectorcraft_color::{Color, Paint, Swatch};
+    use vectorcraft_doc::{
+        Appearance, ImageBlob, ImageObject, Node, NodeKind,
+        cmyk::{Inks, SpotInks},
+    };
+    for mixed in [false, true] {
+        for action in ["ConvertToCMYK", "DeleteInk"] {
+            let mut d = Document::new(100., 100.);
+            let layer = d.default_layer().unwrap();
+            d.swatches.push(Swatch { name: "SyntheticSpot".into(), paint: Paint::solid(Color::cmyk(0., 1., 0., 0.)), spot: true, global: true });
+            let blob = ImageBlob::cmyk_spot_tiff(
+                &Inks::new(1, 1, vec![0; 4]).unwrap(),
+                &SpotInks::new(1, 1, vec!["SyntheticSpot".into()], vec![128]).unwrap(),
+            )
+            .unwrap();
+            d.images.insert("test".into(), blob);
+            let image = Node::new(
+                d.alloc_id(),
+                NodeKind::Image(Box::new(ImageObject {
+                    key: "test".into(),
+                    width: 1,
+                    height: 1,
+                    xf: vectorcraft_geom::Affine::IDENTITY,
+                    link: None,
+                    placement: Default::default(),
+                })),
+            );
+            let image_id = image.id;
+            d.insert(Some(layer), 0, image).unwrap();
+            if mixed {
+                let node = Node::path(
+                    d.alloc_id(),
+                    vectorcraft_geom::shapes::rectangle(Rect::new(10., 10., 20., 20.)),
+                    Appearance::basic(Paint::Solid { color: Color::BLACK, swatch: Some("SyntheticSpot".into()), tint: 0.5 }, Paint::None, 0.),
+                );
+                d.insert(Some(layer), 0, node).unwrap();
+            }
+            let mut session = Session::new();
+            session.add_document(d, None);
+            let mut p = player(&mut session);
+            step(&mut p,"SelectObjectsByAttributes",r#"<Rule Type="SeparationNameRule"><SeparationName>SyntheticSpot</SeparationName><SeparationRelation>Using</SeparationRelation></Rule>"#).unwrap();
+            assert!(p.ids().unwrap().contains(&image_id));
+            step(&mut p, "SelectSeparationsInPrintingLayers", "").unwrap();
+            assert_eq!(p.inks, vec!["SyntheticSpot"]);
+            let before = p.doc().unwrap().clone();
+            let err = step(&mut p, action, "<Option>UseFromPDF</Option>").unwrap_err();
+            assert!(err.to_string().contains("image ink channels"), "{err}");
+            assert_eq!(p.doc().unwrap(), &before);
+            // Removing an empty channel is exact and must not leave a dangling spot resource.
+            let d = std::sync::Arc::make_mut(&mut p.session.doc_mut().unwrap().doc);
+            d.images.insert(
+                "test".into(),
+                ImageBlob::cmyk_spot_tiff(
+                    &Inks::new(1, 1, vec![17, 0, 0, 0]).unwrap(),
+                    &SpotInks::new(1, 1, vec!["SyntheticSpot".into()], vec![0]).unwrap(),
+                )
+                .unwrap(),
+            );
+            step(&mut p, action, "<Option>UseFromPDF</Option>").unwrap();
+            let d = p.doc().unwrap();
+            assert!(d.images["test"].spot_names().is_empty());
+            assert_eq!(d.images["test"].cmyk().unwrap().data, vec![17, 0, 0, 0]);
+            assert!(d.swatch("SyntheticSpot").is_none());
+        }
+    }
+}
+
+#[test]
+fn underprint_checks_effective_ancestor_composition_before_footprints() {
+    use std::sync::Arc;
+    use vectorcraft_color::BlendMode;
+    use vectorcraft_doc::{Node, OpacityMask};
+    for variant in ["zero", "opacity", "blend", "mask", "effects"] {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let id = rect(&mut s, 0., 0., 10., 10.);
+        s.execute("object.group", &json!({})).unwrap();
+        let group = s.doc().unwrap().selection.objects[0];
+        let d = Arc::make_mut(&mut s.doc_mut().unwrap().doc);
+        let parent = d.node_mut(group).unwrap();
+        match variant {
+            "zero" => parent.opacity = 0.,
+            "opacity" => parent.opacity = 0.5,
+            "blend" => parent.blend = BlendMode::Multiply,
+            "mask" => parent.extras_mut().mask = Some(Box::new(OpacityMask::new(Node::group(NodeId(999), vec![]), true))),
+            _ => {
+                parent.appearance.effects.push(vectorcraft_doc::Effect { id: "blur.gaussian".into(), params: json!({"radius":1}), visible: true });
+            }
+        }
+        s.doc_mut().unwrap().selection.set([id]);
+        let mut p = player(&mut s);
+        let before = p.doc().unwrap().clone();
+        let result = step(&mut p, "AddWhiteUnderPrint", "<TrappingMode>Spread</TrappingMode><Distance>0</Distance><JoinType>Round</JoinType>");
+        if variant == "zero" {
+            assert_eq!(result.unwrap(), 0);
+            assert!(p.ids().unwrap().is_empty());
+        } else {
+            assert!(result.unwrap_err().to_string().contains("ancestor"));
+            assert_eq!(p.doc().unwrap(), &before);
+        }
+    }
+}
+
+#[test]
+fn attribute_operators_and_ink_threshold_use_stored_precision() {
+    use vectorcraft_color::{Color, Paint};
+    let mut s = Session::new();
+    s.execute("file.new", &json!({})).unwrap();
+    let a_id = rect(&mut s, 0., 0., 10., 10.);
+    let b_id = rect(&mut s, 20., 0., 10., 10.);
+    let d = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().doc);
+    d.node_mut(a_id).unwrap().name = Some("A".into());
+    d.node_mut(b_id).unwrap().name = Some("B".into());
+    let mut p = player(&mut s);
+    for (operator, count) in [("All", 0), ("Any", 2), ("None", 0)] {
+        let rules = ["A", "B"]
+            .map(|name| format!(r#"<Rule Type="NameRule"><NameRelation>Equals</NameRelation><SearchString>{name}</SearchString></Rule>"#))
+            .concat();
+        step(&mut p, "SelectObjectsByAttributes", &format!("<Operator>{operator}</Operator>{rules}")).unwrap();
+        assert_eq!(p.ids().unwrap().len(), count);
+    }
+    assert!(
+        step(
+            &mut p,
+            "SelectObjectsByAttributes",
+            r#"<Operator>Typo</Operator><Rule Type="ObjectSelectionRule"><ObjectRelation>NoObjectsSelection</ObjectRelation></Rule>"#
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("operator")
+    );
+    let epsilon = vectorcraft_doc::inks::PRESENCE_EPSILON;
+    for value in [f32::from_bits(epsilon.to_bits() - 1), epsilon, f32::from_bits(epsilon.to_bits() + 1)] {
+        let d = std::sync::Arc::make_mut(&mut p.session.doc_mut().unwrap().doc);
+        d.node_mut(a_id).unwrap().appearance =
+            vectorcraft_doc::Appearance::basic(Paint::solid(Color::cmyk(value, 0., 0., 0.)), Paint::None, 0.).into();
+        let rule = r#"<Rule Type="SeparationTypeRule"><SeparationType>Any</SeparationType><SeparationRelation>Using</SeparationRelation><Epsilon>0.005</Epsilon></Rule>"#;
+        step(&mut p, "SelectObjectsByAttributes", rule).unwrap();
+        assert_eq!(p.ids().unwrap().contains(&a_id), vectorcraft_doc::inks::present(value, epsilon));
+    }
+}
+
+#[test]
+fn underprint_accepts_only_masks_proven_opaque_over_printed_content() {
+    use std::sync::Arc;
+    use vectorcraft_color::{Color, Paint};
+    use vectorcraft_doc::{Appearance, Effect, OpacityMask};
+    for variant in [
+        "opaque",
+        "gray",
+        "zero",
+        "partial_extent",
+        "disabled",
+        "hidden_effect",
+        "zero_blur",
+        "clipped_away",
+        "opaque_bitmap",
+        "opaque_mesh",
+        "partial_bitmap",
+        "zero_bitmap",
+        "inverted_outside",
+    ] {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let id = rect(&mut s, 0., 0., 10., 10.);
+        s.execute("object.group", &json!({})).unwrap();
+        let group = s.doc().unwrap().selection.objects[0];
+        let d = Arc::make_mut(&mut s.doc_mut().unwrap().doc);
+        let mut art = d.node(id).unwrap().clone();
+        art.id = NodeId(999);
+        art.appearance = Appearance::basic(
+            Paint::solid(Color::gray(match variant {
+                "gray" => 0.5,
+                "zero" => 1.,
+                _ => 0.,
+            })),
+            Paint::None,
+            0.,
+        )
+        .into();
+        if variant == "inverted_outside" {
+            art.transform(vectorcraft_geom::Affine::translate((20., 0.)), false);
+        }
+        if variant == "partial_extent" {
+            art.transform(vectorcraft_geom::Affine::scale(0.5), false);
+        }
+        let mut clip = art.clone();
+        clip.id = NodeId(1000);
+        clip.transform(vectorcraft_geom::Affine::translate((20., 0.)), false);
+        if let vectorcraft_doc::NodeKind::Path { clipping, .. } = &mut clip.kind {
+            *clipping = true;
+        }
+        clip.appearance = Appearance::default().into();
+        let mut mask = OpacityMask::new(art, true);
+        mask.invert = variant == "inverted_outside";
+        mask.disabled = variant == "disabled";
+        if mask.disabled {
+            mask.art = Arc::new(vectorcraft_doc::Node::group(NodeId(999), vec![]));
+        }
+        if variant.ends_with("_bitmap") {
+            let alpha = match variant {
+                "partial_bitmap" => 128,
+                "zero_bitmap" => 0,
+                _ => 255,
+            };
+            let mut png = std::io::Cursor::new(Vec::new());
+            image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 255, 255, alpha])).write_to(&mut png, image::ImageFormat::Png).unwrap();
+            d.images.insert("mask".into(), vectorcraft_doc::ImageBlob::png(png.into_inner()));
+            mask.art = Arc::new(vectorcraft_doc::Node::new(
+                NodeId(999),
+                vectorcraft_doc::NodeKind::Image(
+                    vectorcraft_doc::ImageObject {
+                        key: "mask".into(),
+                        width: 2,
+                        height: 2,
+                        xf: vectorcraft_geom::Affine::scale(5.),
+                        link: None,
+                        placement: Default::default(),
+                    }
+                    .into(),
+                ),
+            ));
+        }
+        if variant == "opaque_mesh" {
+            mask.art = Arc::new(vectorcraft_doc::Node::new(
+                NodeId(999),
+                vectorcraft_doc::NodeKind::Mesh(vectorcraft_doc::GradientMesh::from_surface(
+                    1,
+                    1,
+                    &|u, v| vectorcraft_geom::Point::new(u * 10., v * 10.),
+                    &|_, _| Color::WHITE,
+                )),
+            ));
+        }
+        let parent = d.node_mut(group).unwrap();
+        if variant == "clipped_away" {
+            parent.children_mut().unwrap().insert(0, Arc::new(clip));
+            if let vectorcraft_doc::NodeKind::Group { clip, .. } = &mut parent.kind {
+                *clip = true;
+            }
+        }
+        parent.extras_mut().mask = Some(Box::new(mask));
+        if variant == "hidden_effect" || variant == "zero_blur" {
+            parent.appearance.effects.push(Effect {
+                id: "blur.gaussian".into(),
+                params: json!({"radius":if variant == "zero_blur" {0} else {5}}),
+                visible: variant == "zero_blur",
+            });
+        }
+        s.doc_mut().unwrap().selection.set([id]);
+        let mut p = player(&mut s);
+        let before = p.doc().unwrap().clone();
+        let result = step(&mut p, "AddWhiteUnderPrint", "<TrappingMode>Spread</TrappingMode><Distance>0</Distance><JoinType>Round</JoinType>");
+        if ["gray", "zero", "partial_extent", "partial_bitmap", "zero_bitmap"].contains(&variant) {
+            assert!(result.unwrap_err().to_string().contains("mask"), "{variant}");
+            assert_eq!(p.doc().unwrap(), &before);
+        } else if variant == "clipped_away" {
+            assert_eq!(result.unwrap(), 0);
+        } else {
+            assert!(result.unwrap() > 0, "{variant}");
+        }
+    }
+}
+
+#[test]
+fn unsupported_page_blend_space_stops_only_when_printed_transparency_uses_it() {
+    use vectorcraft_testkit::pdf::pdf_with;
+    for transparent in [false, true] {
+        let f = Fixture::new();
+        let mut page = PdfPage::new(100., 100., if transparent { "/Gs gs 0 1 0 0 k 10 10 20 20 re f" } else { "0 1 0 0 k 10 10 20 20 re f" });
+        page.entries = "/Group << /S /Transparency /CS [/CalRGB << /WhitePoint [0.9505 1 1.089] >>] >>".into();
+        page.resources = "/ExtGState << /Gs << /ca 0.5 >> >>".into();
+        std::fs::write(f.0.join("input.pdf"), pdf_with(&[page], &[], None)).unwrap();
+        f.pal("main", &a("SelectAllObjects", ""));
+        let result = f.run(&mut Session::new());
+        assert_eq!(result["status"], if transparent { "stopped" } else { "completed" }, "{result}");
+        if transparent {
+            assert!(result["stoppedAt"]["reason"].as_str().unwrap().contains("opacity"), "{result}");
+            assert!(!f.0.join("output.pdf").exists());
+        } else {
+            assert!(result["importWarnings"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().starts_with("Info:")), "{result}");
+        }
+    }
+}
+
+#[test]
+fn a_mask_cannot_change_an_underprint_already_covered_by_selected_art() {
+    use std::sync::Arc;
+    use vectorcraft_color::{Color, Paint};
+    use vectorcraft_doc::{Appearance, OpacityMask};
+    for (extends, chosen, passes) in [(false, true, true), (true, true, false), (false, false, false)] {
+        let mut s = Session::new();
+        s.execute("file.new", &json!({})).unwrap();
+        let back = rect(&mut s, 0., 0., 20., 20.);
+        let front = rect(&mut s, if extends { 18. } else { 2. }, 2., 10., 10.);
+        s.execute("object.group", &json!({})).unwrap();
+        let group = s.doc().unwrap().selection.objects[0];
+        let d = Arc::make_mut(&mut s.doc_mut().unwrap().doc);
+        let mut art = d.node(front).unwrap().clone();
+        art.id = NodeId(999);
+        art.appearance = Appearance::basic(Paint::solid(Color::gray(0.5)), Paint::None, 0.).into();
+        d.node_mut(group).unwrap().extras_mut().mask = Some(Box::new(OpacityMask::new(art, true)));
+        s.doc_mut().unwrap().selection.set(if chosen { vec![back, front] } else { vec![back] });
+        let mut p = player(&mut s);
+        let before = p.doc().unwrap().clone();
+        let result = step(
+            &mut p,
+            "AddWhiteUnderPrint",
+            "<TrappingMode>Spread</TrappingMode><Distance>0</Distance><JoinType>Round</JoinType><ExcludeCoveredAreas>1</ExcludeCoveredAreas>",
+        );
+        if passes {
+            assert_eq!(result.unwrap(), 1);
+            let d = p.doc().unwrap();
+            let bounds = d.node(p.ids().unwrap()[0]).unwrap().geometric_bounds().unwrap();
+            assert_eq!(bounds, vectorcraft_geom::Rect::new(0., 0., 20., 20.));
+        } else {
+            assert!(result.unwrap_err().to_string().contains("mask"));
+            assert_eq!(p.doc().unwrap(), &before);
+        }
+    }
+}
+
+fn image_document(blob: vectorcraft_doc::ImageBlob) -> (Document, NodeId) {
+    use vectorcraft_doc::{ImageObject, Node, NodeKind};
+    let mut d = Document::new(100., 100.);
+    let id = d.alloc_id();
+    d.images.insert("shared".into(), blob);
+    let n = Node::new(
+        id,
+        NodeKind::Image(Box::new(ImageObject {
+            key: "shared".into(),
+            width: 2,
+            height: 1,
+            xf: vectorcraft_geom::Affine::new([10., 0., 0., 10., 20., 30.]),
+            link: None,
+            placement: Default::default(),
+        })),
+    );
+    d.insert(d.default_layer(), 0, n).unwrap();
+    (d, id)
+}
+
+#[test]
+fn image_fill_replacement_is_instance_local_and_keeps_silver_and_masks() {
+    use vectorcraft_color::{Color, Paint, Swatch};
+    use vectorcraft_doc::{
+        ImageBlob, NodeKind,
+        cmyk::{Inks, SpotInks},
+    };
+    for action in ["RemoveFill", "SetFillFlatPaint"] {
+        let blob = ImageBlob::cmyk_spot_tiff(
+            &Inks::new(2, 1, vec![20, 30, 40, 50, 60, 70, 80, 90]).unwrap(),
+            &SpotInks::new(2, 1, vec!["M-1".into()], vec![255, 128]).unwrap(),
+        )
+        .unwrap();
+        let (mut d, id) = image_document(blob.clone());
+        for name in ["M-1", "Silver"] {
+            d.swatches.push(Swatch { name: name.into(), paint: Paint::solid(Color::gray(0.5)), spot: true, global: true });
+        }
+        let mask = vectorcraft_doc::Node::path(
+            d.alloc_id(),
+            vectorcraft_geom::shapes::rectangle(Rect::new(20., 30., 40., 40.)),
+            vectorcraft_doc::Appearance::basic(Paint::solid(Color::WHITE), Paint::None, 0.),
+        );
+        d.node_mut(id).unwrap().extras_mut().mask = Some(Box::new(vectorcraft_doc::OpacityMask::new(mask, true)));
+        let mut other = d.node(id).unwrap().clone();
+        other.id = d.alloc_id();
+        let other_id = other.id;
+        d.insert(d.default_layer(), 1, other).unwrap();
+        // Silver has already been generated from the named source outline when the
+        // recipe clears its raster ink samples.
+        let outline = vectorcraft_doc::Node::path(
+            d.alloc_id(),
+            vectorcraft_geom::shapes::rectangle(Rect::new(20., 30., 40., 40.)),
+            vectorcraft_doc::Appearance::basic(Paint::solid(Color::WHITE), Paint::None, 0.),
+        );
+        let outline_id = outline.id;
+        d.insert(d.default_layer(), 2, outline).unwrap();
+        let mut s = Session::new();
+        s.add_document(d, None);
+        s.doc_mut().unwrap().selection.set([outline_id]);
+        let mut p = player(&mut s);
+        p.inks = vec!["Silver".into()];
+        step(
+            &mut p,
+            "AddWhiteUnderPrint",
+            "<TrappingMode>Spread</TrappingMode><Distance>0</Distance><JoinType>Round</JoinType><UseSelectedSeparation>1</UseSelectedSeparation>",
+        )
+        .unwrap();
+        let silver = p.ids().unwrap();
+        assert!(!silver.is_empty());
+        let silver_nodes: Vec<_> = silver.iter().map(|id| p.doc().unwrap().node(*id).unwrap().clone()).collect();
+        p.session.doc_mut().unwrap().selection.set([id]);
+        p.inks = vec!["M-1".into()];
+        let before = p.doc().unwrap().node(id).unwrap().clone();
+        step(&mut p, action, "<Percentage>0</Percentage>").unwrap();
+        let d = p.doc().unwrap();
+        let NodeKind::Image(im) = &d.node(id).unwrap().kind else { panic!("lost image") };
+        let NodeKind::Image(old) = &before.kind else { panic!() };
+        assert_eq!(im.xf, old.xf);
+        assert_eq!(im.placement, old.placement);
+        assert_ne!(im.key, old.key);
+        assert_eq!(d.node(id).unwrap().extras().mask, before.extras().mask);
+        assert!(d.images[&im.key].cmyk().unwrap().data.iter().all(|v| *v == 0));
+        assert!(d.images[&im.key].spot_names().is_empty());
+        assert_eq!(d.images["shared"], blob);
+        assert!(matches!(&d.node(other_id).unwrap().kind, NodeKind::Image(im) if im.key=="shared"));
+        for n in &silver_nodes {
+            assert_eq!(d.node(n.id).unwrap(), n);
+        }
+        // The selected instance's public PDF has Silver but no residual M-1 resource.
+        let mut public = d.clone();
+        public.remove(other_id).unwrap();
+        let bytes = vectorcraft_pdf::export(&public, &vectorcraft_pdf::PdfOptions::default()).unwrap();
+        let opened = vectorcraft_pdf::import(&bytes).unwrap();
+        assert!(!opened.spot_names().contains(&"M-1".into()));
+        assert!(opened.spot_names().contains(&"Silver".into()));
+    }
+}
+
+#[test]
+fn replacing_rgba_image_fill_keeps_intrinsic_alpha_and_outer_mask() {
+    use vectorcraft_doc::{ImageBlob, Node, NodeKind, OpacityMask};
+    let mut png = std::io::Cursor::new(Vec::new());
+    let rgba = image::RgbaImage::from_raw(2, 1, vec![255, 0, 0, 64, 0, 0, 255, 0]).unwrap();
+    rgba.write_to(&mut png, image::ImageFormat::Png).unwrap();
+    let (mut d, id) = image_document(ImageBlob::png(png.into_inner()));
+    let mask = OpacityMask::new(Node::group(d.alloc_id(), vec![]), false);
+    d.node_mut(id).unwrap().extras_mut().mask = Some(Box::new(mask.clone()));
+    let mut s = Session::new();
+    s.add_document(d, None);
+    s.doc_mut().unwrap().selection.set([id]);
+    step(&mut player(&mut s), "RemoveFill", "").unwrap();
+    let d = &s.doc().unwrap().doc;
+    let n = d.node(id).unwrap();
+    assert_eq!(n.extras().mask.as_deref(), Some(&mask));
+    let child = &n.children().unwrap()[0];
+    let NodeKind::Image(im) = &child.kind else { panic!() };
+    assert!(d.images[&im.key].cmyk().unwrap().data.iter().all(|v| *v == 0));
+    let NodeKind::Image(alpha) = &child.extras().mask.as_ref().unwrap().art.kind else { panic!() };
+    assert_eq!(alpha.xf, im.xf);
+    let pixels = d.images[&alpha.key].decoded().unwrap();
+    assert_eq!(pixels.get_pixel(0, 0).0, [64, 64, 64, 255]);
+    assert_eq!(pixels.get_pixel(1, 0).0, [0, 0, 0, 255]);
+}
+
+#[test]
+fn rgb_jpeg_and_gray_images_pass_background_prep_and_process_queries() {
+    use vectorcraft_color::{Color, Paint, Swatch};
+    use vectorcraft_doc::{Appearance, ImageBlob, Node};
+    for gray in [false, true] {
+        for background in [false, true] {
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            if gray {
+                image::GrayImage::from_pixel(2, 1, image::Luma([90])).write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+            } else {
+                image::RgbImage::from_pixel(2, 1, image::Rgb([180, 40, 90])).write_to(&mut bytes, image::ImageFormat::Jpeg).unwrap();
+            }
+            let blob = ImageBlob::new(if gray { "image/png" } else { "image/jpeg" }, bytes.into_inner());
+            let (mut d, id) = image_document(blob);
+            d.color_profiles.cmyk = Some(vectorcraft_color::cms::active_settings().cmyk);
+            if background {
+                d.swatches.push(Swatch { name: "SupaBG".into(), paint: Paint::solid(Color::BLACK), spot: true, global: true });
+                let n = Node::path(
+                    d.alloc_id(),
+                    vectorcraft_geom::shapes::rectangle(Rect::new(0., 0., 100., 100.)),
+                    Appearance::basic(Paint::Solid { color: Color::BLACK, swatch: Some("SupaBG".into()), tint: 1. }, Paint::None, 0.),
+                );
+                d.insert(d.default_layer(), 0, n).unwrap();
+            }
+            assert!(profiles::document_cms(&d).is_some(), "test must use the document CMS");
+            let expected = {
+                let px = d.images["shared"].decoded().unwrap();
+                let p = px.get_pixel(0, 0).0;
+                profiles::cmyk(Color::rgb8(p[0], p[1], p[2]), profiles::document_cms(&d).as_ref())
+            };
+            let inks = selection::inks(&d, d.node(id).unwrap()).unwrap();
+            for (name, v) in ["Cyan", "Magenta", "Yellow", "Black"].iter().zip(expected) {
+                assert_eq!(inks[*name], v);
+            }
+            assert!(!selection::spot_inks(&d, d.node(id).unwrap()).unwrap().contains_key("SupaBG"));
+            let mut s = Session::new();
+            s.add_document(d.clone(), None);
+            let mut p = player(&mut s);
+            p.remove_background().unwrap();
+            assert!(p.doc().unwrap().node(id).is_some());
+            let f = Fixture::new();
+            std::fs::write(f.0.join("input.pdf"), vectorcraft_pdf::export(&d, &vectorcraft_pdf::PdfOptions::default()).unwrap()).unwrap();
+            f.pal("main", &a("SelectAllObjects", ""));
+            let result = f.run(&mut Session::new());
+            assert_eq!(result["status"], "completed", "{gray}/{background}: {result}");
+        }
+    }
+}
+
+#[test]
+fn mask_proofs_do_not_erase_a_short_strip_or_use_cleaned_backing() {
+    use vectorcraft_color::{Color, Paint};
+    use vectorcraft_doc::{Appearance, Node, OpacityMask};
+    for short in [0.005, 1e-9] {
+        for redundancy in [false, true] {
+            let mut s = Session::new();
+            s.execute("file.new", &json!({})).unwrap();
+            let back = if redundancy { Some(rect(&mut s, 0., 0., 100. - short, 100.)) } else { None };
+            let id = rect(&mut s, 0., 0., 100., 100.);
+            s.execute("object.group", &json!({})).unwrap();
+            let group = s.doc().unwrap().selection.objects[0];
+            let d = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().doc);
+            let art = Node::path(
+                d.alloc_id(),
+                vectorcraft_geom::shapes::rectangle(Rect::new(0., 0., 100. - short, 100.)),
+                Appearance::basic(Paint::solid(if redundancy { Color::BLACK } else { Color::WHITE }), Paint::None, 0.),
+            );
+            d.node_mut(group).unwrap().extras_mut().mask = Some(Box::new(OpacityMask::new(art, true)));
+            s.doc_mut().unwrap().selection.set(back.into_iter().chain([id]));
+            let mut p = player(&mut s);
+            let before = p.doc().unwrap().clone();
+            let err = step(&mut p, "AddWhiteUnderPrint", "<TrappingMode>Spread</TrappingMode><Distance>0</Distance><JoinType>Round</JoinType>")
+                .unwrap_err();
+            assert!(err.to_string().contains("mask"));
+            assert_eq!(p.doc().unwrap(), &before);
+        }
+    }
 }

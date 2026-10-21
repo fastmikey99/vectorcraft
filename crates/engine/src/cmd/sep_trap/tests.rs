@@ -358,3 +358,76 @@ fn metallic_object_names_use_the_existing_ink_predicate() {
         assert!(s.execute(C, &json!({"blackThreshold":0.7})).unwrap()["pixels"].as_u64().unwrap() > 0);
     }
 }
+
+#[test]
+fn coincident_and_partly_covered_outlines_get_visible_front_ink() {
+    for front_rect in [Rect::new(0., 0., 10., 10.), Rect::new(5., 0., 10., 10.)] {
+        for back_color in [Color::cmyk(1., 0., 0., 0.), Color::BLACK] {
+            let mut doc = Document::new(20., 20.);
+            let layer = doc.default_layer().unwrap();
+            for (i, (r, c)) in [(Rect::new(0., 0., 10., 10.), back_color), (front_rect, Color::cmyk(0., 1., 0., 0.))].into_iter().enumerate() {
+                let n = Node::path(doc.alloc_id(), shapes::rectangle(r), Appearance::basic(Paint::solid(c), Paint::None, 0.));
+                doc.insert(Some(layer), i, n).unwrap();
+            }
+            let mut nearest = vec![Some(0)];
+            let region = Rect::new(10.1 - 0.5 / SCALE, 5. - 0.5 / SCALE, 11., 6.);
+            let samples = colour::samples(&doc, &mut nearest, 1, region, 0.7).unwrap().unwrap();
+            let mut process = [0; 4];
+            samples.write(&vectorcraft_doc::inks::plates(&doc), &mut process, &mut []);
+            assert_eq!(nearest, [Some(0)]);
+            assert_eq!(process, [0, 255, 0, 0]);
+            if front_rect.x0 > 0. {
+                let mut nearest = vec![Some(0)];
+                let region = Rect::new(-0.1 - 0.5 / SCALE, 5. - 0.5 / SCALE, 1., 6.);
+                let samples = colour::samples(&doc, &mut nearest, 1, region, 0.7).unwrap().unwrap();
+                let mut process = [0; 4];
+                samples.write(&vectorcraft_doc::inks::plates(&doc), &mut process, &mut []);
+                if back_color == Color::BLACK {
+                    assert_eq!(nearest, [None]);
+                } else {
+                    assert_eq!(process, [255, 0, 0, 0]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn trap_ink_boundary_and_adjacent_floats_match_shared_presence() {
+    let epsilon = vectorcraft_doc::inks::PRESENCE_EPSILON;
+    for value in [f32::from_bits(epsilon.to_bits() - 1), epsilon, f32::from_bits(epsilon.to_bits() + 1)] {
+        let doc = Document::new(10., 10.);
+        let (_, eligible) = paint_ink(&doc, &Color::cmyk(value, 0., 0., 0.), None, 1., 0.7);
+        assert_eq!(eligible, vectorcraft_doc::inks::present(value, epsilon));
+    }
+}
+
+#[test]
+fn adversarial_ownership_falls_back_and_cancellation_is_not_swallowed() {
+    let mut d = Document::new(1000., 1000.);
+    let layer = d.default_layer().unwrap();
+    for vertical in [true, false] {
+        let mut path = PathData::default();
+        for i in 0..200 {
+            let rect = if vertical {
+                Rect::new(i as f64 * 2., 0., i as f64 * 2. + 1., 400.)
+            } else {
+                Rect::new(0., i as f64 * 2., 400., i as f64 * 2. + 1.)
+            };
+            path.subpaths.extend(shapes::rectangle(rect).subpaths);
+        }
+        let n = Node::path(
+            d.alloc_id(),
+            path,
+            Appearance::basic(Paint::solid(if vertical { Color::BLACK } else { Color::rgb(1., 0., 0.) }), Paint::None, 0.),
+        );
+        d.insert(Some(layer), usize::MAX, n).unwrap();
+    }
+    let mut nearest = vec![Some(0)];
+    assert!(colour::samples(&d, &mut nearest, 1, Rect::new(0., 0., 1., 1.), 0.7).unwrap().is_none());
+    assert_eq!(nearest, [Some(0)], "renderer samples survive a complexity fallback");
+    let token = crate::cancel::CancelToken::new();
+    token.cancel();
+    let result = crate::cancel::scope(&token, None, || colour::samples(&d, &mut nearest, 1, Rect::new(0., 0., 1., 1.), 0.7));
+    assert!(matches!(result, Err(crate::EngineError::Cancelled)));
+}

@@ -426,17 +426,6 @@ fn restore_prefs(app: &mut VectorcraftApp, saved: Option<String>) {
 }
 
 impl WebShell {
-    /// Apply parent-owned preferences before processing this frame's input.
-    fn restore_host_prefs(&mut self) {
-        if let (Some(bridge), Some(app)) = (&self.host.bridge, &mut self.app)
-            && let Some(text) = bridge.take_prefs()
-        {
-            restore_prefs(app, Some(text.clone()));
-            // What the page holds already: not handed back unless it changes.
-            self.prefs.saved = crate::prefs::json(app).or(Some(text));
-        }
-    }
-
     /// Snapshot only after UI commands (including Preferences OK) have committed.
     fn save_prefs(&mut self) {
         let Some(app) = &mut self.app else { return };
@@ -480,7 +469,6 @@ impl eframe::App for WebShell {
         if let Some(why) = self.loss.take() {
             self.restart(&why);
         }
-        self.restore_host_prefs();
         let Some(app) = &mut self.app else { return };
         let pasted = self.host.pasted.borrow_mut().flavour.take();
         if let Some((f, held)) = pasted {

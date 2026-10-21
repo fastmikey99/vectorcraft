@@ -324,3 +324,25 @@ mod tests_reader_streaming;
 mod tests_reader_compat;
 
 mod sep_marks;
+
+/// Production diagnostic classification. Unknown diagnostics fail closed: a new importer
+/// warning must be reviewed before a separation builder can publish its result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagnosticClass {
+    /// The public printed page is unchanged (editing structure may differ).
+    PrintPreserving,
+    /// Printed content is lost, approximated, or its fidelity is not established.
+    FidelityLoss,
+}
+
+pub fn classify_diagnostic(message: &str) -> DiagnosticClass {
+    if crate::import::is_outlines_note(message)
+        || message == PAST_PAGE_NOTE
+        || message == OFF_ARTBOARD_NOTE
+        || message == crate::preserve::IRRELEVANT_BLEND_SPACE
+    {
+        DiagnosticClass::PrintPreserving
+    } else {
+        DiagnosticClass::FidelityLoss
+    }
+}

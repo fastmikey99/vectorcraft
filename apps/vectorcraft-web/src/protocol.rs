@@ -190,6 +190,7 @@ pub fn prefs(text: Option<String>) -> Result<String, String> {
 /// Check a `vectorcraft:place` the bridge accepted: a file name, its bytes, and `at` (when given) as
 /// four finite numbers with a positive width and height. The error is the text of the
 /// `vectorcraft:failed` reply.
+#[cfg(test)]
 pub fn place(name: Option<String>, bytes: Option<Vec<u8>>, at: Option<Vec<f64>>) -> Result<Place, String> {
     place_copies(name, bytes, at, None)
 }

@@ -121,7 +121,9 @@ fn select(d: &Document, selector: &Selector) -> Result<Vec<NodeId>> {
             for id in all {
                 if let Some(n) = d.node(id)
                     && (n.children().is_none() || matches!(n.kind, NodeKind::Compound { .. }))
-                    && selection::inks(d, n)?.get(&v.spot).is_some_and(|v| *v > 0.005)
+                    && selection::inks(d, n)?
+                        .get(&v.spot)
+                        .is_some_and(|v| vectorcraft_doc::inks::present(*v, vectorcraft_doc::inks::PRESENCE_EPSILON))
                 {
                     found.push(id);
                 }
@@ -145,6 +147,7 @@ fn select(d: &Document, selector: &Selector) -> Result<Vec<NodeId>> {
     };
     Ok(ids)
 }
+
 impl Player<'_> {
     pub(super) fn apply_intents(&mut self, intents: &Intents) -> Result<()> {
         let previous = self.ids()?;
@@ -268,5 +271,32 @@ impl Player<'_> {
         })?;
         self.trace.push(json!({"list":"Intent","position":0,"action":"SelectNoTrap","objectsAffected":selected.len()}));
         writeln!(std::io::stderr(), "[Intent #0] SelectNoTrap → {} objects", selected.len()).map_err(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vectorcraft_color::{Color, Paint, Swatch};
+    use vectorcraft_doc::Appearance;
+    use vectorcraft_geom::Rect;
+
+    #[test]
+    fn metallic_spot_selection_shares_the_ink_presence_boundary() {
+        let epsilon = vectorcraft_doc::inks::PRESENCE_EPSILON;
+        for tint in [f32::from_bits(epsilon.to_bits() - 1), epsilon, f32::from_bits(epsilon.to_bits() + 1)] {
+            let mut d = Document::new(100., 100.);
+            let layer = d.default_layer().unwrap();
+            d.swatches.push(Swatch { name: "Test spot".into(), paint: Paint::solid(Color::BLACK), spot: true, global: true });
+            let n = Node::path(
+                d.alloc_id(),
+                shapes::rectangle(Rect::new(0., 0., 10., 10.)),
+                Appearance::basic(Paint::Solid { color: Color::BLACK, swatch: Some("Test spot".into()), tint }, Paint::None, 0.),
+            );
+            let id = n.id;
+            d.insert(Some(layer), 0, n).unwrap();
+            let ids = select(&d, &Selector::Spot(Spot { spot: "Test spot".into() })).unwrap();
+            assert_eq!(ids.contains(&id), vectorcraft_doc::inks::present(tint, epsilon));
+        }
     }
 }

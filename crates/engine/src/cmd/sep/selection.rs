@@ -74,19 +74,19 @@ pub(super) fn merge<T: PartialEq + Clone>(old: &mut Vec<T>, found: Vec<T>, mode:
     }
     Ok(())
 }
-fn paint_inks(doc: &Document, p: &Paint, out: &mut BTreeMap<String, f64>) -> Result<()> {
-    let mut add = |name: &str, value: f64| {
+fn paint_inks(doc: &Document, p: &Paint, out: &mut BTreeMap<String, f32>) -> Result<()> {
+    let mut add = |name: &str, value: f32| {
         let n = out.entry(name.into()).or_default();
         *n = n.max(value);
     };
     match p {
         Paint::None => {}
-        Paint::Solid { swatch: Some(name), tint, .. } if doc.swatch(name).is_some_and(|w| w.spot) => add(name, f64::from(*tint)),
+        Paint::Solid { swatch: Some(name), tint, .. } if doc.swatch(name).is_some_and(|w| w.spot) => add(name, *tint),
         Paint::Solid { color, .. } => {
             for (name, v) in
                 ["Cyan", "Magenta", "Yellow", "Black"].into_iter().zip(super::profiles::cmyk(*color, super::profiles::document_cms(doc).as_ref()))
             {
-                add(name, f64::from(v));
+                add(name, v);
             }
         }
         Paint::Gradient(g) => {
@@ -98,13 +98,70 @@ fn paint_inks(doc: &Document, p: &Paint, out: &mut BTreeMap<String, f64>) -> Res
     }
     Ok(())
 }
-pub(super) fn inks(doc: &Document, n: &Node) -> Result<BTreeMap<String, f64>> {
+pub(super) fn inks(doc: &Document, n: &Node) -> Result<BTreeMap<String, f32>> {
+    ink_channels(doc, n, true)
+}
+
+pub(super) fn spot_inks(doc: &Document, n: &Node) -> Result<BTreeMap<String, f32>> {
+    ink_channels(doc, n, false)
+}
+
+fn ink_channels(doc: &Document, n: &Node, process: bool) -> Result<BTreeMap<String, f32>> {
     let mut out = BTreeMap::new();
     for item in &n.appearance.items {
         match item {
             AppearanceItem::Fill(f) if f.visible => paint_inks(doc, &f.paint, &mut out)?,
             AppearanceItem::Stroke(s) if s.visible && s.width > 0.0 => paint_inks(doc, &s.paint, &mut out)?,
             _ => {}
+        }
+    }
+    if let NodeKind::Image(image) = &n.kind {
+        let blob = doc.images.get(&image.key).ok_or_else(|| error("image ink selection: missing image data"))?;
+        if process {
+            let mut maxima = [0.0_f32; 4];
+            if blob.is_cmyk() {
+                let pixels = blob.cmyk().ok_or_else(|| error("image ink selection: unreadable CMYK samples"))?;
+                for pixel in pixels.data.as_chunks::<4>().0 {
+                    for (out, v) in maxima.iter_mut().zip(pixel) {
+                        *out = out.max(f32::from(*v) / 255.0);
+                    }
+                }
+            } else {
+                let pixels = blob.decoded().ok_or_else(|| error("image ink selection: unreadable RGB/Gray samples"))?;
+                let cms = super::profiles::document_cms(doc);
+                let mut cache = std::collections::HashMap::new();
+                for (i, pixel) in pixels.pixels().enumerate() {
+                    if i % 16384 == 0 {
+                        crate::cancel::check()?;
+                    }
+                    if pixel.0[3] == 0 {
+                        continue;
+                    }
+                    let rgb = [pixel.0[0], pixel.0[1], pixel.0[2]];
+                    let inks = cache.entry(rgb).or_insert_with(|| {
+                        super::profiles::cmyk(
+                            vectorcraft_color::Color::rgb(f32::from(rgb[0]) / 255.0, f32::from(rgb[1]) / 255.0, f32::from(rgb[2]) / 255.0),
+                            cms.as_ref(),
+                        )
+                    });
+                    for (out, v) in maxima.iter_mut().zip(inks.iter()) {
+                        *out = out.max(*v);
+                    }
+                    if cache.len() >= 65536 {
+                        cache.clear();
+                    }
+                }
+            }
+            for (name, value) in ["Cyan", "Magenta", "Yellow", "Black"].into_iter().zip(maxima) {
+                out.insert(name.into(), value);
+            }
+        }
+        let names = blob.spot_names();
+        if !names.is_empty() {
+            let spots = blob.spot_inks().ok_or_else(|| error("image ink selection: undecodable spot channels"))?;
+            for (i, name) in spots.names.iter().enumerate() {
+                out.insert(name.clone(), f32::from(spots.channel(i).max().unwrap_or(0)) / 255.0);
+            }
         }
     }
     if let NodeKind::Mesh(mesh) = &n.kind {
@@ -116,7 +173,7 @@ pub(super) fn inks(doc: &Document, n: &Node) -> Result<BTreeMap<String, f64>> {
     }
     if let Some(children) = n.children() {
         for child in children.iter().skip(usize::from(n.clips())) {
-            for (k, v) in inks(doc, child)? {
+            for (k, v) in ink_channels(doc, child, process)? {
                 let value = out.entry(k).or_default();
                 *value = value.max(v);
             }
@@ -164,12 +221,19 @@ pub(super) fn rule(doc: &Document, ids: &[NodeId], node: Option<&Node>, r: &Elem
             let epsilon = r
                 .value("Epsilon")
                 .unwrap_or("0.005")
-                .parse::<f64>()
+                .parse::<f32>()
                 .ok()
                 .filter(|v| v.is_finite() && *v >= 0.0)
                 .ok_or_else(|| error("invalid separation epsilon"))?;
             let mut values = Vec::new();
-            for (name, v) in inks(doc, n)? {
+            let process = if kind == "SeparationTypeRule" {
+                required(r, "SeparationType")? != "Spot"
+            } else {
+                let pattern = required(r, "SeparationName")?;
+                let ignore_case = flag(r, "IgnoreCase")?;
+                ["Cyan", "Magenta", "Yellow", "Black"].iter().any(|name| matches(name, pattern, ignore_case))
+            };
+            for (name, v) in ink_channels(doc, n, process)? {
                 let matched = if kind == "SeparationNameRule" {
                     matches(&name, required(r, "SeparationName")?, flag(r, "IgnoreCase")?)
                 } else {
@@ -185,8 +249,8 @@ pub(super) fn rule(doc: &Document, ids: &[NodeId], node: Option<&Node>, r: &Elem
                 }
             }
             match required(r, "SeparationRelation")? {
-                "Using" => Ok(values.iter().any(|v| *v > epsilon)),
-                "NotUsing" => Ok(values.iter().all(|v| *v <= epsilon)),
+                "Using" => Ok(values.iter().any(|v| vectorcraft_doc::inks::present(*v, epsilon))),
+                "NotUsing" => Ok(values.iter().all(|v| !vectorcraft_doc::inks::present(*v, epsilon))),
                 v => Err(error(format!("unsupported SeparationRelation {v}"))),
             }
         }
@@ -195,10 +259,13 @@ pub(super) fn rule(doc: &Document, ids: &[NodeId], node: Option<&Node>, r: &Elem
 }
 pub(super) fn condition(doc: &Document, ids: &[NodeId], p: &Element) -> Result<bool> {
     let rules = p.children.iter().filter(|e| e.name == "Rule").map(|r| rule(doc, ids, None, r)).collect::<Result<Vec<_>>>()?;
-    match p.value("Operator").unwrap_or("All") {
+    combine_rules(&rules, p.value("Operator").unwrap_or("All"))
+}
+pub(super) fn combine_rules(rules: &[bool], operator: &str) -> Result<bool> {
+    match operator {
         "All" => Ok(rules.iter().all(|v| *v)),
         "Any" => Ok(rules.iter().any(|v| *v)),
         "None" => Ok(rules.iter().all(|v| !*v)),
-        v => Err(error(format!("unsupported conditional operator {v}"))),
+        v => Err(error(format!("unsupported selection operator {v}"))),
     }
 }

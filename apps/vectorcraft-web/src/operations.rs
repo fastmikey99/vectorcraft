@@ -2,6 +2,59 @@
 use crate::protocol;
 use vectorcraft_ui_egui::VectorcraftApp;
 
+/// A parent operation; the bridge keeps all variants in a single FIFO.
+// Browser variants are exercised through the bridge on wasm; native builds compile tests only.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub enum Operation {
+    Export(protocol::Export),
+    Mark(String, serde_json::Value),
+    Place(protocol::Place),
+    Solidify(protocol::Solidify),
+    Open(vectorcraft_ui_egui::HostOpen),
+    Prefs(String),
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub enum Reply {
+    Export { name: String, bytes: Vec<u8>, bounds: Option<vectorcraft_geom::Rect>, native: bool, mark_saved: bool, preserve_source: bool },
+    Message { kind: &'static str, value: serde_json::Value },
+    None,
+}
+
+/// Execute one queued operation. Shared with native same-frame ordering tests.
+pub fn execute(app: &mut VectorcraftApp, operation: Operation) -> Result<Reply, String> {
+    use serde_json::json;
+    Ok(match operation {
+        Operation::Export(export) => {
+            let (name, bytes, bounds, native) = write_export(app, &export)?;
+            Reply::Export { name, bytes, bounds, native, mark_saved: export.mark_saved, preserve_source: export.preserve_source }
+        }
+        Operation::Mark(command, params) => {
+            app.run(&command, params)?;
+            let result = app.session.execute("sep.mark.list", &json!({})).map_err(|e| e.to_string())?;
+            Reply::Message { kind: "vectorcraft:sep.marks", value: json!({"marks":result["marks"], "units":"pt"}) }
+        }
+        Operation::Place(place) => Reply::Message { kind: "vectorcraft:placed", value: json!({"ids":place_file(app, &place)?}) },
+        Operation::Solidify(request) => {
+            let done = solidify(app, &request)?;
+            Reply::Message {
+                kind: "vectorcraft:solidified",
+                value: json!({"ids":done.ids,"form":done.form,"level":done.level,
+                "softPixels":done.soft,"clearPixels":done.clear,"opaquePixels":done.opaque}),
+            }
+        }
+        Operation::Open(open) => {
+            app.open_from_host(open);
+            Reply::None
+        }
+        Operation::Prefs(text) => {
+            app.ui = serde_json::from_str::<vectorcraft_ui_egui::UiState>(&text).map_err(|e| e.to_string())?.sanitized();
+            vectorcraft_ui_egui::prefs_dialog::restore(app);
+            Reply::None
+        }
+    })
+}
+
 /// The active document written as `export` asks → its file name and bytes.
 /// → the file's name, its bytes, the selection's bounds (with `selected_only`), and whether the bytes
 /// are a selected image's own pixels.
@@ -392,5 +445,18 @@ mod tests {
         let done = solidify(&mut app, &all).unwrap();
         assert_eq!((done.ids, done.clear, done.opaque), (vec![a, b], 3, 1));
         assert_eq!(app.session.active().unwrap().history.undo.len(), undo + 1, "copies too in one undo step");
+    }
+    #[test]
+    fn one_frame_queue_exports_after_the_preceding_image_mutation() {
+        let mut app = app();
+        let id = put(&mut app, [0., 0., 20., 20.]);
+        app.run("select.set", json!({"ids":[id]})).unwrap();
+        let export = protocol::export(Some("png".into()), None, Some(true), None, Some(true)).unwrap();
+        let queue = vec![Operation::Solidify(protocol::solidify(None, None).unwrap()), Operation::Export(export)];
+        let replies: Vec<_> = queue.into_iter().map(|op| execute(&mut app, op).unwrap()).collect();
+        let Reply::Export { bytes, .. } = &replies[1] else { panic!("missing export") };
+        let decoded = image::load_from_memory(bytes).unwrap().to_rgba8();
+        assert!(decoded.pixels().all(|p| p.0[3] == 0 || p.0[3] == 255));
+        assert_ne!(bytes.as_slice(), PNG_A);
     }
 }

@@ -3,10 +3,11 @@
 use super::*;
 use vectorcraft_color::BlendMode;
 use vectorcraft_doc::AppearanceItem;
-use vectorcraft_geom::Point;
+use vectorcraft_geom::{FillRule, Point};
 
 struct Feature {
     path: PathData,
+    rule: FillRule,
     bounds: Rect,
     ink: vectorcraft_doc::inks::Inks,
     eligible: bool,
@@ -19,12 +20,9 @@ pub(super) struct Samples {
 
 fn collect(node: &Node, doc: &Document, threshold: f32, inherited: bool, out: &mut Vec<Feature>) -> Result<bool> {
     crate::cancel::check()?;
-    // Coincident no-bleed and artwork outlines have different paints. Their visible
-    // owner is determined by stacking, not nearest-curve ties. The renderer retains
-    // that ownership (including clips) and its white eligibility prevents a band.
-    if matches!(node.name.as_deref(), Some("LIGHT NO BLEED" | "NO WHP NO BLEED" | "NO POWDER NO BLEED" | "NO WHP OR POWDER NO BLEED")) {
-        return Ok(false);
-    }
+    // Flat no-bleed covers participate in the same visible-paint ownership proof.
+    // Forcing renderer sampling just because of their name can borrow a residual
+    // underlying spot at a near-coincident boundary instead of the front white paint.
     let permission = node.extras().trap_external.unwrap_or(inherited);
     if !node.visible || node.opacity <= 0.0 || matches!(node.kind, NodeKind::Path { guide: true, .. }) {
         return Ok(true);
@@ -66,7 +64,7 @@ fn collect(node: &Node, doc: &Document, threshold: f32, inherited: bool, out: &m
                 let Paint::Solid { color, swatch, tint } = &fill.paint else {
                     return Ok(false);
                 };
-                let (mut path, _) = super::super::pathops::node_path(node).ok_or_else(|| bad(C, "missing colour outline"))?;
+                let (mut path, rule) = super::super::pathops::node_path(node).ok_or_else(|| bad(C, "missing colour outline"))?;
                 // Filled open subpaths have an implicit closing edge (also used by the renderer).
                 for subpath in &mut path.subpaths {
                     subpath.closed = true;
@@ -75,7 +73,7 @@ fn collect(node: &Node, doc: &Document, threshold: f32, inherited: bool, out: &m
                     let (ink, eligible) = paint_ink(doc, color, swatch.as_deref(), *tint, threshold);
                     // Include the source/destination cell uncertainty of the raster band.
                     let padding = 0.2 * MM + 2.0 / SCALE;
-                    out.push(Feature { path, bounds: bounds.inflate(padding, padding), ink, eligible: eligible && permission });
+                    out.push(Feature { path, rule, bounds: bounds.inflate(padding, padding), ink, eligible: eligible && permission });
                 }
             }
         }
@@ -84,19 +82,84 @@ fn collect(node: &Node, doc: &Document, threshold: f32, inherited: bool, out: &m
     Ok(true)
 }
 
+fn ownership_budget() -> vectorcraft_pathops::GeometryBudget {
+    // This optimization is optional: modest limits per subtraction keep the raster
+    // fallback cheaper than adversarial topology. The bulk underprint has its own limits.
+    vectorcraft_pathops::GeometryBudget {
+        input_segments: 100_000,
+        output_segments: 100_000,
+        work_steps: 300_000,
+        winding_bytes: 16_000_000,
+        time_limit: std::time::Duration::from_secs(2),
+    }
+}
+
 /// Complex appearances retain the existing renderer sampling. A flat opaque object has one
 /// unambiguous ink value, so only its geometric boundary is needed to choose that value.
 pub(super) fn samples(doc: &Document, nearest: &mut [Option<u32>], w: usize, region: Rect, threshold: f32) -> Result<Option<Samples>> {
+    if nearest.iter().all(Option::is_none) {
+        return Ok(None);
+    }
     let mut features = Vec::new();
     for layer in &doc.layers {
         if !collect(layer, doc, threshold, true, &mut features)? {
             return Ok(None);
         }
     }
+    // Remove paint hidden by later opaque fills. A covered outline has no colour
+    // ownership, even when its distance ties the front outline exactly.
+    let mut visibility_checks = 0usize;
+    // Many ordinary, inexpensive subtractions can exhaust one operation's allowance.
+    // Keep each sweep small, while allowing ten such work allowances for the job.
+    let mut remaining_work = ownership_budget().work_steps.saturating_mul(10);
+    for back in 0..features.len() {
+        crate::cancel::check()?;
+        let mut visible = features.get(back).map(|f| f.path.clone()).unwrap_or_default();
+        let mut rule = features.get(back).map_or(FillRule::NonZero, |f| f.rule);
+        for front in features.iter().skip(back + 1) {
+            crate::cancel::check()?;
+            visibility_checks += 1;
+            // Very large overlap stacks retain renderer sampling. Geometry ownership
+            // is optional; it must not turn a bounded raster task into quadratic work.
+            if visibility_checks > 1_000_000 {
+                return Ok(None);
+            }
+            if visible.bounds().zip(front.path.bounds()).is_some_and(|(a, b)| a.intersect(b).area() > 0.0) {
+                if remaining_work == 0 {
+                    return Ok(None);
+                }
+                let budget =
+                    vectorcraft_pathops::GeometryBudget { work_steps: remaining_work.min(ownership_budget().work_steps), ..ownership_budget() };
+                visible = match vectorcraft_pathops::try_boolean_with_control(
+                    &visible,
+                    rule,
+                    &front.path,
+                    front.rule,
+                    vectorcraft_pathops::BoolOp::Difference,
+                    budget,
+                    || {
+                        remaining_work = remaining_work.saturating_sub(1);
+                        crate::cancel::is_cancelled()
+                    },
+                ) {
+                    Ok(path) => {
+                        rule = FillRule::NonZero;
+                        path
+                    }
+                    Err(vectorcraft_pathops::PathOpsError::Cancelled) => return Err(crate::EngineError::Cancelled),
+                    // Budget/degenerate intersections cannot establish ownership; the renderer can.
+                    Err(_) => return Ok(None),
+                };
+            }
+        }
+        if let Some(feature) = features.get_mut(back) {
+            feature.path = visible;
+        }
+    }
     if w == 0 {
         return Err(bad(C, "invalid colour sample grid"));
     }
-    let index = super::index::Index::new(features.iter().enumerate().map(|(i, f)| (i, f.path.clone())));
+    let index = super::index::Index::new(features.iter().enumerate().rev().map(|(i, f)| (i, f.path.clone())));
     let mut pixels = Vec::new();
     for (i, sample) in nearest.iter_mut().enumerate() {
         if i % 16384 == 0 {
