@@ -401,6 +401,8 @@ impl<'p> Colors<'p> {
             return if icc { Space::Other } else { Space::Rgb };
         }
         match rgb {
+            // The reader's sRGB, under a transfer function: from sRGB into the working space.
+            Rgb::Srgb => return Space::Other,
             Rgb::Icc(p) => {
                 if let Some(k) = self.page_transform(p) {
                     return Space::Profile(k);
@@ -426,15 +428,16 @@ impl<'p> Colors<'p> {
     }
 
     /// Whether the RGB spaces page `scan` found for each paint are needed ([`Colors::rgb_space`]):
-    /// the page sets `ICCBased` RGB spaces, and the file's profiles can't say which colours are in
-    /// which (several of a kind, or sRGB ones the interpreter reads as DeviceRGB on a page that
-    /// sets DeviceRGB colours too).
+    /// the page sets a transfer function (the reader gives what it paints as sRGB), or it sets
+    /// `ICCBased` RGB spaces and the file's profiles can't say which colours are in which (several
+    /// of a kind, or sRGB ones the interpreter reads as DeviceRGB on a page that sets DeviceRGB
+    /// colours too).
     pub fn rgb_needs_walk(&mut self, scan: &crate::import_scan::Scan) -> bool {
-        if self.uncalibrated_rgb || self.working_rgb.is_none() || scan.rgb_profiles.is_empty() {
+        if !self.converts_rgb() || (scan.rgb_profiles.is_empty() && !scan.transfer) {
             return false;
         }
         let f = self.file_rgb();
-        f.other == Group::Several || f.srgb == Group::Several || (matches!(f.srgb, Group::One(_)) && scan.device_rgb)
+        scan.transfer || f.other == Group::Several || f.srgb == Group::Several || (matches!(f.srgb, Group::One(_)) && scan.device_rgb)
     }
 
     /// A new page begins: the profiles its walk notes are its own ([`Colors::page_transform`]).

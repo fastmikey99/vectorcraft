@@ -269,3 +269,30 @@ fn rgba_pixels_of_a_profile_become_srgb_with_their_alpha() {
     let cmyk = IccProfile::from_bytes(None, &icc_bytes(GENERIC_CMYK).unwrap()).unwrap();
     assert!(!cmyk.rgba8_to_srgb(&mut px, 3, Intent::RelativeColorimetric), "not RGB");
 }
+
+#[test]
+fn rgb_profiles_whose_curves_part_between_grid_points_are_not_the_same() {
+    // Sampled tone curves that agree at 0, ¼, ½, ¾ and 1 but not at one value between.
+    let curve = |bump: bool| {
+        let lut: Vec<u16> = (0..256)
+            .map(|i| {
+                let v = (i as f64 / 255.0).powf(2.2) * 65535.0;
+                (if bump && i == 37 { v + 1500.0 } else { v }).round() as u16
+            })
+            .collect();
+        moxcms::ToneReprCurve::Lut(lut)
+    };
+    let profile = |bump: bool| {
+        let mut p = moxcms::ColorProfile::new_adobe_rgb();
+        p.cicp = None;
+        for trc in [&mut p.red_trc, &mut p.green_trc, &mut p.blue_trc] {
+            *trc = Some(curve(bump));
+        }
+        icc::encode(&p).unwrap()
+    };
+    let (plain, bumped) = (profile(false), profile(true));
+    assert!(same_rgb_profile(&plain, &plain.clone()));
+    assert!(!same_rgb_profile(&plain, &bumped), "the curves part at 37/255");
+    let w = WorkingRgb { icc: plain.into(), intent: Intent::RelativeColorimetric, bpc: false };
+    assert!(!RgbTransform::new(&bumped, &w).unwrap().keeps_numbers());
+}

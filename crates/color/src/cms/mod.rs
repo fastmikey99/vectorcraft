@@ -358,8 +358,10 @@ pub fn working_rgb() -> Option<WorkingRgb> {
 }
 
 /// Whether RGB profiles `a` and `b` (ICC files) describe the same colours: the same bytes, or
-/// `a`'s colours converted into `b` (relative colorimetric) come out with their own numbers, on a
-/// grid through the whole cube. Anything that isn't a readable RGB profile is not the same.
+/// their colours come out the same (within half an 8-bit step) in a wide reference space (ProPhoto
+/// RGB, relative colorimetric), on a grid through the whole cube and at every 8-bit value along
+/// each channel and the greys (where tone curves could part between the grid's points). Anything
+/// that isn't a readable RGB profile is not the same.
 pub fn same_rgb_profile(a: &[u8], b: &[u8]) -> bool {
     if a == b {
         return true;
@@ -373,15 +375,15 @@ fn same_colours(pa: &IccProfile, pb: &IccProfile) -> bool {
     if pa.kind != ProfileKind::Rgb || pb.kind != ProfileKind::Rgb {
         return false;
     }
+    let Some(reference) = icc::builtin_rgb(PROPHOTO_RGB) else { return false };
+    let same = |rgb: [f32; 3]| {
+        let at = |p: &IccProfile| p.to_rgb_of(&reference, &rgb, Intent::RelativeColorimetric, false);
+        matches!((at(pa), at(pb)), (Some(x), Some(y)) if x.iter().zip(y).all(|(x, y)| (x - y).abs() <= 0.5 / 255.0))
+    };
     const STEPS: [f32; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
-    STEPS.iter().all(|&r| {
-        STEPS.iter().all(|&g| {
-            STEPS.iter().all(|&bl| {
-                pa.to_rgb_of(pb, &[r, g, bl], Intent::RelativeColorimetric, false)
-                    .is_some_and(|o| o.iter().zip([r, g, bl]).all(|(x, y)| (x - y).abs() <= 0.5 / 255.0))
-            })
-        })
-    })
+    let cube = STEPS.iter().all(|&r| STEPS.iter().all(|&g| STEPS.iter().all(|&b| same([r, g, b]))));
+    // Each channel alone and the greys, at every 8-bit value.
+    cube && (0..=255).map(|i| i as f32 / 255.0).all(|v| [[v, 0.0, 0.0], [0.0, v, 0.0], [0.0, 0.0, v], [v; 3]].into_iter().all(same))
 }
 
 /// RGB colours of one ICC profile as numbers of another (the RGB working space, [`WorkingRgb`]):

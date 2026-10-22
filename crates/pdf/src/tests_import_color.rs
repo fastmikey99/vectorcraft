@@ -646,3 +646,23 @@ fn a_tagged_ramp_keeps_its_course_in_the_working_space() {
         assert!((between - want).abs() <= 2.0 / 255.0, "at {t}: {between} vs {want}");
     }
 }
+
+#[test]
+fn colours_under_a_transfer_function_are_the_readers_srgb() {
+    // The reader paints a colour under a transfer function (TR, TR2) as the sRGB it makes of it:
+    // those numbers go from sRGB into the working space, not through the colour's own profile.
+    use vectorcraft_color::cms::{PROPHOTO_RGB, SRGB};
+    let f = first_extra(1);
+    let identity = "<< /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >>";
+    let page = PdfPage {
+        resources: format!("/ColorSpace << /CS0 [/ICCBased {f} 0 R] >> /ExtGState << /T << /TR {identity} >> /I << /TR /Identity >> >>"),
+        ..PdfPage::new(200.0, 50.0, "/CS0 cs 0.2 0.6 0.4 scn q /T gs 0 0 10 10 re f Q 12 0 10 10 re f q /T gs /I gs 24 0 10 10 re f Q\n")
+    };
+    let bytes = pdf_with(&[page], &[&icc_stream(PROPHOTO_RGB, false)], None);
+    let got = fills_in(&bytes, Some(PROPHOTO_RGB));
+    let Color::Rgb { r, g, b } = solid(&fills_in(&bytes, None)[0]).0 else { panic!() };
+    assert!(near(solid(&got[0]).0, converted(SRGB, PROPHOTO_RGB, [r, g, b])), "{:?} from sRGB {r} {g} {b}", got[0]);
+    // Not under one (after `Q`, or reset by /Identity): in the working space's own profile.
+    assert_eq!(solid(&got[1]).0, Color::rgb(0.2, 0.6, 0.4));
+    assert_eq!(solid(&got[2]).0, Color::rgb(0.2, 0.6, 0.4));
+}

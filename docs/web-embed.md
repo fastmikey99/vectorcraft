@@ -253,8 +253,9 @@ once (ΔE2000 up to about 10 on saturated colours). Now, with a working space ot
   DeviceRGB-looking colour keeps its numbers (it may be DeviceRGB). Text shown in several RGB
   spaces between two painted paths can't be told apart by glyph either (as for spot inks).
 - DeviceRGB numbers are the working space's, and stand.
-- Colours the reader can only give as sRGB (Lab, CalRGB, Indexed, mixed DeviceN inks) are
-  converted from sRGB into the working space instead of being taken as its numbers.
+- Colours the reader can only give as sRGB (Lab, CalRGB, Indexed, mixed DeviceN inks, and any
+  colour painted under a transfer function, `TR`/`TR2`) are converted from sRGB into the working
+  space instead of being taken as its numbers.
 - Images are unchanged: they are sRGB in a document, as before (colours outside sRGB clip).
 
 With sRGB as the working space nothing changes. This holds for the CLI and desktop app too (any

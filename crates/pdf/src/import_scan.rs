@@ -286,6 +286,9 @@ pub(crate) struct Scan {
     /// The page sets DeviceRGB colours (`rg`, `RG`, or a space that is DeviceRGB): its RGB isn't
     /// all in profiles.
     pub device_rgb: bool,
+    /// The page sets a transfer function (`TR`, `TR2`): the reader gives the colours painted under
+    /// it as sRGB, whatever their space ([`Rgb::Srgb`]).
+    pub transfer: bool,
     /// The RGB space of the text before each of [`Self::paints`] (counted as [`Self::texts`] is),
     /// of its fills and of its strokes: [`RgbAt::Unknown`] where its text is shown in several.
     text_rgb: Changes<[RgbAt; 2]>,
@@ -328,6 +331,7 @@ impl Scan {
             RgbAt::NotIcc => Rgb::NotIcc,
             RgbAt::Icc(i) => usize::try_from(i).ok().and_then(|i| self.rgb_profiles.get(i)).map_or(Rgb::Unknown, Rgb::Icc),
             RgbAt::Unknown => Rgb::Unknown,
+            RgbAt::Srgb => Rgb::Srgb,
         }
     }
 
@@ -351,6 +355,8 @@ pub(crate) enum Rgb<'a> {
     /// A reading the walk doesn't follow (a tiling pattern's cell, a soft mask, a Type 3 glyph):
     /// whether the page sets DeviceRGB colours there isn't known either.
     Nested,
+    /// Painted under a transfer function: the reader gives the colour as sRGB numbers.
+    Srgb,
 }
 
 /// The RGB space a fill or a stroke paints in, as the walk notes it: an index into
@@ -363,6 +369,8 @@ enum RgbAt {
     /// An `ICCBased` space whose profile isn't noted (a Lab one, one that doesn't decode, or past
     /// [`MAX_RGB_PROFILES`]).
     Unknown,
+    /// Under a transfer function ([`Rgb::Srgb`]).
+    Srgb,
 }
 
 /// The RGB space of the text shown between two painted paths: of its fills, or of its strokes.
@@ -495,6 +503,8 @@ struct State {
     nonzero: bool,
     /// The inks of fills and of strokes.
     inks: [Inks; 2],
+    /// A transfer function is in effect (`TR`, `TR2`).
+    transfer: bool,
 }
 
 /// A marked-content tag as [`Scan::tags`] keeps it: its FNV-1a hash (the tags are only compared,
@@ -654,7 +664,11 @@ impl Walker<'_, '_> {
         self.out.paint_zero.push(!s.nonzero);
         self.out.texts.push(std::mem::take(&mut self.text));
         // The paints' RGB spaces are kept in the same list: past its limit they aren't known.
-        let kept = self.out.paint_inks.set(k, s.inks[usize::from(stroke)]);
+        let mut inks = s.inks[usize::from(stroke)];
+        if s.transfer {
+            inks.rgb = RgbAt::Srgb;
+        }
+        let kept = self.out.paint_inks.set(k, inks);
         self.inks_cut |= !kept;
         self.out.rgb_unknown |= !kept;
         self.inks_cut |= !self.out.text_inks.set(k, std::mem::take(&mut self.text_inks).map(RunInk::ink));
@@ -675,7 +689,7 @@ impl Walker<'_, '_> {
             *run = run.and(inks.space);
         }
         for (run, inks) in self.text_rgb.iter_mut().zip(s.inks) {
-            *run = run.and(inks.rgb);
+            *run = run.and(if s.transfer { RgbAt::Srgb } else { inks.rgb });
         }
     }
 
@@ -913,6 +927,12 @@ impl Walker<'_, '_> {
                         // Without `/op`, `/OP` sets both.
                         s.fill = d.get::<bool>(b"op").or(stroke).unwrap_or(s.fill);
                         s.nonzero = d.get::<u8>(b"OPM").map_or(s.nonzero, |m| m != 0);
+                        // As the reader takes it: `TR2` before `TR`; a name (Identity, Default)
+                        // resets it, a function or four of them set one.
+                        if let Some(tr) = d.get::<Object<'_>>(b"TR2").or_else(|| d.get::<Object<'_>>(b"TR")) {
+                            s.transfer = !matches!(tr, Object::Name(_));
+                            self.out.transfer |= s.transfer;
+                        }
                     }
                 }
                 TypedInstruction::FillPathEvenOdd(_) | TypedInstruction::FillPathNonZero(_) | TypedInstruction::FillPathNonZeroCompatibility(_) => {
