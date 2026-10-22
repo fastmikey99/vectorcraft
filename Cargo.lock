@@ -4895,6 +4895,7 @@ dependencies = [
  "fax",
  "image",
  "kurbo 0.13.1",
+ "moxcms",
  "proptest",
  "serde_json",
  "vectorcraft-color",

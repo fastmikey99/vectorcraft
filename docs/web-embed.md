@@ -264,7 +264,9 @@ With sRGB as the working space nothing changes. This holds for the CLI and deskt
 
 **A PSD is read in the profile it embeds.** An 8- or 16-bit RGB Photoshop document's merged image
 is converted from its embedded ICC profile (resource 1039) into the sRGB pixels a document's images
-are; an sRGB profile (or none) leaves the numbers as they are. Before, the profile was ignored and
+are, at full precision before it is cut to 8 bits, with the colour settings' intent; a profile with
+sRGB's colours for that intent (or none) leaves the numbers as they are. Whether two profiles are
+the same is judged for the intent a conversion uses (a profile's tables can differ by intent). Before, the profile was ignored and
 the numbers read as sRGB whatever the working space (choosing the working space didn't change
 it), so an Adobe RGB PSD came out duller. Colours outside sRGB clip, as for any image. CMYK,
 grey, Lab and 32-bit documents read as before.

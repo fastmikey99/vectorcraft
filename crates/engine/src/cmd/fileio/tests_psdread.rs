@@ -208,6 +208,25 @@ fn an_rgb_psd_is_read_in_the_profile_it_embeds() {
     assert_eq!(read(&icc_resource(b"not a profile")), plain);
 }
 
+#[test]
+fn a_16_bit_psd_is_converted_from_its_profile_before_it_is_quantised() {
+    // GUARDS: 16-bit samples were cut to 8 bits before the profile's conversion: in a profile with
+    // a linear tone curve, 128/65535 became black instead of about 6/255 in sRGB.
+    use vectorcraft_color::cms::{self, Intent};
+    let icc = vectorcraft_testkit::icc::linear_srgb();
+    // Two pixels: 128 and 20000 in each channel.
+    let row = [128u16.to_be_bytes(), 20000u16.to_be_bytes()].concat();
+    let f = psd(1, 3, (2, 1), 16, 3, &[], &icc_resource(&icc), &[], &raw(&[&row, &row, &row]));
+    let img = raster_image(&f).unwrap();
+    let px: Vec<[u8; 4]> = image::load_from_memory(&img.blob.bytes).unwrap().to_rgba8().pixels().map(|p| p.0).collect();
+    let profile = cms::IccProfile::from_bytes(None, &icc).unwrap();
+    for (got, v) in px.iter().zip([128.0f32, 20000.0]) {
+        let want = profile.to_srgb(&[v / 65535.0; 3], Intent::RelativeColorimetric).unwrap().map(|c| (c * 255.0).round() as i32);
+        assert!(got[..3].iter().zip(want).all(|(a, b)| (*a as i32 - b).abs() <= 1), "{got:?} vs {want:?}");
+    }
+    assert!(px[0][0] >= 5, "not black: {:?}", px[0]);
+}
+
 /// A 60 × 40 pt document: a red square on a transparent page, and a half-transparent blue one.
 fn art() -> Session {
     let mut s = Session::new();

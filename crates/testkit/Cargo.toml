@@ -23,3 +23,5 @@ proptest = { workspace = true }
 image = { workspace = true }
 # A Group 4 encoder and the T.4 run codes, to write CCITT Group 3 TIFFs (`tiff::group3`).
 fax = "0.2"
+# ICC profiles made in code (`icc`), as vectorcraft-color's CMS reads them.
+moxcms = "0.8"
