@@ -416,6 +416,12 @@ impl<'p> Colors<'p> {
         }
     }
 
+    /// Whether RGB colours are converted into a working space (one other than sRGB, for a file
+    /// that isn't an editor's own document): only then does the page's walk note their profiles.
+    pub fn converts_rgb(&self) -> bool {
+        self.working_rgb.is_some() && !self.uncalibrated_rgb
+    }
+
     /// Whether the RGB spaces page `scan` found for each paint are needed ([`Colors::rgb_space`]):
     /// the page sets `ICCBased` RGB spaces, and the file's profiles can't say which colours are in
     /// which (several of a kind, or sRGB ones the interpreter reads as DeviceRGB on a page that
@@ -657,6 +663,10 @@ fn alt_model(o: &Object<'_>) -> Option<Alt> {
 
 /// The most different `ICCBased` RGB profiles [`Colors::file_rgb`] takes.
 const MAX_ICC_PROFILES: usize = 64;
+/// The largest RGB profile read (decoded bytes; an RGB profile, even one with lookup tables, is
+/// far smaller), and the most bytes the profiles of a file or a page take together.
+pub(crate) const MAX_ICC_BYTES: usize = 4 << 20;
+pub(crate) const MAX_ICC_TOTAL: usize = 16 << 20;
 
 /// What the profile of a 3-component `ICCBased` space is ([`icc_rgb`]).
 pub(crate) enum IccRgb {
@@ -669,20 +679,25 @@ pub(crate) enum IccRgb {
     Unreadable,
 }
 
-/// The profile of the `ICCBased` space whose profile stream is `profile`.
+/// The profile of the `ICCBased` space whose profile stream is `profile`; one larger than
+/// [`MAX_ICC_BYTES`] decoded isn't read.
 pub(crate) fn icc_rgb(profile: &Stream<'_>) -> IccRgb {
     if profile.dict().get::<u8>(b"N") != Some(3) {
         return IccRgb::NotRgb;
     }
-    match profile.decoded() {
-        Ok(bytes) if !lab_profile(profile) => IccRgb::Rgb(bytes.into_owned()),
+    if lab_profile(profile) {
+        return IccRgb::Unreadable;
+    }
+    // A decoder may give a prefix at the limit: one byte past it says the profile is larger.
+    match profile.decoded_within(MAX_ICC_BYTES + 1) {
+        Ok(bytes) if bytes.len() <= MAX_ICC_BYTES => IccRgb::Rgb(bytes.into_owned()),
         _ => IccRgb::Unreadable,
     }
 }
 
 /// Collect the profiles of the 3-component `ICCBased` spaces in `o` (distinct, decoded) into
 /// `found`; `ok` turns false at one that can't be told apart: a Lab profile, one that doesn't
-/// decode, or past [`MAX_ICC_PROFILES`].
+/// decode, or past [`MAX_ICC_PROFILES`] or [`MAX_ICC_TOTAL`].
 fn icc_rgb_profiles(o: Object<'_>, depth: u32, found: &mut Vec<Vec<u8>>, ok: &mut bool) {
     if depth > MAX_DEPTH || !*ok {
         return;
@@ -697,7 +712,7 @@ fn icc_rgb_profiles(o: Object<'_>, depth: u32, found: &mut Vec<Vec<u8>>, ok: &mu
                         IccRgb::Rgb(bytes) => {
                             if !found.iter().any(|f| f[..] == bytes[..]) {
                                 found.push(bytes);
-                                *ok = found.len() <= MAX_ICC_PROFILES;
+                                *ok = found.len() <= MAX_ICC_PROFILES && found.iter().map(Vec::len).sum::<usize>() <= MAX_ICC_TOTAL;
                             }
                         }
                         IccRgb::Unreadable => *ok = false,

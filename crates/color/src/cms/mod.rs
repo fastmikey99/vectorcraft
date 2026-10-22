@@ -236,18 +236,7 @@ pub fn profiles() -> Vec<ProfileInfo> {
 /// Register an ICC profile from bytes (named by its description unless `name` is given).
 /// Re-registering a name replaces the old profile.
 pub fn register_icc(bytes: &[u8], name: Option<String>) -> Result<ProfileInfo, CmsError> {
-    let p = IccProfile::from_bytes(name, bytes)?;
-    if p.kind == ProfileKind::Gray {
-        return Err(CmsError::Unsupported("grayscale profiles can't be working spaces yet".into()));
-    }
-    let builtin = canonical_name(&p.name);
-    if BUILTIN_RGB.contains(&builtin) || BUILTIN_CMYK.contains(&builtin) {
-        return Err(CmsError::Unsupported(format!("{} clashes with a built-in profile name", p.name)));
-    }
-    if !p.usable() {
-        return Err(CmsError::Unsupported(format!("{}: no usable transform to/from sRGB", p.name)));
-    }
-    let info = ProfileInfo { name: p.name.clone(), kind: p.kind, builtin: false };
+    let (p, info) = registrable(bytes, name)?;
     let mut u = USER.write().unwrap_or_else(|e| e.into_inner());
     u.retain(|x| x.name != info.name);
     u.push(Arc::new(p));
@@ -263,6 +252,28 @@ pub fn register_icc(bytes: &[u8], name: Option<String>) -> Result<ProfileInfo, C
         let _ = set_active(&st);
     }
     Ok(info)
+}
+
+/// What [`register_icc`] would register from `bytes` (named `name`), without registering it: the
+/// profile it refuses is refused here.
+pub fn check_icc(bytes: &[u8], name: Option<String>) -> Result<ProfileInfo, CmsError> {
+    registrable(bytes, name).map(|(_, info)| info)
+}
+
+fn registrable(bytes: &[u8], name: Option<String>) -> Result<(IccProfile, ProfileInfo), CmsError> {
+    let p = IccProfile::from_bytes(name, bytes)?;
+    if p.kind == ProfileKind::Gray {
+        return Err(CmsError::Unsupported("grayscale profiles can't be working spaces yet".into()));
+    }
+    let builtin = canonical_name(&p.name);
+    if BUILTIN_RGB.contains(&builtin) || BUILTIN_CMYK.contains(&builtin) {
+        return Err(CmsError::Unsupported(format!("{} clashes with a built-in profile name", p.name)));
+    }
+    if !p.usable() {
+        return Err(CmsError::Unsupported(format!("{}: no usable transform to/from sRGB", p.name)));
+    }
+    let info = ProfileInfo { name: p.name.clone(), kind: p.kind, builtin: false };
+    Ok((p, info))
 }
 
 /// Forget a profile [`register_icc`] registered (by its name); `false` when there is none of that

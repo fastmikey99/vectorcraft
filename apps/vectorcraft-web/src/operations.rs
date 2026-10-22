@@ -200,13 +200,30 @@ pub struct ColorSettingsApplied {
 
 /// Register `request`'s profiles and set its working spaces, intent and compensation, as Edit ›
 /// Color Settings does: process-wide, for this document and the next ones the page opens. Not an
-/// edit: no undo step, and an unmodified document stays unmodified. Nothing is set when any
-/// profile can't be registered or a named space isn't available (the profiles registered before
-/// it stay registered, like `color.loadProfile`'s).
+/// edit: no undo step, and an unmodified document stays unmodified. Nothing is registered or set
+/// when any profile can't be registered or a named space isn't available: the profiles and the
+/// spaces are checked first (a profile registered again under a working space's name would take
+/// effect at once).
 pub fn apply_color_settings(app: &mut VectorcraftApp, request: &protocol::ColorSettings) -> Result<ColorSettingsApplied, String> {
+    use vectorcraft_color::cms::{self, ProfileKind};
+    const C: &str = "vectorcraft:colorSettings";
+    let mut checked = vec![];
+    for (i, (name, bytes)) in request.profiles.iter().enumerate() {
+        checked.push(cms::check_icc(bytes, name.clone()).map_err(|e| format!("{C}: profiles[{i}]: {e}"))?);
+    }
+    for (key, name, kind) in [("rgb", &request.rgb, ProfileKind::Rgb), ("cmyk", &request.cmyk, ProfileKind::Cmyk)] {
+        let Some(name) = name else { continue };
+        let name = cms::canonical_name(name);
+        let known = checked.iter().rev().find(|p| p.name == name).or(cms::profile(name).as_ref()).map(|p| p.kind);
+        match known {
+            Some(k) if k == kind => {}
+            Some(_) => return Err(format!("{C}: edit.colorSettings: {name} is not a{} profile", if key == "rgb" { "n RGB" } else { " CMYK" })),
+            None => return Err(format!("{C}: edit.colorSettings: unknown {key} profile `{name}`")),
+        }
+    }
     let mut loaded = vec![];
     for (i, (name, bytes)) in request.profiles.iter().enumerate() {
-        let info = vectorcraft_color::cms::register_icc(bytes, name.clone()).map_err(|e| format!("vectorcraft:colorSettings: profiles[{i}]: {e}"))?;
+        let info = cms::register_icc(bytes, name.clone()).map_err(|e| format!("{C}: profiles[{i}]: {e}"))?;
         loaded.push(info.name);
     }
     // A working space registered again (`register_icc` makes it take the new profile) draws anew,
@@ -411,7 +428,23 @@ mod tests {
         .unwrap();
         let done = apply_color_settings(&mut app, &request);
         let now = cms::active_settings();
+        // A request refused at its second profile changes nothing, not even the working space its
+        // first one would have registered again.
+        let shown = cms::active().rgb_to_srgb([0.2, 0.6, 0.4]);
+        let prophoto = cms::icc_bytes(cms::PROPHOTO_RGB).unwrap().to_vec();
+        let half = protocol::color_settings(
+            Some(Some(vec![(Some(Some("Embed Test RGB".into())), Some(prophoto)), (None, Some(b"junk".to_vec()))])),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let refused = apply_color_settings(&mut app, &half);
+        let still = cms::active().rgb_to_srgb([0.2, 0.6, 0.4]);
         cms::set_active(&before).unwrap(); // process-wide: put back before asserting
+        assert!(refused.unwrap_err().contains("profiles[1]"));
+        assert_eq!(still, shown, "the working space kept its profile");
         let done = done.unwrap();
         assert_eq!(done.loaded, vec!["Embed Test RGB".to_string()]);
         assert_eq!((now.rgb.as_str(), now.intent), ("Embed Test RGB", cms::Intent::Perceptual));

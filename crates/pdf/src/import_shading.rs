@@ -44,12 +44,21 @@ pub(crate) fn shading_gradient(
         let [r, g, b, _] = cs.to_rgba(&at(t)?, 1.0, false).components();
         Some(Color::rgb(round3(r), round3(g), round3(b)))
     };
+    // RGB converted into the working space is judged in the numbers the stops keep: a ramp
+    // straight in its own space isn't in the working space's.
+    let converts = colors.converts_rgb();
     // Sample densely, then drop samples that linear interpolation reproduces.
     const N: usize = 64;
     let mut pts: Vec<(f32, [f32; 3])> = Vec::with_capacity(N + 1);
     for i in 0..=N {
         let t = i as f32 / N as f32;
-        pts.push((t, sample(t)?.to_rgb()));
+        let shown = sample(t)?;
+        let kept = match converts.then(|| at(t).and_then(|v| colors.native(space, &v)).map(|n| n.color)) {
+            Some(Some(Color::Rgb { r, g, b })) => [r, g, b],
+            Some(None) => numbers(colors.srgb_in_working(numbers(shown))),
+            _ => shown.to_rgb(),
+        };
+        pts.push((t, kept));
     }
     // Every sample dropped since the last stop is checked against the line to the next one, not
     // just its neighbours: a gentle curve (an exponential's N) looks straight between neighbours.
@@ -97,6 +106,14 @@ pub(crate) fn shading_gradient(
     let mut g = GradientPaint::new(Gradient { kind, stops });
     g.geom = Some(geom);
     Some((g, *extend))
+}
+
+/// An RGB colour's numbers (another colour's display sRGB).
+fn numbers(c: Color) -> [f32; 3] {
+    match c {
+        Color::Rgb { r, g, b } => [r, g, b],
+        other => other.to_rgb(),
+    }
 }
 
 /// Where an axial or radial shading that doesn't extend at both ends paints, as a clip path in

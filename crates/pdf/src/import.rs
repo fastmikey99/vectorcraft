@@ -23,7 +23,7 @@ use vectorcraft_geom::{FillRule, PathData};
 
 use crate::import_color::Colors;
 use crate::import_mask::{MaskSpec, contains, is_rectangle, luminance, mask_spec, white_cover};
-use crate::import_scan::{FontNames, MAX_NESTING, Ocgs, Rgb, Scan, TextOverprint, Walked, all_on, hides_forms, scan_page, tag_key};
+use crate::import_scan::{FontNames, MAX_NESTING, Ocgs, Rgb, Scan, TextOverprint, Walked, all_on, hides_forms, scan_page_rgb, tag_key};
 use crate::import_shading::{clipped, extend_clip, fold_stop_opacity, gradient_shape, mesh_shading, shading_gradient};
 use crate::import_text::{Families, LineFacts, Look, Placement, TextLine, Upright};
 use crate::{CropTo, ImportOptions, ImportReport, PdfError, TextAs};
@@ -287,7 +287,8 @@ fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_p
         b.page = ab;
         // The first id of this page's art.
         let first_id = b.next;
-        let mut scan = scan_page(page, &mut ocgs, all_on, &mut b.fonts, pdf.decode_limits().max_decoded_content())?;
+        let rgb_walk = b.colors.converts_rgb();
+        let mut scan = scan_page_rgb(page, &mut ocgs, all_on, &mut b.fonts, pdf.decode_limits().max_decoded_content(), rgb_walk)?;
         // The walk's ink names pick between spaces of inks that look the same to the interpreter. A
         // page keeps them only when it uses such an ink and the interpreter draws as many paths
         // there as the walk counts.

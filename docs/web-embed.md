@@ -227,8 +227,10 @@ post({ type: 'vectorcraft:colorSettings', id: 'cs1',
   a reload. They are not preferences (`vectorcraft:prefs` doesn't carry them) and not an edit:
   no `dirty: true`, no undo step.
 - Answered with `vectorcraft:colorSettingsApplied`, or `vectorcraft:failed` with the `id` (an
-  unreadable profile, an unknown space, a field of the wrong type, an empty message). Profiles
-  registered before a refused one stay registered; the settings are left unchanged.
+  unreadable profile, an unknown space, a field of the wrong type, an empty message, more than
+  64 MB of profiles together). The profiles and the spaces are checked before anything is
+  registered: a refused message registers nothing and leaves the settings unchanged. A profile
+  registered again under the name of a working space in use takes its place at once.
 
 **Tagged RGB lands in the RGB working space.** A PDF's `ICCBased` RGB colours used to be read
 through their profile into sRGB numbers (and a profile naming the sRGB device model was taken as
@@ -248,7 +250,8 @@ once (ΔE2000 up to about 10 on saturated colours). Now, with a working space ot
   the reader's paths; otherwise a tagged colour goes through sRGB into the working space and a
   DeviceRGB-looking one keeps its numbers). The walk doesn't follow tiling-pattern cells, soft
   masks or Type 3 glyphs: there, in a file whose only RGB profile is an sRGB one, a
-  DeviceRGB-looking colour keeps its numbers (it may be DeviceRGB).
+  DeviceRGB-looking colour keeps its numbers (it may be DeviceRGB). Text shown in several RGB
+  spaces between two painted paths can't be told apart by glyph either (as for spot inks).
 - DeviceRGB numbers are the working space's, and stand.
 - Colours the reader can only give as sRGB (Lab, CalRGB, Indexed, mixed DeviceN inks) are
   converted from sRGB into the working space instead of being taken as its numbers.

@@ -615,3 +615,34 @@ fn device_rgb_as_an_array_and_in_readings_the_walk_does_not_follow_keeps_its_num
     assert_eq!(c.space_of(rgb, 3, None, Rgb::Unknown), Space::Rgb);
     assert_eq!(c.space_of(rgb, 3, None, Rgb::NotIcc), Space::Rgb);
 }
+
+#[test]
+fn a_tagged_ramp_keeps_its_course_in_the_working_space() {
+    // A ramp straight in sRGB isn't straight in a working space with another tone curve: its stops
+    // are chosen in the numbers they keep, so the gradient between them follows the converted ramp.
+    use vectorcraft_color::cms::{SRGB, WIDE_GAMUT_RGB};
+    let f = first_extra(1);
+    let page = PdfPage {
+        resources: format!(
+            "/Pattern << /P0 << /PatternType 2 /Shading << /ShadingType 2 /ColorSpace [/ICCBased {f} 0 R] /Coords [0 0 100 0] /Extend [true true] /Function << /FunctionType 2 /Domain [0 1] /C0 [0 0 0] /C1 [1 1 1] /N 1 >> >> >> >>"
+        ),
+        ..PdfPage::new(200.0, 50.0, "/Pattern cs /P0 scn 0 0 100 20 re f\n")
+    };
+    let bytes = pdf_with(&[page], &[&icc_stream(SRGB, true)], None);
+    let Paint::Gradient(g) = &fills_in(&bytes, Some(WIDE_GAMUT_RGB))[0] else { panic!() };
+    let stops = &g.gradient.stops;
+    assert!(stops.len() > 2, "{stops:?}");
+    let value = |s: &GradientStop| match s.color {
+        Color::Rgb { r, .. } => r,
+        other => panic!("{other:?}"),
+    };
+    for i in 0..=32 {
+        let t = i as f32 / 32.0;
+        let k = stops.iter().position(|s| s.offset >= t).unwrap_or(stops.len() - 1).max(1);
+        let (a, b) = (&stops[k - 1], &stops[k]);
+        let u = ((t - a.offset) / (b.offset - a.offset).max(1e-6)).clamp(0.0, 1.0);
+        let between = value(a) + (value(b) - value(a)) * u;
+        let Color::Rgb { r: want, .. } = converted(SRGB, WIDE_GAMUT_RGB, [t; 3]) else { panic!() };
+        assert!((between - want).abs() <= 2.0 / 255.0, "at {t}: {between} vs {want}");
+    }
+}

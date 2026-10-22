@@ -25,7 +25,7 @@ use craft_pdf::syntax::object::{Array, Dict, FromBytes, MaybeRef, Name, Object, 
 use craft_pdf::syntax::page::{Page, Resources};
 
 use crate::PdfError;
-use crate::import_color::{IccRgb, icc_rgb, ink_names};
+use crate::import_color::{IccRgb, MAX_ICC_TOTAL, icc_rgb, ink_names};
 
 /// The interpreter's limit on nested form XObjects.
 const MAX_DEPTH: u32 = 50;
@@ -583,6 +583,8 @@ struct Walker<'w, 'p> {
     rgb_index: HashMap<u128, RgbAt>,
     /// The RGB spaces of the text shown since the last painted path: of its fills, of its strokes.
     text_rgb: [RunRgb; 2],
+    /// Note the profiles of `ICCBased` RGB spaces (only an import converting RGB needs them).
+    rgb: bool,
 }
 
 impl Walker<'_, '_> {
@@ -733,6 +735,7 @@ impl Walker<'_, '_> {
     /// (noted when new), DeviceRGB is noted as the page's.
     fn rgb_of(&mut self, o: &Object<'_>) -> RgbAt {
         let a = match o {
+            _ if !self.rgb => return RgbAt::NotIcc,
             Object::Name(n) => {
                 self.out.device_rgb |= matches!(n.as_ref(), b"DeviceRGB" | b"RGB");
                 return RgbAt::NotIcc;
@@ -760,7 +763,9 @@ impl Walker<'_, '_> {
             IccRgb::Unreadable => RgbAt::Unknown,
             IccRgb::Rgb(bytes) => match self.out.rgb_profiles.iter().position(|p| p[..] == bytes[..]) {
                 Some(i) => u32::try_from(i).map_or(RgbAt::Unknown, RgbAt::Icc),
-                None if self.out.rgb_profiles.len() < MAX_RGB_PROFILES => {
+                None if self.out.rgb_profiles.len() < MAX_RGB_PROFILES
+                    && self.out.rgb_profiles.iter().map(|p| p.len()).sum::<usize>().saturating_add(bytes.len()) <= MAX_ICC_TOTAL =>
+                {
                     self.out.rgb_profiles.push(bytes.into());
                     u32::try_from(self.out.rgb_profiles.len() - 1).map_or(RgbAt::Unknown, RgbAt::Icc)
                 }
@@ -1065,17 +1070,38 @@ fn embeds_glyphs(f: &Dict<'_>) -> bool {
     program(f) || f.get::<Array<'_>>(b"DescendantFonts").and_then(|a| a.iter::<Dict<'_>>().next()).is_some_and(|d| program(&d))
 }
 
+/// [`scan_page_rgb`] without the RGB spaces (tests).
+#[cfg(test)]
+pub(crate) fn scan_page(page: &Page<'_>, ocgs: &mut Ocgs, all_on: bool, fonts: &mut FontNames, max_form_bytes: usize) -> Result<Scan, PdfError> {
+    scan_page_rgb(page, ocgs, all_on, fonts, max_form_bytes, false)
+}
+
 /// Walk `page` as the interpreter will: `all_on` when [`all_on`] turned every group on. Fonts
 /// found are noted in `fonts` (their cache key → base font name, and whether the file carries its
-/// glyphs).
-pub(crate) fn scan_page(page: &Page<'_>, ocgs: &mut Ocgs, all_on: bool, fonts: &mut FontNames, max_form_bytes: usize) -> Result<Scan, PdfError> {
-    let scan = walk_page(page, ocgs, all_on, fonts, max_form_bytes).out;
+/// glyphs). With `rgb`, the profiles of the `ICCBased` RGB spaces each paint is in are noted
+/// ([`Scan::rgb`]).
+pub(crate) fn scan_page_rgb(
+    page: &Page<'_>,
+    ocgs: &mut Ocgs,
+    all_on: bool,
+    fonts: &mut FontNames,
+    max_form_bytes: usize,
+    rgb: bool,
+) -> Result<Scan, PdfError> {
+    let mut w = walker(page, ocgs, all_on, fonts, max_form_bytes);
+    w.rgb = rgb;
+    let scan = walked(w, page).out;
     if scan.cut { Err(incomplete_content()) } else { Ok(scan) }
 }
 
 fn walk_page<'w, 'p>(page: &Page<'p>, ocgs: &'w mut Ocgs, all_on: bool, fonts: &'w mut FontNames, max_form_bytes: usize) -> Walker<'w, 'p> {
+    walked(walker(page, ocgs, all_on, fonts, max_form_bytes), page)
+}
+
+/// A walker for `page`, before the walk.
+fn walker<'w, 'p>(page: &Page<'p>, ocgs: &'w mut Ocgs, all_on: bool, fonts: &'w mut FontNames, max_form_bytes: usize) -> Walker<'w, 'p> {
     let off = if all_on { HashSet::new() } else { ocgs.off.clone() };
-    let mut w = Walker {
+    Walker {
         ocgs,
         off,
         xref: page.xref(),
@@ -1093,7 +1119,12 @@ fn walk_page<'w, 'p>(page: &Page<'p>, ocgs: &'w mut Ocgs, all_on: bool, fonts: &
         inks_cut: false,
         rgb_index: HashMap::new(),
         text_rgb: [RunRgb::None; 2],
-    };
+        rgb: false,
+    }
+}
+
+/// `w` with `page` (its own) walked.
+fn walked<'w, 'p>(mut w: Walker<'w, 'p>, page: &Page<'p>) -> Walker<'w, 'p> {
     w.page(page);
     w.inks_cut |= !w.out.text_inks.set(w.out.paints.len(), w.text_inks.map(RunInk::ink));
     w.out.rgb_unknown |= !w.out.text_rgb.set(w.out.paints.len(), w.text_rgb.map(RunRgb::at));
