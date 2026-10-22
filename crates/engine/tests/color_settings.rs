@@ -327,3 +327,23 @@ fn a_working_space_registered_again_takes_its_new_profile() {
     assert!(wide != now, "{wide:?} {now:?}");
     assert!(now.iter().zip(prophoto).all(|(a, b)| (a - b).abs() < 1e-4), "{now:?} vs {prophoto:?}");
 }
+
+/// A profile of another kind can't take the name of a working space in use: it is refused, and the
+/// working space keeps its profile.
+#[test]
+fn a_working_space_name_refuses_a_profile_of_another_kind() {
+    let _g = settings();
+    let old = cms::active_settings();
+    let name = "Working RGB Not To Be CMYK";
+    cms::register_icc(&cms::icc_bytes(cms::WIDE_GAMUT_RGB).unwrap(), Some(name.into())).unwrap();
+    cms::set_active(&cms::ColorSettings { rgb: name.into(), ..old.clone() }).unwrap();
+    let cmyk = cms::icc_bytes(cms::GENERIC_CMYK).unwrap();
+    let checked = cms::check_icc(&cmyk, Some(name.into()));
+    let registered = cms::register_icc(&cmyk, Some(name.into()));
+    let kind = cms::profile(name).map(|p| p.kind);
+    cms::set_active(&old).unwrap();
+    assert!(checked.is_err() && registered.is_err(), "{checked:?} {registered:?}");
+    assert_eq!(kind, Some(cms::ProfileKind::Rgb));
+    // Not in use, the name may take another kind.
+    assert_eq!(cms::register_icc(&cmyk, Some(name.into())).unwrap().kind, cms::ProfileKind::Cmyk);
+}

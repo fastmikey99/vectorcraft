@@ -272,6 +272,14 @@ fn registrable(bytes: &[u8], name: Option<String>) -> Result<(IccProfile, Profil
     if !p.usable() {
         return Err(CmsError::Unsupported(format!("{}: no usable transform to/from sRGB", p.name)));
     }
+    // A working space registered again takes the new profile at once: it must be of its kind.
+    let st = active_settings();
+    let slot = [(&st.rgb, ProfileKind::Rgb, "RGB"), (&st.cmyk, ProfileKind::Cmyk, "CMYK")].into_iter().find(|(n, ..)| canonical_name(n) == p.name);
+    if let Some((_, kind, label)) = slot
+        && kind != p.kind
+    {
+        return Err(CmsError::Unsupported(format!("{} is the {label} working space: a profile of another kind can't take its name", p.name)));
+    }
     let info = ProfileInfo { name: p.name.clone(), kind: p.kind, builtin: false };
     Ok((p, info))
 }

@@ -611,7 +611,7 @@ fn device_rgb_as_an_array_and_in_readings_the_walk_does_not_follow_keeps_its_num
     let rgb = "ColorSpace(DeviceRgb)";
     assert!(matches!(c.space_of(rgb, 3, None, Rgb::Unknown), Space::Profile(_)));
     assert_eq!(c.space_of(rgb, 3, None, Rgb::Nested), Space::Rgb);
-    c.page_device_rgb = true;
+    c.begin_page(true);
     assert_eq!(c.space_of(rgb, 3, None, Rgb::Unknown), Space::Rgb);
     assert_eq!(c.space_of(rgb, 3, None, Rgb::NotIcc), Space::Rgb);
 }

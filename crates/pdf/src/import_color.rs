@@ -146,7 +146,9 @@ pub(crate) struct Colors<'p> {
     /// The file's `ICCBased` RGB profiles (found once, when a colour first needs them).
     file_rgb: Option<FileRgb>,
     /// The page's walk found DeviceRGB colours set (`Scan::device_rgb`).
-    pub page_device_rgb: bool,
+    page_device_rgb: bool,
+    /// The page's walk's profiles met, and their conversions ([`Colors::page_transform`]).
+    page_profiles: Vec<(Arc<[u8]>, Option<usize>)>,
 }
 
 /// The `ICCBased` RGB profiles of a file, by how the interpreter reads their colours: one whose
@@ -217,6 +219,7 @@ impl<'p> Colors<'p> {
             srgb: None,
             file_rgb: None,
             page_device_rgb: false,
+            page_profiles: vec![],
         }
     }
 
@@ -399,7 +402,7 @@ impl<'p> Colors<'p> {
         }
         match rgb {
             Rgb::Icc(p) => {
-                if let Some(k) = self.transform(p) {
+                if let Some(k) = self.page_transform(p) {
                     return Space::Profile(k);
                 }
             }
@@ -432,6 +435,23 @@ impl<'p> Colors<'p> {
         }
         let f = self.file_rgb();
         f.other == Group::Several || f.srgb == Group::Several || (matches!(f.srgb, Group::One(_)) && scan.device_rgb)
+    }
+
+    /// A new page begins: the profiles its walk notes are its own ([`Colors::page_transform`]).
+    pub fn begin_page(&mut self, device_rgb: bool) {
+        self.page_device_rgb = device_rgb;
+        self.page_profiles.clear();
+    }
+
+    /// [`Colors::transform`] for a profile of the page's walk (`Scan::rgb_profiles`): found by
+    /// its bytes once, then by the shared copy every paint of the page refers to.
+    fn page_transform(&mut self, p: &Arc<[u8]>) -> Option<usize> {
+        if let Some((_, k)) = self.page_profiles.iter().find(|(q, _)| Arc::ptr_eq(q, p)) {
+            return *k;
+        }
+        let k = self.transform(p);
+        self.page_profiles.push((p.clone(), k));
+        k
     }
 
     /// The index in [`Colors::transforms`] of the conversion from RGB profile `p` into the working

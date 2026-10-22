@@ -303,7 +303,7 @@ fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_p
         if !(rgb && counted) {
             scan.forget_rgb();
         }
-        b.colors.page_device_rgb = scan.device_rgb;
+        b.colors.begin_page(scan.device_rgb);
         if route {
             let mut seen = HashSet::new();
             let marked: Vec<usize> = scan.tags.iter().filter_map(|(_, g)| g.map(|g| top_group(g, &ocgs))).filter(|g| seen.insert(*g)).collect();
