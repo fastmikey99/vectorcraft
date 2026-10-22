@@ -369,11 +369,13 @@ pub fn same_rgb_profile(a: &[u8], b: &[u8], intent: Intent) -> bool {
         return true;
     }
     let (Ok(pa), Ok(pb)) = (IccProfile::from_bytes(None, a), IccProfile::from_bytes(None, b)) else { return false };
-    same_colours(&pa, &pb, intent)
+    same_colours(&pa, &pb, intent, false)
 }
 
-/// [`same_rgb_profile`] for parsed profiles.
-fn same_colours(pa: &IccProfile, pb: &IccProfile, intent: Intent) -> bool {
+/// [`same_rgb_profile`] for parsed profiles: as sources (their colours read through each). With
+/// `as_destination`, colours converted into each (from the reference space) must come out with
+/// the same numbers too: a profile's tables into it can differ from its tables out of it.
+fn same_colours(pa: &IccProfile, pb: &IccProfile, intent: Intent, as_destination: bool) -> bool {
     if pa.kind != ProfileKind::Rgb || pb.kind != ProfileKind::Rgb {
         return false;
     }
@@ -384,7 +386,9 @@ fn same_colours(pa: &IccProfile, pb: &IccProfile, intent: Intent) -> bool {
     let same = |rgb: [f32; 3]| {
         intents.iter().all(|&i| {
             let at = |p: &IccProfile| p.to_rgb_of(&reference, &rgb, i, false);
+            let into = |p: &IccProfile| reference.to_rgb_of(p, &rgb, i, false);
             matches!((at(pa), at(pb)), (Some(x), Some(y)) if near(x, y))
+                && (!as_destination || matches!((into(pa), into(pb)), (Some(x), Some(y)) if near(x, y)))
         })
     };
     const STEPS: [f32; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
@@ -421,7 +425,8 @@ impl RgbTransform {
         if s.kind != ProfileKind::Rgb || d.kind != ProfileKind::Rgb {
             return None;
         }
-        let same = src == &dest.icc[..] || same_colours(&s, &d, dest.intent);
+        // Kept numbers stand for a conversion out of `src` and into the destination.
+        let same = src == &dest.icc[..] || same_colours(&s, &d, dest.intent, true);
         Some(Self { src: s, dest: d, intent: dest.intent, bpc: dest.bpc, same })
     }
 

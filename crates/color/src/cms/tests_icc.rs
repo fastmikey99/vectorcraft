@@ -304,6 +304,12 @@ fn rgb_profiles_whose_curves_part_between_grid_points_are_not_the_same() {
 /// An RGB profile made of lookup tables (sRGB's colours through Lab), whose perceptual tables
 /// darken by `perceptual` (1: the same as the colorimetric ones).
 fn rgb_lut_profile(perceptual: f32) -> Vec<u8> {
+    rgb_lut_profile_with(perceptual, perceptual)
+}
+
+/// [`rgb_lut_profile`], its perceptual table out of the profile (A2B0) darkening by `out` and the
+/// one into it (B2A0) by `into`.
+fn rgb_lut_profile_with(out: f32, into: f32) -> Vec<u8> {
     use moxcms::{
         ColorProfile, DataColorSpace, LutMultidimensionalType, LutStore, LutWarehouse, Matrix3d, ProfileClass, RenderingIntent, ToneReprCurve,
         Vector3d,
@@ -351,8 +357,8 @@ fn rgb_lut_profile(perceptual: f32) -> Vec<u8> {
     p.rendering_intent = RenderingIntent::Perceptual;
     p.white_point = moxcms::WHITE_POINT_D50.to_xyzd();
     p.media_white_point = Some(p.white_point);
-    for (intent, k) in [(0, perceptual), (1, 1.0), (2, 1.0)] {
-        let (fwd, back) = (Some(table(a2b(k))), Some(table(b2a(k))));
+    for (intent, k, kb) in [(0, out, into), (1, 1.0, 1.0), (2, 1.0, 1.0)] {
+        let (fwd, back) = (Some(table(a2b(k))), Some(table(b2a(kb))));
         match intent {
             0 => (p.lut_a_to_b_perceptual, p.lut_b_to_a_perceptual) = (fwd, back),
             1 => (p.lut_a_to_b_colorimetric, p.lut_b_to_a_colorimetric) = (fwd, back),
@@ -375,4 +381,13 @@ fn profiles_are_the_same_only_for_the_intent_whose_tables_agree() {
         let w = WorkingRgb { icc: plain.clone().into(), intent, bpc: false };
         assert_eq!(RgbTransform::new(&darker, &w).unwrap().keeps_numbers(), kept, "{intent:?}");
     }
+    // The same tables out of them, other perceptual ones into them: the same as sources (what
+    // grouping a file's profiles asks), not as a conversion's destination (what keeping numbers
+    // asks).
+    let other_into = rgb_lut_profile_with(1.0, 0.8);
+    assert!(same_rgb_profile(&plain, &other_into, Intent::Perceptual));
+    let w = WorkingRgb { icc: other_into.into(), intent: Intent::Perceptual, bpc: false };
+    assert!(!RgbTransform::new(&plain, &w).unwrap().keeps_numbers());
+    let w = WorkingRgb { icc: w.icc, intent: Intent::RelativeColorimetric, bpc: false };
+    assert!(RgbTransform::new(&plain, &w).unwrap().keeps_numbers());
 }
