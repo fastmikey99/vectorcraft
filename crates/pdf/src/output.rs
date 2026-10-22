@@ -358,7 +358,7 @@ impl ColorOut {
                 // Decoded RGB images are sRGB, so their pixels must match their new tag.
                 if self.rgb_icc.is_some() && self.dest.as_ref().is_none_or(|d| d.model == Model::Rgb) {
                     let space = self.dest.as_ref().map_or(&*self.source, |d| &d.cms);
-                    return Some(Pixels::Rgb(Box::new(ProofLut::build(|rgb| space.srgb_to_rgb(rgb)))));
+                    return Some(Pixels::Rgb(Box::new(ProofLut::fine(|rgb| space.srgb_to_rgb(rgb)))));
                 }
                 let d = self.dest.as_ref()?;
                 let intent = self.intent;
@@ -375,7 +375,7 @@ impl ColorOut {
                     // Images are sRGB: converted unless the destination is sRGB, they keep their
                     // numbers or RGB is tagged as sRGB.
                     _ if d.srgb || d.keep || self.tagged => None,
-                    _ => Some(Pixels::Rgb(Box::new(ProofLut::build(|rgb| d.cms.srgb_to_rgb(rgb))))),
+                    _ => Some(Pixels::Rgb(Box::new(ProofLut::fine(|rgb| d.cms.srgb_to_rgb(rgb))))),
                 }
             })
             .as_ref()

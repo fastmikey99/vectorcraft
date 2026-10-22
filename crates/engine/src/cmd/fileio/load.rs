@@ -519,7 +519,11 @@ pub fn raster_image(bytes: &[u8]) -> Result<RasterImage> {
     }
     if psdread::is_psd(bytes) {
         let cms = vectorcraft_color::cms::active();
-        return as_png(psdread::decode(bytes, MAX_RASTER_ALLOC, |c| cms.cmyk_to_srgb(c, false)).map_err(err)?, ppi);
+        let mut img = psdread::decode(bytes, MAX_RASTER_ALLOC, |c| cms.cmyk_to_srgb(c, false)).map_err(err)?;
+        if let Some(icc) = psdread::rgb_profile(bytes) {
+            psd_into_srgb(&mut img, icc, cms.settings().intent);
+        }
+        return as_png(img, ppi);
     }
     let mut reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(err)?;
     if reader.format().is_none() && super::tgaread::is_targa(bytes) {
@@ -563,6 +567,21 @@ pub fn raster_image(bytes: &[u8]) -> Result<RasterImage> {
         super::tgaread::fix_alpha(bytes, &mut img);
     }
     as_png(img, ppi)
+}
+
+/// An RGB Photoshop document's merged image `img`, in the numbers of the profile it embeds
+/// (`icc`), as the sRGB pixels a document's images are: converted with `intent`
+/// unless the profile has sRGB's colours, when the numbers stand. A profile that can't be read
+/// leaves them as they are (read as sRGB, as before).
+fn psd_into_srgb(img: &mut image::RgbaImage, icc: &[u8], intent: vectorcraft_color::cms::Intent) {
+    use vectorcraft_color::cms;
+    if cms::icc_bytes(cms::SRGB).is_ok_and(|srgb| cms::same_rgb_profile(icc, &srgb)) {
+        return;
+    }
+    let Ok(profile) = cms::IccProfile::from_bytes(None, icc) else { return };
+    let width = img.width() as usize;
+    // `false` leaves the pixels untouched: read as sRGB, as without a profile.
+    let _ = profile.rgba8_to_srgb(img.as_mut(), width, intent);
 }
 
 /// `img` stored as a PNG that keeps the file's resolution.

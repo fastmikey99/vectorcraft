@@ -307,13 +307,26 @@ pub fn icc_bytes(name: &str) -> Result<Arc<[u8]>, CmsError> {
     Ok(bytes)
 }
 
-/// The ICC profile of the RGB working space, unless it is sRGB: what a PDF import compares an
-/// `ICCBased` RGB space with, so colours already in the working space keep their numbers instead
-/// of going through sRGB (see [`same_rgb_profile`]). `None` for sRGB (the import's own
-/// conversion target) or a working space that can't be written as a profile.
-pub fn working_rgb_icc() -> Option<Arc<[u8]>> {
+/// The RGB working space as an import converts colours into it: its ICC profile, with the colour
+/// settings' intent and black-point compensation ([`working_rgb`]).
+#[derive(Clone, Debug)]
+pub struct WorkingRgb {
+    pub icc: Arc<[u8]>,
+    pub intent: Intent,
+    pub bpc: bool,
+}
+
+/// The RGB working space, unless it is sRGB: what a PDF import converts `ICCBased` RGB colours
+/// (and the sRGB colours the interpreter gives for other spaces) into, so they land in the working
+/// space instead of keeping sRGB numbers there; colours already in it keep their numbers
+/// ([`RgbTransform`]). `None` for sRGB (the import's own conversion target) or a working space
+/// that can't be written as a profile.
+pub fn working_rgb() -> Option<WorkingRgb> {
     let st = active_settings();
-    (canonical_name(&st.rgb) != SRGB).then(|| icc_bytes(&st.rgb).ok()).flatten()
+    if canonical_name(&st.rgb) == SRGB {
+        return None;
+    }
+    Some(WorkingRgb { icc: icc_bytes(&st.rgb).ok()?, intent: st.intent, bpc: st.bpc })
 }
 
 /// Whether RGB profiles `a` and `b` (ICC files) describe the same colours: the same bytes, or
@@ -324,6 +337,11 @@ pub fn same_rgb_profile(a: &[u8], b: &[u8]) -> bool {
         return true;
     }
     let (Ok(pa), Ok(pb)) = (IccProfile::from_bytes(None, a), IccProfile::from_bytes(None, b)) else { return false };
+    same_colours(&pa, &pb)
+}
+
+/// [`same_rgb_profile`] for parsed profiles.
+fn same_colours(pa: &IccProfile, pb: &IccProfile) -> bool {
     if pa.kind != ProfileKind::Rgb || pb.kind != ProfileKind::Rgb {
         return false;
     }
@@ -331,11 +349,56 @@ pub fn same_rgb_profile(a: &[u8], b: &[u8]) -> bool {
     STEPS.iter().all(|&r| {
         STEPS.iter().all(|&g| {
             STEPS.iter().all(|&bl| {
-                pa.to_rgb_of(&pb, &[r, g, bl], Intent::RelativeColorimetric, false)
+                pa.to_rgb_of(pb, &[r, g, bl], Intent::RelativeColorimetric, false)
                     .is_some_and(|o| o.iter().zip([r, g, bl]).all(|(x, y)| (x - y).abs() <= 0.5 / 255.0))
             })
         })
     })
+}
+
+/// RGB colours of one ICC profile as numbers of another (the RGB working space, [`WorkingRgb`]):
+/// converted directly with its intent and black-point compensation, not through sRGB, so colours
+/// outside sRGB keep their place. Colours of a profile with the destination's colours
+/// ([`same_rgb_profile`]) keep their numbers exactly.
+pub struct RgbTransform {
+    src: IccProfile,
+    dest: IccProfile,
+    intent: Intent,
+    bpc: bool,
+    same: bool,
+}
+
+impl std::fmt::Debug for RgbTransform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RgbTransform").field("src", &self.src.name).field("dest", &self.dest.name).field("same", &self.same).finish()
+    }
+}
+
+impl RgbTransform {
+    /// RGB profile `src` (an ICC file) into `dest`'s numbers; `None` when either isn't a readable
+    /// RGB profile.
+    pub fn new(src: &[u8], dest: &WorkingRgb) -> Option<Self> {
+        let s = IccProfile::from_bytes(Some("source".into()), src).ok()?;
+        let d = IccProfile::from_bytes(Some("destination".into()), &dest.icc).ok()?;
+        if s.kind != ProfileKind::Rgb || d.kind != ProfileKind::Rgb {
+            return None;
+        }
+        let same = src == &dest.icc[..] || same_colours(&s, &d);
+        Some(Self { src: s, dest: d, intent: dest.intent, bpc: dest.bpc, same })
+    }
+
+    /// Whether colours keep their numbers (the two profiles have the same colours).
+    pub fn keeps_numbers(&self) -> bool {
+        self.same
+    }
+
+    /// RGB `rgb` (0..1) in the destination's numbers; `None` when the conversion can't be made.
+    pub fn apply(&self, rgb: [f32; 3]) -> Option<[f32; 3]> {
+        if self.same {
+            return Some(rgb);
+        }
+        self.src.to_rgb_of(&self.dest, &rgb.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }), self.intent, self.bpc)
+    }
 }
 
 /// Load a `.icc`/`.icm` file from disk (native only).
@@ -844,32 +907,48 @@ pub const PROCESS_PLATES: [&str; 4] = ["Cyan", "Magenta", "Yellow", "Black"];
 
 const LUT_N: usize = 17;
 
-/// A 17³ RGB → RGB lookup table with trilinear interpolation.
+/// A 17³ RGB → RGB lookup table with trilinear interpolation (or another size,
+/// [`ProofLut::build_sized`]).
 pub struct ProofLut {
+    n: usize,
     data: Vec<[f32; 3]>,
 }
 
+/// The size of the tables [`ProofLut::fine`] builds: images converted on export, whose samples
+/// the 17³ table moved by up to 1 ΔE2000 near black (sRGB into Adobe RGB).
+pub const FINE_LUT_N: usize = 65;
+
 impl ProofLut {
     pub fn build(f: impl Fn([f32; 3]) -> [f32; 3]) -> Self {
-        let n = LUT_N;
+        Self::build_sized(LUT_N, f)
+    }
+
+    /// A [`FINE_LUT_N`]³ table: for converting images, where every sample counts.
+    pub fn fine(f: impl Fn([f32; 3]) -> [f32; 3]) -> Self {
+        Self::build_sized(FINE_LUT_N, f)
+    }
+
+    /// An `n`³ table (`n` at least 2).
+    pub fn build_sized(n: usize, f: impl Fn([f32; 3]) -> [f32; 3]) -> Self {
+        let n = n.max(2);
         let mut data = Vec::with_capacity(n * n * n);
+        let s = (n - 1) as f32;
         for r in 0..n {
             for g in 0..n {
                 for b in 0..n {
-                    let s = (n - 1) as f32;
                     data.push(f([r as f32 / s, g as f32 / s, b as f32 / s]));
                 }
             }
         }
-        Self { data }
+        Self { n, data }
     }
     pub fn apply(&self, rgb: [f32; 3]) -> [f32; 3] {
-        let n = LUT_N;
+        let n = self.n;
         let s = (n - 1) as f32;
-        let p = rgb.map(|v| v.clamp(0.0, 1.0) * s);
+        let p = rgb.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) * s } else { 0.0 });
         let i = p.map(|v| (v.floor() as usize).min(n - 2));
         let t = [p[0] - i[0] as f32, p[1] - i[1] as f32, p[2] - i[2] as f32];
-        let at = |r: usize, g: usize, b: usize| self.data[(r * n + g) * n + b];
+        let at = |r: usize, g: usize, b: usize| self.data.get((r * n + g) * n + b).copied().unwrap_or_default();
         let mut out = [0.0f32; 3];
         for (dr, wr) in [(0, 1.0 - t[0]), (1, t[0])] {
             for (dg, wg) in [(0, 1.0 - t[1]), (1, t[1])] {

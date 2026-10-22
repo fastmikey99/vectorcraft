@@ -296,6 +296,27 @@ impl IccProfile {
         Some((lin[0] * y(&hub.red_colorant) + lin[1] * y(&hub.green_colorant) + lin[2] * y(&hub.blue_colorant)).clamp(0.0, 0.5))
     }
 
+    /// Straight RGBA pixels of this RGB profile (8 bits a channel, rows of `width` pixels) in
+    /// sRGB, converted in place with `intent`, alpha kept: how an image carrying its own profile
+    /// becomes the sRGB pixels a document's images are. `false`, the pixels untouched, when this
+    /// isn't an RGB profile or no transform can be built.
+    pub fn rgba8_to_srgb(&self, px: &mut [u8], width: usize, intent: Intent) -> bool {
+        if self.kind != ProfileKind::Rgb || width == 0 {
+            return false;
+        }
+        let Ok(xf) = self.profile.create_transform_8bit(Layout::Rgba, &self.srgb, Layout::Rgba, Self::opts(intent)) else { return false };
+        let row = width.saturating_mul(4);
+        let mut out = vec![0u8; row];
+        for line in px.chunks_mut(row) {
+            let Some(dst) = out.get_mut(..line.len()) else { return false };
+            if xf.transform(line, dst).is_err() {
+                return false;
+            }
+            line.copy_from_slice(dst);
+        }
+        true
+    }
+
     /// Whether transforms can be built for this profile (checked at registration).
     pub fn usable(&self) -> bool {
         self.to_xf(Intent::RelativeColorimetric).is_some() && self.inverse_xf(Intent::RelativeColorimetric).is_some()

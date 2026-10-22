@@ -21,9 +21,9 @@ use vectorcraft_doc::{
 };
 use vectorcraft_geom::{FillRule, PathData};
 
-use crate::import_color::{Colors, Native};
+use crate::import_color::Colors;
 use crate::import_mask::{MaskSpec, contains, is_rectangle, luminance, mask_spec, white_cover};
-use crate::import_scan::{FontNames, MAX_NESTING, Ocgs, Scan, TextOverprint, Walked, all_on, hides_forms, scan_page, tag_key};
+use crate::import_scan::{FontNames, MAX_NESTING, Ocgs, Rgb, Scan, TextOverprint, Walked, all_on, hides_forms, scan_page, tag_key};
 use crate::import_shading::{clipped, extend_clip, fold_stop_opacity, gradient_shape, mesh_shading, shading_gradient};
 use crate::import_text::{Families, LineFacts, Look, Placement, TextLine, Upright};
 use crate::{CropTo, ImportOptions, ImportReport, PdfError, TextAs};
@@ -292,9 +292,17 @@ fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_p
         // page keeps them only when it uses such an ink and the interpreter draws as many paths
         // there as the walk counts.
         let tied = scan.inks.iter().any(|n| b.colors.tied(n));
-        if !(tied && drawn_paths(page, Context::new(xf, ab, &cache, pdf.xref(), settings.clone())) == Some(scan.paints.len())) {
+        // Likewise the RGB spaces it found pick between profiles the interpreter's colours don't
+        // name, where the file's profiles leave it open (Colors::rgb_space).
+        let rgb = b.colors.rgb_needs_walk(&scan);
+        let counted = (tied || rgb) && drawn_paths(page, Context::new(xf, ab, &cache, pdf.xref(), settings.clone())) == Some(scan.paints.len());
+        if !(tied && counted) {
             scan.inks.clear();
         }
+        if !(rgb && counted) {
+            scan.forget_rgb();
+        }
+        b.colors.page_device_rgb = scan.device_rgb;
         if route {
             let mut seen = HashSet::new();
             let marked: Vec<usize> = scan.tags.iter().filter_map(|(_, g)| g.map(|g| top_group(g, &ocgs))).filter(|g| seen.insert(*g)).collect();
@@ -1411,14 +1419,18 @@ impl<'p> Builder<'p> {
     fn paint(&mut self, p: &craft_pdf::interpret::Paint<'_>, stroke: bool, walked: Option<Walked>) -> (Paint, f32) {
         let pattern = matches!(p, craft_pdf::interpret::Paint::Pattern(_));
         let inks = walked.and_then(|w| self.scan.ink(w, stroke, pattern));
+        let rgb = walked.map_or(Rgb::Unknown, |w| self.scan.rgb(w, stroke, pattern));
         match p {
             craft_pdf::interpret::Paint::Color(c) => {
                 let [r, g, b, a] = c.to_rgba().components();
-                let paint = self.colors.solid(c, inks).map_or_else(|| Paint::solid(Color::rgb(round3(r), round3(g), round3(b))), Native::paint);
+                let paint = match self.colors.solid(c, inks, rgb) {
+                    Some(n) => n.paint(),
+                    None => Paint::solid(self.colors.srgb_in_working([round3(r), round3(g), round3(b)])),
+                };
                 (paint, a)
             }
             craft_pdf::interpret::Paint::Pattern(pat) => match pat.as_ref() {
-                Pattern::Shading(sp) => match shading_gradient(sp, &mut self.colors, inks) {
+                Pattern::Shading(sp) => match shading_gradient(sp, &mut self.colors, inks, rgb) {
                     Some((g, _)) => (Paint::Gradient(Box::new(g)), sp.opacity),
                     None => {
                         self.warn("function-based shadings (and very large meshes) are imported as a flat colour");
@@ -1855,7 +1867,12 @@ impl<'a> Device<'a> for Builder<'_> {
         };
         // Patch and triangle meshes are gradient meshes.
         if let (PathDrawMode::Fill(_), Some(sp)) = (draw_mode, shading)
-            && let Some(meshes) = mesh_shading(sp, &mut self.colors, walked.and_then(|w| self.scan.ink(w, false, true)))
+            && let Some(meshes) = mesh_shading(
+                sp,
+                &mut self.colors,
+                walked.and_then(|w| self.scan.ink(w, false, true)),
+                walked.map_or(Rgb::Unknown, |w| self.scan.rgb(w, false, true)),
+            )
         {
             self.draw_meshes(meshes, &bp, sp.opacity);
             return;

@@ -230,15 +230,47 @@ post({ type: 'vectorcraft:colorSettings', id: 'cs1',
   unreadable profile, an unknown space, a field of the wrong type, an empty message). Profiles
   registered before a refused one stay registered; the settings are left unchanged.
 
-**PDFs in the RGB working space keep their numbers.** A PDF's `ICCBased` RGB colours are read
-through their profile into sRGB numbers. With an RGB working space other than sRGB those numbers
-were then taken as working-space numbers, so a file tagged with the working space itself (the
-prep worker's Adobe RGB output, read with Adobe RGB as the working space) came out more
-saturated each time it was read: ΔE2000 about 4–7 per round on Supacolour's seps. Now, when every
-3-component `ICCBased` space of the file has the working space's profile (the same file, or one
-giving the same colours), its numbers are kept as they are. Files with other or mixed RGB
-profiles read as before. This holds for the CLI and desktop app too (any `document.open` or
-place of a PDF).
+**Tagged RGB lands in the RGB working space.** A PDF's `ICCBased` RGB colours used to be read
+through their profile into sRGB numbers (and a profile naming the sRGB device model was taken as
+DeviceRGB). With an RGB working space other than sRGB those sRGB numbers were then taken as
+working-space numbers: a file tagged with the working space itself (the prep worker's Adobe RGB
+output, read with Adobe RGB as the working space) came out more saturated each time it was read
+(ΔE2000 about 4–7 per round on Supacolour's seps), and an sRGB-tagged customer file more saturated
+once (ΔE2000 up to about 10 on saturated colours). Now, with a working space other than sRGB:
+
+- RGB in any profile is converted into the working space, directly (not through sRGB) with the
+  colour settings' intent and black-point compensation; colours in the working space's own
+  profile (the same file, or one giving the same colours) keep their numbers exactly. Solid
+  fills, strokes and text, axial, radial and mesh shadings alike.
+- On a page with several RGB profiles, or with sRGB-tagged and DeviceRGB colours together, the
+  page's walk of its content says which colour is in which space (when it can be matched with
+  the reader's paths; otherwise a tagged colour goes through sRGB into the working space and a
+  DeviceRGB-looking one keeps its numbers).
+- DeviceRGB numbers are the working space's, and stand.
+- Colours the reader can only give as sRGB (Lab, CalRGB, Indexed, mixed DeviceN inks) are
+  converted from sRGB into the working space instead of being taken as its numbers.
+- Images are unchanged: they are sRGB in a document, as before (colours outside sRGB clip).
+
+With sRGB as the working space nothing changes. This holds for the CLI and desktop app too (any
+`document.open` or place of a PDF).
+
+**A PSD is read in the profile it embeds.** An 8- or 16-bit RGB Photoshop document's merged image
+is converted from its embedded ICC profile (resource 1039) into the sRGB pixels a document's images
+are; an sRGB profile (or none) leaves the numbers as they are. Before, the profile was ignored and
+the numbers read as sRGB whatever the working space (choosing the working space didn't change
+it), so an Adobe RGB PSD came out duller. Colours outside sRGB clip, as for any image. CMYK,
+grey, Lab and 32-bit documents read as before.
+
+**Images keep their colour on export.** Converting images to an RGB destination (`output:
+{conversion: "destination"}`) uses a 65³ table instead of 17³: an sRGB image written as Adobe RGB
+moved by up to 1 ΔE2000 near black, now about 0.6 at most (8-bit rounding).
+
+**What the host sends.** Give the editor the colour settings the next prep will read its save
+with: the same `rgb` (and `cmyk`, `intent`, `bpc`). A PDF saved with Preserve Editing (the default)
+reopens from the native document it carries, whose RGB numbers are the editor's working-space
+numbers, whatever the PDF's tags say; a working space that differs on the way back shifts them.
+`vectorcraft:export` accepts `output: {conversion: "preserveSource"}` only; a tagged destination
+export isn't available to the page.
 
 ### Per-job units (Reporter fork)
 

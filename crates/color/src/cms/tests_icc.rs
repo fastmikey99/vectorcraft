@@ -233,3 +233,39 @@ fn rgb_profiles_are_the_same_when_their_colours_are() {
     assert!(!same_rgb_profile(&cmyk, &wide), "not RGB");
     assert!(!same_rgb_profile(b"not a profile", &wide));
 }
+
+#[test]
+fn rgb_transforms_convert_into_the_working_space_and_keep_its_own_numbers() {
+    let wide = WorkingRgb { icc: icc_bytes(WIDE_GAMUT_RGB).unwrap(), intent: Intent::Perceptual, bpc: true };
+    // The working space's own profile, in another file: the numbers stand, exactly.
+    let mut again = wide.icc.to_vec();
+    again[24..26].copy_from_slice(&2001u16.to_be_bytes());
+    let same = RgbTransform::new(&again, &wide).unwrap();
+    assert!(same.keeps_numbers());
+    assert_eq!(same.apply([0.2, 0.6, 0.4]), Some([0.2, 0.6, 0.4]));
+    // sRGB into the wider space: the same colour (its display sRGB comes back), less saturated numbers.
+    let srgb = RgbTransform::new(&icc_bytes(SRGB).unwrap(), &wide).unwrap();
+    assert!(!srgb.keeps_numbers());
+    let red = srgb.apply([0.9, 0.1, 0.1]).unwrap();
+    assert!(red[0] < 0.9, "{red:?}");
+    let back = icc::builtin_rgb(WIDE_GAMUT_RGB).unwrap().to_srgb(&red, Intent::RelativeColorimetric).unwrap();
+    assert!(back.iter().zip([0.9, 0.1, 0.1]).all(|(a, b)| (a - b).abs() < 1.0 / 255.0), "{back:?}");
+    assert!(RgbTransform::new(&icc_bytes(GENERIC_CMYK).unwrap(), &wide).is_none(), "not RGB");
+    assert!(RgbTransform::new(b"not a profile", &wide).is_none());
+}
+
+#[test]
+fn rgba_pixels_of_a_profile_become_srgb_with_their_alpha() {
+    let wide = icc::builtin_rgb(WIDE_GAMUT_RGB).unwrap();
+    let mut px = vec![230, 26, 26, 255, 10, 200, 40, 128, 255, 255, 255, 0];
+    assert!(wide.rgba8_to_srgb(&mut px, 3, Intent::RelativeColorimetric));
+    let want = |v: [f32; 3]| wide.to_srgb(&v.map(|c| c / 255.0), Intent::RelativeColorimetric).unwrap().map(|c| (c * 255.0).round() as i32);
+    for (p, src) in px.chunks(4).zip([[230.0, 26.0, 26.0], [10.0, 200.0, 40.0], [255.0; 3]]) {
+        let w = want(src);
+        assert!(p.iter().zip(w).all(|(a, b)| (*a as i32 - b).abs() <= 1), "{p:?} vs {w:?}");
+    }
+    assert_eq!([px[3], px[7], px[11]], [255, 128, 0], "alpha kept");
+    assert!(px[0] == 255 && px[1] < 26, "a saturated red is more saturated in sRGB: {px:?}");
+    let cmyk = IccProfile::from_bytes(None, &icc_bytes(GENERIC_CMYK).unwrap()).unwrap();
+    assert!(!cmyk.rgba8_to_srgb(&mut px, 3, Intent::RelativeColorimetric), "not RGB");
+}

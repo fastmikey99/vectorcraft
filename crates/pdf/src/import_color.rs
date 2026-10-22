@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Debug, Write as _};
+use std::sync::Arc;
 
 use craft_pdf::interpret::Function;
 use craft_pdf::interpret::color::ColorSpace;
@@ -18,8 +19,11 @@ use craft_pdf::syntax::object::array::FlexArrayIter;
 use craft_pdf::syntax::object::{Array, Dict, MaybeRef, Name, Object, Stream};
 use craft_pdf::syntax::reader::{Reader, ReaderExt};
 use smallvec::SmallVec;
+use vectorcraft_color::cms::{self, RgbTransform, WorkingRgb};
 use vectorcraft_color::swatch::REGISTRATION;
 use vectorcraft_color::{Color, Paint, Swatch};
+
+use crate::import_scan::Rgb;
 
 /// The longest `Debug` text read: a colour whose space is longer (a big sampled tint transform)
 /// imports as RGB.
@@ -92,6 +96,8 @@ pub(crate) enum Space {
     Rgb,
     /// An `ICCBased` RGB space whose numbers are taken as they are (see `Colors::uncalibrated_rgb`).
     IccRgb,
+    /// RGB in a profile, converted into the RGB working space (index into `Colors::transforms`).
+    Profile(usize),
     Cmyk,
     /// A Separation or DeviceN space (index into `Colors::spaces`).
     Inks(usize),
@@ -128,10 +134,40 @@ pub(crate) struct Colors<'p> {
     /// on for an editor's own document (`.ai`), so its art keeps the RGB numbers the file has; off
     /// for PDFs, whose profiles stand.
     pub uncalibrated_rgb: bool,
-    /// The RGB working space's profile (`ImportOptions::working_rgb`), and whether every
-    /// `ICCBased` RGB space of the file is it (found once, when a colour first needs it).
-    pub working_rgb: Option<std::sync::Arc<[u8]>>,
-    in_working_rgb: Option<bool>,
+    /// The RGB working space when it isn't sRGB (`ImportOptions::working_rgb`): RGB colours in a
+    /// profile, and the sRGB the interpreter gives for other spaces, are converted into it
+    /// ([`Colors::rgb_space`], [`Colors::srgb_in_working`]).
+    pub working_rgb: Option<WorkingRgb>,
+    /// Conversions from the profiles met into the working space, by profile (`None`: it can't be
+    /// read as an RGB profile).
+    transforms: Vec<(Arc<[u8]>, Option<RgbTransform>)>,
+    /// sRGB into the working space (built when first needed; `None` inside: it can't be).
+    srgb: Option<Option<RgbTransform>>,
+    /// The file's `ICCBased` RGB profiles (found once, when a colour first needs them).
+    file_rgb: Option<FileRgb>,
+    /// The page's walk found DeviceRGB colours set (`Scan::device_rgb`).
+    pub page_device_rgb: bool,
+}
+
+/// The `ICCBased` RGB profiles of a file, by how the interpreter reads their colours: one whose
+/// header names the sRGB device model as DeviceRGB, the others as `ICCBased` (their `Debug`
+/// text names no profile).
+#[derive(Clone, Copy, Debug)]
+struct FileRgb {
+    /// Read as DeviceRGB.
+    srgb: Group,
+    /// Read as `ICCBased`.
+    other: Group,
+}
+
+/// Profiles of one kind in a file.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Group {
+    None,
+    /// All with the colours of one profile (index into `Colors::transforms`).
+    One(usize),
+    /// Several, or ones that can't be read (a Lab profile looks the same, too).
+    Several,
 }
 
 /// `v`'s `Debug` text, or `None` past [`DEBUG_LIMIT`] (formatting stops there).
@@ -177,16 +213,20 @@ impl<'p> Colors<'p> {
             mixed: false,
             uncalibrated_rgb: false,
             working_rgb: None,
-            in_working_rgb: None,
+            transforms: vec![],
+            srgb: None,
+            file_rgb: None,
+            page_device_rgb: false,
         }
     }
 
-    /// A solid color in its own model; `None`: use its RGB. `inks`: the colorant names of the
-    /// space the page's walk found it painted in ([`Colors::space_of`]).
-    pub fn solid(&mut self, c: &craft_pdf::interpret::color::Color, inks: Option<&[String]>) -> Option<Native> {
+    /// A solid color in its own model; `None`: use its RGB ([`Colors::srgb_in_working`]). `inks` and
+    /// `rgb`: the colorant names and the RGB space of the space the page's walk found it painted
+    /// in ([`Colors::space_of`]).
+    pub fn solid(&mut self, c: &craft_pdf::interpret::color::Color, inks: Option<&[String]>, rgb: Rgb<'_>) -> Option<Native> {
         let mapped = debug_text(c).and_then(|t| {
             let (space, comps) = split_color(&t)?;
-            let space = self.space_of(space, comps.len(), inks);
+            let space = self.space_of(space, comps.len(), inks, rgb);
             Some((space, comps))
         });
         let (space, comps) = mapped.unwrap_or((Space::Other, vec![]));
@@ -195,9 +235,9 @@ impl<'p> Colors<'p> {
     }
 
     /// The space shading colors are in, for [`Colors::native`]; `n`: its component count. `inks`
-    /// as for [`Colors::solid`].
-    pub fn shading_space(&mut self, cs: &ColorSpace, n: usize, inks: Option<&[String]>) -> Space {
-        let space = debug_text(cs).map_or(Space::Other, |t| self.space_of(&t, n, inks));
+    /// and `rgb` as for [`Colors::solid`].
+    pub fn shading_space(&mut self, cs: &ColorSpace, n: usize, inks: Option<&[String]>, rgb: Rgb<'_>) -> Space {
+        let space = debug_text(cs).map_or(Space::Other, |t| self.space_of(&t, n, inks, rgb));
         self.count(space);
         space
     }
@@ -206,7 +246,7 @@ impl<'p> Colors<'p> {
     fn count(&mut self, space: Space) {
         match space {
             Space::Cmyk => self.cmyk += 1,
-            Space::Rgb | Space::IccRgb | Space::Other => self.rgb += 1,
+            Space::Rgb | Space::IccRgb | Space::Profile(_) | Space::Other => self.rgb += 1,
             Space::Gray | Space::Inks(_) => {}
         }
     }
@@ -223,14 +263,15 @@ impl<'p> Colors<'p> {
 
     /// The space a `ColorSpace(…)` `Debug` text names, with `n` components. `inks`: the colorant
     /// names of the space the page's walk found the color painted in; of the spaces whose tint
-    /// transform matches, the one with these names is taken.
-    pub(crate) fn space_of(&mut self, text: &str, n: usize, inks: Option<&[String]>) -> Space {
+    /// transform matches, the one with these names is taken. `rgb`: the RGB space the walk found
+    /// it painted in ([`Colors::rgb_space`]).
+    pub(crate) fn space_of(&mut self, text: &str, n: usize, inks: Option<&[String]>, rgb: Rgb<'_>) -> Space {
         let inner = text.strip_prefix("ColorSpace(").unwrap_or(text);
         let kind = inner.split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or_default();
         match (kind, n) {
             ("DeviceGray" | "ICCBased", 1) => Space::Gray,
-            ("DeviceRgb", 3) => Space::Rgb,
-            ("ICCBased", 3) if self.uncalibrated_rgb || self.icc_rgb_is_working() => Space::IccRgb,
+            ("DeviceRgb", 3) => self.rgb_space(false, rgb),
+            ("ICCBased", 3) => self.rgb_space(true, rgb),
             ("DeviceCmyk" | "ICCBased", 4) => Space::Cmyk,
             ("Separation", 1) | ("DeviceN", _) => {
                 self.scan();
@@ -279,6 +320,10 @@ impl<'p> Colors<'p> {
             Space::Gray => Some(Native::plain(Color::gray(1.0 - c(0)))),
             Space::Cmyk => Some(Native::plain(Color::cmyk(c(0), c(1), c(2), c(3)))),
             Space::Rgb | Space::IccRgb => Some(Native::plain(Color::rgb(c(0), c(1), c(2)))),
+            Space::Profile(k) => {
+                let [r, g, b] = self.transforms.get(k)?.1.as_ref()?.apply([c(0), c(1), c(2)])?;
+                Some(Native::plain(Color::rgb(r, g, b)))
+            }
             Space::Other => None,
             Space::Inks(i) => self.inks_color(i, comps),
         }
@@ -333,27 +378,111 @@ impl<'p> Colors<'p> {
         }
     }
 
-    /// Whether the file's `ICCBased` RGB colours are in the RGB working space: it isn't sRGB, and
-    /// every 3-component `ICCBased` space of the file has its profile (a colour's space can't be
-    /// told apart from another `ICCBased` one, so one other profile, or a Lab one, and none
-    /// qualify). Found once.
-    fn icc_rgb_is_working(&mut self) -> bool {
-        if let Some(known) = self.in_working_rgb {
-            return known;
+    /// How an RGB colour's numbers map: one the interpreter reads in DeviceRGB (`icc` false) or
+    /// in an `ICCBased` space (`icc`), painted in `rgb` as the page's walk found it.
+    ///
+    /// With an RGB working space other than sRGB, RGB in a profile is converted into it (numbers
+    /// in the working space's own profile stand): a file's sRGB is not the working space's
+    /// numbers. Without the walk's answer, the file's profiles decide where they can: the only
+    /// profile of the kind the interpreter reads it as (for DeviceRGB, on a page that sets no
+    /// DeviceRGB colours of its own); otherwise DeviceRGB numbers stand and an `ICCBased` colour
+    /// goes through the interpreter's sRGB ([`Colors::srgb_in_working`]). DeviceRGB numbers are the
+    /// working space's. With sRGB as the working space, the interpreter's sRGB stands, and an
+    /// editor's own document (`uncalibrated_rgb`) keeps its RGB numbers, as before.
+    fn rgb_space(&mut self, icc: bool, rgb: Rgb<'_>) -> Space {
+        if self.uncalibrated_rgb {
+            return if icc { Space::IccRgb } else { Space::Rgb };
         }
-        let known = self.working_rgb.clone().is_some_and(|working| {
-            let mut found: Vec<Vec<u8>> = vec![];
-            let mut ok = true;
-            for o in self.pdf.objects() {
-                icc_rgb_profiles(o, 0, &mut found, &mut ok);
-                if !ok {
-                    break;
+        if self.working_rgb.is_none() {
+            return if icc { Space::Other } else { Space::Rgb };
+        }
+        match rgb {
+            Rgb::Icc(p) => {
+                if let Some(k) = self.transform(p) {
+                    return Space::Profile(k);
                 }
             }
-            ok && !found.is_empty() && found.iter().all(|p| vectorcraft_color::cms::same_rgb_profile(p, &working))
-        });
-        self.in_working_rgb = Some(known);
-        known
+            Rgb::NotIcc if !icc => return Space::Rgb,
+            _ => {}
+        }
+        let file = self.file_rgb();
+        match (icc, if icc { file.other } else { file.srgb }) {
+            (false, Group::None) => Space::Rgb,
+            (true, Group::One(k)) => Space::Profile(k),
+            (false, Group::One(k)) if !self.page_device_rgb => Space::Profile(k),
+            (true, _) => Space::Other,
+            (false, _) => Space::Rgb,
+        }
+    }
+
+    /// Whether the RGB spaces page `scan` found for each paint are needed ([`Colors::rgb_space`]):
+    /// the page sets `ICCBased` RGB spaces, and the file's profiles can't say which colours are in
+    /// which (several of a kind, or sRGB ones the interpreter reads as DeviceRGB on a page that
+    /// sets DeviceRGB colours too).
+    pub fn rgb_needs_walk(&mut self, scan: &crate::import_scan::Scan) -> bool {
+        if self.uncalibrated_rgb || self.working_rgb.is_none() || scan.rgb_profiles.is_empty() {
+            return false;
+        }
+        let f = self.file_rgb();
+        f.other == Group::Several || f.srgb == Group::Several || (matches!(f.srgb, Group::One(_)) && scan.device_rgb)
+    }
+
+    /// The index in [`Colors::transforms`] of the conversion from RGB profile `p` into the working
+    /// space; `None` when it can't be made.
+    fn transform(&mut self, p: &[u8]) -> Option<usize> {
+        let working = self.working_rgb.as_ref()?;
+        let k = match self.transforms.iter().position(|(q, _)| q[..] == p[..]) {
+            Some(k) => k,
+            None => {
+                self.transforms.push((p.into(), RgbTransform::new(p, working)));
+                self.transforms.len() - 1
+            }
+        };
+        self.transforms.get(k)?.1.as_ref().map(|_| k)
+    }
+
+    /// The file's `ICCBased` RGB profiles, by how the interpreter reads them ([`FileRgb`]; found
+    /// once).
+    fn file_rgb(&mut self) -> FileRgb {
+        if let Some(f) = self.file_rgb {
+            return f;
+        }
+        let mut found: Vec<Vec<u8>> = vec![];
+        let mut ok = true;
+        for o in self.pdf.objects() {
+            icc_rgb_profiles(o, 0, &mut found, &mut ok);
+            if !ok {
+                break;
+            }
+        }
+        let f = if ok {
+            let (srgb, other): (Vec<_>, Vec<_>) = found.into_iter().partition(|p| p.get(52..56) == Some(b"sRGB"));
+            FileRgb { srgb: self.group(&srgb), other: self.group(&other) }
+        } else {
+            FileRgb { srgb: Group::Several, other: Group::Several }
+        };
+        self.file_rgb = Some(f);
+        f
+    }
+
+    /// Profiles `ps` as a [`Group`].
+    fn group(&mut self, ps: &[Vec<u8>]) -> Group {
+        let Some((first, rest)) = ps.split_first() else { return Group::None };
+        match self.transform(first) {
+            Some(k) if rest.iter().all(|p| cms::same_rgb_profile(p, first)) => Group::One(k),
+            _ => Group::Several,
+        }
+    }
+
+    /// A colour the interpreter gives as sRGB (a space that isn't one of those mapped in their own
+    /// model, [`Colors::native`]), in the RGB working space: converted when it isn't sRGB.
+    pub fn srgb_in_working(&mut self, [r, g, b]: [f32; 3]) -> Color {
+        let Some(working) = &self.working_rgb else { return Color::rgb(r, g, b) };
+        let srgb = self.srgb.get_or_insert_with(|| cms::icc_bytes(cms::SRGB).ok().and_then(|p| RgbTransform::new(&p, working)));
+        match srgb.as_ref().and_then(|t| t.apply([r, g, b])) {
+            Some([r, g, b]) => Color::rgb(r, g, b),
+            None => Color::rgb(r, g, b),
+        }
     }
 
     /// Find the file's Separation and DeviceN colour spaces (once, when a colour first needs them).
@@ -525,12 +654,34 @@ fn alt_model(o: &Object<'_>) -> Option<Alt> {
     }
 }
 
-/// The most different `ICCBased` RGB profiles [`Colors::icc_rgb_is_working`] compares.
+/// The most different `ICCBased` RGB profiles [`Colors::file_rgb`] takes.
 const MAX_ICC_PROFILES: usize = 64;
 
+/// What the profile of a 3-component `ICCBased` space is ([`icc_rgb`]).
+pub(crate) enum IccRgb {
+    /// Not a 3-component space.
+    NotRgb,
+    /// An RGB profile (decoded).
+    Rgb(Vec<u8>),
+    /// A Lab profile (whose colours look the same as RGB ones to the import), or one that doesn't
+    /// decode.
+    Unreadable,
+}
+
+/// The profile of the `ICCBased` space whose profile stream is `profile`.
+pub(crate) fn icc_rgb(profile: &Stream<'_>) -> IccRgb {
+    if profile.dict().get::<u8>(b"N") != Some(3) {
+        return IccRgb::NotRgb;
+    }
+    match profile.decoded() {
+        Ok(bytes) if !lab_profile(profile) => IccRgb::Rgb(bytes.into_owned()),
+        _ => IccRgb::Unreadable,
+    }
+}
+
 /// Collect the profiles of the 3-component `ICCBased` spaces in `o` (distinct, decoded) into
-/// `found`; `ok` turns false at one that can't be one of the working space's: a Lab profile, one
-/// that doesn't decode, or past [`MAX_ICC_PROFILES`].
+/// `found`; `ok` turns false at one that can't be told apart: a Lab profile, one that doesn't
+/// decode, or past [`MAX_ICC_PROFILES`].
 fn icc_rgb_profiles(o: Object<'_>, depth: u32, found: &mut Vec<Vec<u8>>, ok: &mut bool) {
     if depth > MAX_DEPTH || !*ok {
         return;
@@ -539,17 +690,16 @@ fn icc_rgb_profiles(o: Object<'_>, depth: u32, found: &mut Vec<Vec<u8>>, ok: &mu
         Object::Array(a) => {
             let mut it = a.flex_iter();
             if it.next::<Name<'_>>().is_some_and(|n| n.as_str() == "ICCBased") {
-                if let Some(profile) = it.next::<Stream<'_>>()
-                    && profile.dict().get::<u8>(b"N") == Some(3)
-                {
-                    match profile.decoded() {
-                        Ok(bytes) if !lab_profile(&profile) => {
+                if let Some(profile) = it.next::<Stream<'_>>() {
+                    match icc_rgb(&profile) {
+                        IccRgb::NotRgb => {}
+                        IccRgb::Rgb(bytes) => {
                             if !found.iter().any(|f| f[..] == bytes[..]) {
-                                found.push(bytes.into_owned());
+                                found.push(bytes);
                                 *ok = found.len() <= MAX_ICC_PROFILES;
                             }
                         }
-                        _ => *ok = false,
+                        IccRgb::Unreadable => *ok = false,
                     }
                 }
                 return;

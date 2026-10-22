@@ -148,35 +148,48 @@ fn header<'a>(r: &mut Reader<'a>) -> Result<Header<'a>, String> {
     Ok(Header { psb, channels, width, height, depth, mode, palette, resources, layers })
 }
 
-/// The resolution a Photoshop document declares (pixels per inch, across and down), from its
-/// ResolutionInfo resource (1005).
-pub fn resolution(bytes: &[u8]) -> Option<(f64, f64)> {
+/// The data of image resource `id` of a Photoshop document (the first of that id).
+fn resource(bytes: &[u8], id: u16) -> Option<&[u8]> {
     let mut r = Reader::new(bytes);
     let h = header(&mut r).ok()?;
     let mut r = Reader::new(h.resources);
     while !r.rest().is_empty() {
         r.take(4).ok()?;
-        let id = r.u16().ok()?;
+        let at = r.u16().ok()?;
         // A Pascal string padded to an even size, length byte included.
         let name = usize::from(r.u8().ok()?);
         r.take(name + (name + 1) % 2).ok()?;
         let size = usize::try_from(r.u32().ok()?).ok()?;
         let data = r.take(size).ok()?;
         r.take(size % 2).ok()?;
-        if id == 0x03ed {
-            let mut d = Reader::new(data);
-            // Fixed 16.16 values, each with its unit (1: per inch, 2: per centimetre) and the
-            // unit the size is shown in.
-            let mut axis = || -> Option<f64> {
-                let v = f64::from(d.u32().ok()?) / 65536.0;
-                let unit = d.u16().ok()?;
-                d.u16().ok()?;
-                Some(if unit == 2 { v * 2.54 } else { v })
-            };
-            return Some((axis()?, axis()?));
+        if at == id {
+            return Some(data);
         }
     }
     None
+}
+
+/// The resolution a Photoshop document declares (pixels per inch, across and down), from its
+/// ResolutionInfo resource (1005).
+pub fn resolution(bytes: &[u8]) -> Option<(f64, f64)> {
+    let mut d = Reader::new(resource(bytes, 0x03ed)?);
+    // Fixed 16.16 values, each with its unit (1: per inch, 2: per centimetre) and the unit the
+    // size is shown in.
+    let mut axis = || -> Option<f64> {
+        let v = f64::from(d.u32().ok()?) / 65536.0;
+        let unit = d.u16().ok()?;
+        d.u16().ok()?;
+        Some(if unit == 2 { v * 2.54 } else { v })
+    };
+    Some((axis()?, axis()?))
+}
+
+/// The ICC profile an 8- or 16-bit RGB Photoshop document embeds (its ICC Profile resource,
+/// 1039): the space its merged image's numbers are in. `None` for other modes and depths (a
+/// 32-bit document's values are linear), and without one.
+pub fn rgb_profile(bytes: &[u8]) -> Option<&[u8]> {
+    let h = header(&mut Reader::new(bytes)).ok()?;
+    (h.mode == Mode::Rgb && matches!(h.depth, 8 | 16)).then(|| resource(bytes, 0x040f)).flatten().filter(|p| !p.is_empty())
 }
 
 /// Does the merged image keep its transparency in the first extra channel? Yes when the layer
