@@ -589,3 +589,29 @@ fn tagged_shadings_and_other_spaces_land_in_the_rgb_working_space() {
     let Color::Rgb { r, g, b } = solid(&srgb[1]).0 else { panic!() };
     assert!(near(solid(&wide[1]).0, converted(SRGB, WIDE_GAMUT_RGB, [r, g, b])), "{:?}", wide[1]);
 }
+
+#[test]
+fn device_rgb_as_an_array_and_in_readings_the_walk_does_not_follow_keeps_its_numbers() {
+    // `[/DeviceRGB]` is DeviceRGB: on a page with an sRGB-tagged space, its colours keep their
+    // numbers and the tagged ones are converted.
+    use vectorcraft_color::cms::{SRGB, WIDE_GAMUT_RGB};
+    let f = first_extra(1);
+    let page = page_with(&format!("/CS0 [/ICCBased {f} 0 R] /CS1 [/DeviceRGB]"), &[("CS0", "0.8 0.3 0.1"), ("CS1", "0.2 0.5 0.9")]);
+    let bytes = pdf_with(&[page], &[&icc_stream(SRGB, true)], None);
+    let wide = fills_in(&bytes, Some(WIDE_GAMUT_RGB));
+    assert!(near(solid(&wide[0]).0, converted(SRGB, WIDE_GAMUT_RGB, [0.8, 0.3, 0.1])), "{:?}", wide[0]);
+    assert_eq!(solid(&wide[1]).0, Color::rgb(0.2, 0.5, 0.9));
+    // In a file whose only RGB profile is an sRGB one the reader takes as DeviceRGB, a
+    // DeviceRGB-looking colour of the page is in it when the page sets no DeviceRGB colours; in a
+    // reading the walk doesn't follow (a pattern's cell, a soft mask) that isn't known: it stands.
+    let only = pdf_with(&[page_with(&format!("/CS0 [/ICCBased {f} 0 R]"), &[("CS0", "0.8 0.3 0.1")])], &[&icc_stream(SRGB, true)], None);
+    let pdf = craft_pdf::syntax::Pdf::new(only).unwrap();
+    let mut c = Colors::new(&pdf, vec![]);
+    c.working_rgb = Some(working(WIDE_GAMUT_RGB));
+    let rgb = "ColorSpace(DeviceRgb)";
+    assert!(matches!(c.space_of(rgb, 3, None, Rgb::Unknown), Space::Profile(_)));
+    assert_eq!(c.space_of(rgb, 3, None, Rgb::Nested), Space::Rgb);
+    c.page_device_rgb = true;
+    assert_eq!(c.space_of(rgb, 3, None, Rgb::Unknown), Space::Rgb);
+    assert_eq!(c.space_of(rgb, 3, None, Rgb::NotIcc), Space::Rgb);
+}

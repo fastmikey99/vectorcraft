@@ -209,6 +209,14 @@ pub fn apply_color_settings(app: &mut VectorcraftApp, request: &protocol::ColorS
         let info = vectorcraft_color::cms::register_icc(bytes, name.clone()).map_err(|e| format!("vectorcraft:colorSettings: profiles[{i}]: {e}"))?;
         loaded.push(info.name);
     }
+    // A working space registered again (`register_icc` makes it take the new profile) draws anew,
+    // although the settings' names don't change.
+    let active = vectorcraft_color::cms::active_settings();
+    if loaded.iter().any(|n| *n == active.rgb || *n == active.cmyk)
+        && let Some(st) = app.session.active_mut()
+    {
+        st.revision += 1;
+    }
     let settings = app.session.execute("edit.colorSettings", &request.params()).map_err(|e| format!("vectorcraft:colorSettings: {e}"))?;
     Ok(ColorSettingsApplied { loaded, settings })
 }

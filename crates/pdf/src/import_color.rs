@@ -384,9 +384,10 @@ impl<'p> Colors<'p> {
     /// With an RGB working space other than sRGB, RGB in a profile is converted into it (numbers
     /// in the working space's own profile stand): a file's sRGB is not the working space's
     /// numbers. Without the walk's answer, the file's profiles decide where they can: the only
-    /// profile of the kind the interpreter reads it as (for DeviceRGB, on a page that sets no
-    /// DeviceRGB colours of its own); otherwise DeviceRGB numbers stand and an `ICCBased` colour
-    /// goes through the interpreter's sRGB ([`Colors::srgb_in_working`]). DeviceRGB numbers are the
+    /// profile of the kind the interpreter reads it as (for DeviceRGB, only on a page whose walk
+    /// found no DeviceRGB colours, and not in a reading the walk doesn't follow, where they can't
+    /// be ruled out); otherwise DeviceRGB numbers stand and an `ICCBased` colour goes through the
+    /// interpreter's sRGB ([`Colors::srgb_in_working`]). DeviceRGB numbers are the
     /// working space's. With sRGB as the working space, the interpreter's sRGB stands, and an
     /// editor's own document (`uncalibrated_rgb`) keeps its RGB numbers, as before.
     fn rgb_space(&mut self, icc: bool, rgb: Rgb<'_>) -> Space {
@@ -409,7 +410,7 @@ impl<'p> Colors<'p> {
         match (icc, if icc { file.other } else { file.srgb }) {
             (false, Group::None) => Space::Rgb,
             (true, Group::One(k)) => Space::Profile(k),
-            (false, Group::One(k)) if !self.page_device_rgb => Space::Profile(k),
+            (false, Group::One(k)) if !self.page_device_rgb && !matches!(rgb, Rgb::Nested) => Space::Profile(k),
             (true, _) => Space::Other,
             (false, _) => Space::Rgb,
         }

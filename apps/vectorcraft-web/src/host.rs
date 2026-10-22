@@ -377,6 +377,14 @@ impl Bridge {
                 let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
                 // A field left out is `None`; one that is there but of the wrong type is `Some(None)`.
                 let given = |key: &str| js_sys::Reflect::get(&data, &JsValue::from_str(key)).ok().filter(|v| !v.is_undefined());
+                // Counted and sized before anything is copied out of the page.
+                let fits = given("profiles").and_then(|v| v.dyn_ref::<js_sys::Array>().cloned()).map_or(Ok(()), |list| {
+                    protocol::profiles_fit(list.length() as usize, list.iter().take(protocol::MAX_PROFILES).map(|p| byte_length(&p)))
+                });
+                if let Err(error) = fits {
+                    bridge.post_export_failed(&id, &error);
+                    return;
+                }
                 let profiles = given("profiles").map(|v| {
                     v.dyn_ref::<js_sys::Array>().map(|list| {
                         list.iter()
@@ -536,6 +544,16 @@ fn string(data: &JsValue, key: &str) -> Option<String> {
 }
 
 /// `bytes` as an `ArrayBuffer` or `Uint8Array`.
+/// The length of `data.bytes` (as [`bytes`] reads it) without copying it.
+fn byte_length(data: &JsValue) -> Option<usize> {
+    let bytes = js_sys::Reflect::get(data, &JsValue::from_str("bytes")).ok()?;
+    if let Some(array) = bytes.dyn_ref::<js_sys::Uint8Array>() {
+        Some(array.byte_length() as usize)
+    } else {
+        bytes.dyn_ref::<js_sys::ArrayBuffer>().map(|b| b.byte_length() as usize)
+    }
+}
+
 fn bytes(data: &JsValue) -> Option<Vec<u8>> {
     let bytes = js_sys::Reflect::get(data, &JsValue::from_str("bytes")).ok()?;
     if let Some(array) = bytes.dyn_ref::<js_sys::Uint8Array>() {

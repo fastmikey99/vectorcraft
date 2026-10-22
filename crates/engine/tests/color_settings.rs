@@ -309,3 +309,21 @@ fn a_freeform_gradient_expands_with_its_rgb_values_in_the_working_rgb_space() {
         assert!(matches!(c, Color::Rgb { .. }) && close, "{c:?} shows {shown:?} for {field:?}");
     }
 }
+
+/// A working space registered again under its own name takes the new profile at once, without the
+/// settings' names changing (a page sending its profiles again, `vectorcraft:colorSettings`).
+#[test]
+fn a_working_space_registered_again_takes_its_new_profile() {
+    let _g = settings();
+    let old = cms::active_settings();
+    let name = "Re-registered Working RGB";
+    cms::register_icc(&cms::icc_bytes(cms::WIDE_GAMUT_RGB).unwrap(), Some(name.into())).unwrap();
+    cms::set_active(&cms::ColorSettings { rgb: name.into(), ..old.clone() }).unwrap();
+    let wide = cms::active().rgb_to_srgb([0.2, 0.6, 0.4]);
+    cms::register_icc(&cms::icc_bytes(cms::PROPHOTO_RGB).unwrap(), Some(name.into())).unwrap();
+    let now = cms::active().rgb_to_srgb([0.2, 0.6, 0.4]);
+    let prophoto = cms::Cms::new(&cms::ColorSettings { rgb: cms::PROPHOTO_RGB.into(), ..old.clone() }).unwrap().rgb_to_srgb([0.2, 0.6, 0.4]);
+    cms::set_active(&old).unwrap();
+    assert!(wide != now, "{wide:?} {now:?}");
+    assert!(now.iter().zip(prophoto).all(|(a, b)| (a - b).abs() < 1e-4), "{now:?} vs {prophoto:?}");
+}

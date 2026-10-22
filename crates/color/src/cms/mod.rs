@@ -254,6 +254,14 @@ pub fn register_icc(bytes: &[u8], name: Option<String>) -> Result<ProfileInfo, C
     drop(u);
     clear_proof_cache();
     PROFILES_GENERATION.fetch_add(1, Ordering::Relaxed);
+    // The active settings hold the profiles they were built with: a working space registered
+    // again under its name takes the new one.
+    let st = active_settings();
+    if canonical_name(&st.rgb) == info.name || canonical_name(&st.cmyk) == info.name {
+        // The names are the same and registered, so this can't fail; if it did, the settings
+        // would keep the profile they had.
+        let _ = set_active(&st);
+    }
     Ok(info)
 }
 
@@ -308,7 +316,8 @@ pub fn icc_bytes(name: &str) -> Result<Arc<[u8]>, CmsError> {
 }
 
 /// The RGB working space as an import converts colours into it: its ICC profile, with the colour
-/// settings' intent and black-point compensation ([`working_rgb`]).
+/// settings' intent and black-point compensation ([`working_rgb`]; compensation as
+/// [`IccProfile::to_rgb_of`] makes it, which leaves RGB sources alone).
 #[derive(Clone, Debug)]
 pub struct WorkingRgb {
     pub icc: Arc<[u8]>,
@@ -357,8 +366,9 @@ fn same_colours(pa: &IccProfile, pb: &IccProfile) -> bool {
 }
 
 /// RGB colours of one ICC profile as numbers of another (the RGB working space, [`WorkingRgb`]):
-/// converted directly with its intent and black-point compensation, not through sRGB, so colours
-/// outside sRGB keep their place. Colours of a profile with the destination's colours
+/// converted directly with its intent ([`IccProfile::to_rgb_of`], whose black-point compensation
+/// is for CMYK sources: RGB matrix profiles share black), not through sRGB, so colours outside
+/// sRGB keep their place. Colours of a profile with the destination's colours
 /// ([`same_rgb_profile`]) keep their numbers exactly.
 pub struct RgbTransform {
     src: IccProfile,

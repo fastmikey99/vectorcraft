@@ -345,8 +345,12 @@ pub(crate) enum Rgb<'a> {
     NotIcc,
     /// An `ICCBased` space with this RGB profile.
     Icc(&'a Arc<[u8]>),
-    /// Not known: a reading the walk doesn't follow, text shown in several spaces, or past a limit.
+    /// Not known: text shown in several spaces, a limit passed, or the page's paths can't be
+    /// matched with the reader's ([`Scan::forget_rgb`]).
     Unknown,
+    /// A reading the walk doesn't follow (a tiling pattern's cell, a soft mask, a Type 3 glyph):
+    /// whether the page sets DeviceRGB colours there isn't known either.
+    Nested,
 }
 
 /// The RGB space a fill or a stroke paints in, as the walk notes it: an index into
@@ -647,7 +651,10 @@ impl Walker<'_, '_> {
         self.out.paints.push(on);
         self.out.paint_zero.push(!s.nonzero);
         self.out.texts.push(std::mem::take(&mut self.text));
-        self.inks_cut |= !self.out.paint_inks.set(k, s.inks[usize::from(stroke)]);
+        // The paints' RGB spaces are kept in the same list: past its limit they aren't known.
+        let kept = self.out.paint_inks.set(k, s.inks[usize::from(stroke)]);
+        self.inks_cut |= !kept;
+        self.out.rgb_unknown |= !kept;
         self.inks_cut |= !self.out.text_inks.set(k, std::mem::take(&mut self.text_inks).map(RunInk::ink));
         self.out.rgb_unknown |= !self.out.text_rgb.set(k, std::mem::take(&mut self.text_rgb).map(RunRgb::at));
     }
@@ -734,8 +741,14 @@ impl Walker<'_, '_> {
             _ => return RgbAt::NotIcc,
         };
         let mut it = a.flex_iter();
-        if !it.next::<Name<'_>>().is_some_and(|n| n.as_ref() == b"ICCBased") {
-            return RgbAt::NotIcc;
+        match it.next::<Name<'_>>() {
+            Some(n) if n.as_ref() == b"ICCBased" => {}
+            Some(n) => {
+                // `[/DeviceRGB]` is DeviceRGB too.
+                self.out.device_rgb |= matches!(n.as_ref(), b"DeviceRGB" | b"RGB");
+                return RgbAt::NotIcc;
+            }
+            None => return RgbAt::NotIcc,
         }
         let Some(stream) = it.next::<craft_pdf::syntax::object::Stream<'_>>() else { return RgbAt::NotIcc };
         let key = stream.cache_key();

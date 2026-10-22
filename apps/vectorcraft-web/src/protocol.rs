@@ -244,6 +244,31 @@ pub fn solidify(level: Option<Option<f64>>, copies: Option<Option<bool>>) -> Res
 /// `color.loadProfile` reads).
 pub const MAX_PROFILES: usize = 16;
 pub const MAX_PROFILE_BYTES: usize = 32 << 20;
+/// The most bytes the profiles of one `vectorcraft:colorSettings` take together.
+pub const MAX_PROFILES_BYTES: usize = 64 << 20;
+
+/// Whether a `vectorcraft:colorSettings`'s profiles fit the limits, told from their count and
+/// sizes alone (`None`: an entry without bytes, which [`color_settings`] refuses), so the bridge
+/// can refuse them before copying any out of the page. The error is the text of the
+/// `vectorcraft:failed` reply.
+pub fn profiles_fit(count: usize, sizes: impl IntoIterator<Item = Option<usize>>) -> Result<(), String> {
+    const C: &str = "vectorcraft:colorSettings";
+    if count > MAX_PROFILES {
+        return Err(format!("{C}: at most {MAX_PROFILES} profiles"));
+    }
+    let mut total = 0usize;
+    for (i, size) in sizes.into_iter().enumerate() {
+        let size = size.unwrap_or(0);
+        if size > MAX_PROFILE_BYTES {
+            return Err(format!("{C}: profiles[{i}] is larger than {MAX_PROFILE_BYTES} bytes"));
+        }
+        total = total.saturating_add(size);
+        if total > MAX_PROFILES_BYTES {
+            return Err(format!("{C}: the profiles take more than {MAX_PROFILES_BYTES} bytes together"));
+        }
+    }
+    Ok(())
+}
 
 /// What a `vectorcraft:colorSettings` asks for: ICC profiles registered (each under `name`, else
 /// its own description), then the working spaces, intent and black-point compensation set, as
@@ -295,9 +320,7 @@ pub fn color_settings(
         None => vec![],
         Some(None) => return Err(format!("{C}: profiles must be an array of {{name?, bytes}}")),
         Some(Some(list)) => {
-            if list.len() > MAX_PROFILES {
-                return Err(format!("{C}: at most {MAX_PROFILES} profiles"));
-            }
+            profiles_fit(list.len(), list.iter().map(|(_, b)| b.as_ref().map(Vec::len)))?;
             let mut out = vec![];
             for (i, (name, bytes)) in list.into_iter().enumerate() {
                 let name = match name {
@@ -308,9 +331,6 @@ pub fn color_settings(
                 let Some(bytes) = bytes else {
                     return Err(format!("{C}: profiles[{i}] needs the profile's contents (`bytes`, an ArrayBuffer or Uint8Array)"));
                 };
-                if bytes.len() > MAX_PROFILE_BYTES {
-                    return Err(format!("{C}: profiles[{i}] is larger than {MAX_PROFILE_BYTES} bytes"));
-                }
                 out.push((name, bytes));
             }
             out
@@ -598,6 +618,11 @@ mod tests {
         assert!(e(color_settings(Some(Some(vec![(None, Some(vec![0; MAX_PROFILE_BYTES + 1]))])), None, None, None, None)).contains("larger"));
         let many = (0..=MAX_PROFILES).map(|_| (None, Some(vec![1]))).collect();
         assert!(e(color_settings(Some(Some(many)), None, None, None, None)).contains("at most"));
+        // Sized before being copied out of the page; several large ones together are too much.
+        assert!(profiles_fit(MAX_PROFILES + 1, []).is_err_and(|e| e.contains("at most")));
+        assert!(profiles_fit(1, [Some(MAX_PROFILE_BYTES + 1)]).is_err_and(|e| e.contains("larger")));
+        assert!(profiles_fit(3, [Some(MAX_PROFILE_BYTES); 3]).is_err_and(|e| e.contains("together")));
+        assert_eq!(profiles_fit(2, [Some(MAX_PROFILE_BYTES), None]), Ok(()));
         assert!(e(color_settings(None, Some(None), None, None, None)).contains("rgb must name"));
         assert!(e(color_settings(None, None, Some(Some(" ".into())), None, None)).contains("cmyk must name"));
         assert!(e(color_settings(None, None, None, Some(Some("vivid".into())), None)).contains("intent must be"));

@@ -1419,7 +1419,7 @@ impl<'p> Builder<'p> {
     fn paint(&mut self, p: &craft_pdf::interpret::Paint<'_>, stroke: bool, walked: Option<Walked>) -> (Paint, f32) {
         let pattern = matches!(p, craft_pdf::interpret::Paint::Pattern(_));
         let inks = walked.and_then(|w| self.scan.ink(w, stroke, pattern));
-        let rgb = walked.map_or(Rgb::Unknown, |w| self.scan.rgb(w, stroke, pattern));
+        let rgb = walked.map_or(Rgb::Nested, |w| self.scan.rgb(w, stroke, pattern));
         match p {
             craft_pdf::interpret::Paint::Color(c) => {
                 let [r, g, b, a] = c.to_rgba().components();
@@ -1871,7 +1871,7 @@ impl<'a> Device<'a> for Builder<'_> {
                 sp,
                 &mut self.colors,
                 walked.and_then(|w| self.scan.ink(w, false, true)),
-                walked.map_or(Rgb::Unknown, |w| self.scan.rgb(w, false, true)),
+                walked.map_or(Rgb::Nested, |w| self.scan.rgb(w, false, true)),
             )
         {
             self.draw_meshes(meshes, &bp, sp.opacity);

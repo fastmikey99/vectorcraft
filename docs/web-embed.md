@@ -239,13 +239,16 @@ output, read with Adobe RGB as the working space) came out more saturated each t
 once (ΔE2000 up to about 10 on saturated colours). Now, with a working space other than sRGB:
 
 - RGB in any profile is converted into the working space, directly (not through sRGB) with the
-  colour settings' intent and black-point compensation; colours in the working space's own
+  colour settings' intent (black-point compensation, which applies to CMYK sources, changes
+  nothing between RGB profiles); colours in the working space's own
   profile (the same file, or one giving the same colours) keep their numbers exactly. Solid
   fills, strokes and text, axial, radial and mesh shadings alike.
 - On a page with several RGB profiles, or with sRGB-tagged and DeviceRGB colours together, the
   page's walk of its content says which colour is in which space (when it can be matched with
   the reader's paths; otherwise a tagged colour goes through sRGB into the working space and a
-  DeviceRGB-looking one keeps its numbers).
+  DeviceRGB-looking one keeps its numbers). The walk doesn't follow tiling-pattern cells, soft
+  masks or Type 3 glyphs: there, in a file whose only RGB profile is an sRGB one, a
+  DeviceRGB-looking colour keeps its numbers (it may be DeviceRGB).
 - DeviceRGB numbers are the working space's, and stand.
 - Colours the reader can only give as sRGB (Lab, CalRGB, Indexed, mixed DeviceN inks) are
   converted from sRGB into the working space instead of being taken as its numbers.
