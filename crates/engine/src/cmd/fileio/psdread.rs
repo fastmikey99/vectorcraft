@@ -342,10 +342,22 @@ fn byte(v: f32) -> u8 {
 /// amounts 0..1 → sRGB). Fails, without allocating, when the image would need more than
 /// `max_alloc` bytes.
 pub fn decode(bytes: &[u8], max_alloc: u64, cmyk: impl Fn([f32; 4]) -> [f32; 3]) -> Result<image::RgbaImage, String> {
+    decode_rgb(bytes, max_alloc, cmyk, None)
+}
+
+/// Converts a row of interleaved RGB values in place ([`decode_rgb`]); `false`: left as they are.
+pub type RgbRows = dyn Fn(&mut [f32]) -> bool;
+
+/// [`decode`], an RGB document's colours (straight, 0..1, a row of interleaved RGB at a time)
+/// converted by `rgb` before they are quantised to 8 bits (its embedded profile into sRGB: a
+/// 16-bit document keeps its precision until then). `rgb` returning `false` leaves that row's
+/// numbers as they are.
+pub fn decode_rgb(bytes: &[u8], max_alloc: u64, cmyk: impl Fn([f32; 4]) -> [f32; 3], rgb: Option<&RgbRows>) -> Result<image::RgbaImage, String> {
     let mut r = Reader::new(bytes);
     let h = header(&mut r)?;
     let colors = h.mode.colors();
     let alpha = h.channels > colors && merged_alpha(h.layers, h.psb);
+    let alpha_channel = alpha;
     let channels = colors + usize::from(alpha);
     let (w, rows) = (h.width as usize, h.height as usize);
     let row = row_bytes(w, h.depth);
@@ -357,8 +369,28 @@ pub fn decode(bytes: &[u8], max_alloc: u64, cmyk: impl Fn([f32; 4]) -> [f32; 3])
     let data = channel_data(r.rest(), &h, channels, row)?;
     let mut out = image::RgbaImage::new(h.width, h.height);
     let linear = h.depth == 32;
-    for (y, line) in out.rows_mut().enumerate() {
+    let rgb = rgb.filter(|_| h.mode == Mode::Rgb);
+    // One row's straight colours, for `rgb`.
+    let mut held: Vec<f32> = Vec::with_capacity(if rgb.is_some() { w * 3 } else { 0 });
+    for (y, mut line) in out.rows_mut().enumerate() {
         let planes: Vec<&[u8]> = (0..channels).map(|c| data.get((c * rows + y) * row..(c * rows + y + 1) * row).unwrap_or_default()).collect();
+        if let Some(convert) = rgb {
+            held.clear();
+            let mut alpha = Vec::with_capacity(w);
+            for x in 0..w {
+                let v = |c: usize| planes.get(c).map_or(0.0, |p| sample(p, x, h.depth, linear && c < colors));
+                let a = if alpha_channel { v(colors) } else { 1.0 };
+                let straight = |c: f32| if a <= 0.0 { 0.0 } else { (c - (1.0 - a)) / a };
+                held.extend([v(0), v(1), v(2)].map(|c| if alpha_channel { straight(c) } else { c }.clamp(0.0, 1.0)));
+                alpha.push(a);
+            }
+            // `false` leaves the row's numbers as they are (read as sRGB).
+            let _ = convert(&mut held);
+            for ((px, rgb), a) in line.by_ref().zip(held.as_chunks::<3>().0).zip(&alpha) {
+                px.0 = [byte(rgb[0]), byte(rgb[1]), byte(rgb[2]), byte(*a)];
+            }
+            continue;
+        }
         for (x, px) in line.enumerate() {
             let v = |c: usize| planes.get(c).map_or(0.0, |p| sample(p, x, h.depth, linear && c < colors));
             let rgb = match h.mode {

@@ -220,18 +220,18 @@ fn rgb_profiles_are_the_same_when_their_colours_are() {
     let srgb = icc_bytes(SRGB).unwrap();
     let wide = icc_bytes(WIDE_GAMUT_RGB).unwrap();
     let p3 = icc_bytes(DISPLAY_P3).unwrap();
-    assert!(same_rgb_profile(&wide, &wide));
+    assert!(same_rgb_profile(&wide, &wide, Intent::RelativeColorimetric));
     // The same colorimetry in another file (here: another creation date) is the same profile.
     let mut again = wide.to_vec();
     again[24..26].copy_from_slice(&2001u16.to_be_bytes());
     assert_ne!(&*again, &*wide, "a different file");
-    assert!(same_rgb_profile(&again, &wide));
+    assert!(same_rgb_profile(&again, &wide, Intent::RelativeColorimetric));
     for (a, b) in [(&srgb, &wide), (&wide, &p3), (&p3, &srgb)] {
-        assert!(!same_rgb_profile(a, b));
+        assert!(!same_rgb_profile(a, b, Intent::RelativeColorimetric));
     }
     let cmyk = icc_bytes(GENERIC_CMYK).unwrap();
-    assert!(!same_rgb_profile(&cmyk, &wide), "not RGB");
-    assert!(!same_rgb_profile(b"not a profile", &wide));
+    assert!(!same_rgb_profile(&cmyk, &wide, Intent::RelativeColorimetric), "not RGB");
+    assert!(!same_rgb_profile(b"not a profile", &wide, Intent::RelativeColorimetric));
 }
 
 #[test]
@@ -255,24 +255,23 @@ fn rgb_transforms_convert_into_the_working_space_and_keep_its_own_numbers() {
 }
 
 #[test]
-fn rgba_pixels_of_a_profile_become_srgb_with_their_alpha() {
+fn rgb_values_of_a_profile_become_srgb_at_full_precision() {
     let wide = icc::builtin_rgb(WIDE_GAMUT_RGB).unwrap();
-    let mut px = vec![230, 26, 26, 255, 10, 200, 40, 128, 255, 255, 255, 0];
-    assert!(wide.rgba8_to_srgb(&mut px, 3, Intent::RelativeColorimetric));
-    let want = |v: [f32; 3]| wide.to_srgb(&v.map(|c| c / 255.0), Intent::RelativeColorimetric).unwrap().map(|c| (c * 255.0).round() as i32);
-    for (p, src) in px.chunks(4).zip([[230.0, 26.0, 26.0], [10.0, 200.0, 40.0], [255.0; 3]]) {
-        let w = want(src);
-        assert!(p.iter().zip(w).all(|(a, b)| (*a as i32 - b).abs() <= 1), "{p:?} vs {w:?}");
+    let convert = wide.rgb_rows_to_srgb(Intent::RelativeColorimetric).unwrap();
+    let src = [0.9, 0.1, 0.1, 0.04, 0.78, 0.16, 1.0, 1.0, 1.0];
+    let mut px = src.to_vec();
+    assert!(convert(&mut px));
+    for (got, c) in px.as_chunks::<3>().0.iter().zip(src.as_chunks::<3>().0) {
+        let want = wide.to_srgb(c, Intent::RelativeColorimetric).unwrap();
+        assert!(got.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-4), "{got:?} vs {want:?}");
     }
-    assert_eq!([px[3], px[7], px[11]], [255, 128, 0], "alpha kept");
-    assert!(px[0] == 255 && px[1] < 26, "a saturated red is more saturated in sRGB: {px:?}");
+    assert!(px[0] > 0.99 && px[1] < 0.1, "a saturated red is more saturated in sRGB: {px:?}");
+    // Not whole colours: nothing is touched. Not an RGB profile: no conversion.
+    let mut odd = vec![0.5, 0.5];
+    assert!(!convert(&mut odd));
+    assert_eq!(odd, vec![0.5, 0.5]);
     let cmyk = IccProfile::from_bytes(None, &icc_bytes(GENERIC_CMYK).unwrap()).unwrap();
-    assert!(!cmyk.rgba8_to_srgb(&mut px, 3, Intent::RelativeColorimetric), "not RGB");
-    // Not whole rows of whole pixels: nothing is touched.
-    let mut odd = vec![230, 26, 26, 255, 9];
-    assert!(!wide.rgba8_to_srgb(&mut odd, 1, Intent::RelativeColorimetric));
-    assert!(!wide.rgba8_to_srgb(&mut odd, usize::MAX, Intent::RelativeColorimetric));
-    assert_eq!(odd, vec![230, 26, 26, 255, 9]);
+    assert!(cmyk.rgb_rows_to_srgb(Intent::RelativeColorimetric).is_none());
 }
 
 #[test]
@@ -296,8 +295,84 @@ fn rgb_profiles_whose_curves_part_between_grid_points_are_not_the_same() {
         icc::encode(&p).unwrap()
     };
     let (plain, bumped) = (profile(false), profile(true));
-    assert!(same_rgb_profile(&plain, &plain.clone()));
-    assert!(!same_rgb_profile(&plain, &bumped), "the curves part at 37/255");
+    assert!(same_rgb_profile(&plain, &plain.clone(), Intent::RelativeColorimetric));
+    assert!(!same_rgb_profile(&plain, &bumped, Intent::RelativeColorimetric), "the curves part at 37/255");
     let w = WorkingRgb { icc: plain.into(), intent: Intent::RelativeColorimetric, bpc: false };
     assert!(!RgbTransform::new(&bumped, &w).unwrap().keeps_numbers());
+}
+
+/// An RGB profile made of lookup tables (sRGB's colours through Lab), whose perceptual tables
+/// darken by `perceptual` (1: the same as the colorimetric ones).
+fn rgb_lut_profile(perceptual: f32) -> Vec<u8> {
+    use moxcms::{
+        ColorProfile, DataColorSpace, LutMultidimensionalType, LutStore, LutWarehouse, Matrix3d, ProfileClass, RenderingIntent, ToneReprCurve,
+        Vector3d,
+    };
+    const N: usize = 17;
+    let unit = |i: usize| i as f32 / (N - 1) as f32;
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 65535.0).round() as u16;
+    let a2b = |k: f32| {
+        let mut t = Vec::with_capacity(N.pow(3) * 3);
+        for i in 0..N.pow(3) {
+            let rgb = [2, 1, 0].map(|d| unit(i / N.pow(d) % N) * k);
+            let l = lab::srgb_to_lab(rgb);
+            t.extend([l.l / 100.0, (l.a + 128.0) / 255.0, (l.b + 128.0) / 255.0].map(q));
+        }
+        t
+    };
+    let b2a = |k: f32| {
+        let mut t = Vec::with_capacity(N.pow(3) * 3);
+        for i in 0..N.pow(3) {
+            let [l, a, b] = [2, 1, 0].map(|d| unit(i / N.pow(d) % N));
+            let rgb = lab::lab_to_srgb(Lab::new(l * 100.0, a * 255.0 - 128.0, b * 255.0 - 128.0));
+            t.extend(rgb.map(|v| q(v / k)));
+        }
+        t
+    };
+    let table = |clut: Vec<u16>| {
+        let mut grid_points = [0u8; 16];
+        grid_points[..3].fill(N as u8);
+        LutWarehouse::Multidimensional(LutMultidimensionalType {
+            num_input_channels: 3,
+            num_output_channels: 3,
+            grid_points,
+            clut: Some(LutStore::Store16(clut)),
+            a_curves: vec![ToneReprCurve::Parametric(vec![1.0]); 3],
+            b_curves: vec![ToneReprCurve::Parametric(vec![1.0]); 3],
+            m_curves: vec![],
+            matrix: Matrix3d::IDENTITY,
+            bias: Vector3d::default(),
+        })
+    };
+    let mut p = ColorProfile::default();
+    p.profile_class = ProfileClass::DisplayDevice;
+    p.color_space = DataColorSpace::Rgb;
+    p.pcs = DataColorSpace::Lab;
+    p.rendering_intent = RenderingIntent::Perceptual;
+    p.white_point = moxcms::WHITE_POINT_D50.to_xyzd();
+    p.media_white_point = Some(p.white_point);
+    for (intent, k) in [(0, perceptual), (1, 1.0), (2, 1.0)] {
+        let (fwd, back) = (Some(table(a2b(k))), Some(table(b2a(k))));
+        match intent {
+            0 => (p.lut_a_to_b_perceptual, p.lut_b_to_a_perceptual) = (fwd, back),
+            1 => (p.lut_a_to_b_colorimetric, p.lut_b_to_a_colorimetric) = (fwd, back),
+            _ => (p.lut_a_to_b_saturation, p.lut_b_to_a_saturation) = (fwd, back),
+        }
+    }
+    icc::encode(&p).unwrap()
+}
+
+#[test]
+fn profiles_are_the_same_only_for_the_intent_whose_tables_agree() {
+    // GUARDS: identity was decided relative colorimetric and then used to skip conversion for every
+    // intent: LUT profiles with the same colorimetric tables but other perceptual ones kept their
+    // numbers in a perceptual conversion.
+    let (plain, darker) = (rgb_lut_profile(1.0), rgb_lut_profile(0.8));
+    assert!(same_rgb_profile(&plain, &darker, Intent::RelativeColorimetric));
+    assert!(!same_rgb_profile(&plain, &darker, Intent::Perceptual));
+    assert!(same_rgb_profile(&plain, &rgb_lut_profile(1.0), Intent::Perceptual));
+    for (intent, kept) in [(Intent::RelativeColorimetric, true), (Intent::Perceptual, false)] {
+        let w = WorkingRgb { icc: plain.clone().into(), intent, bpc: false };
+        assert_eq!(RgbTransform::new(&darker, &w).unwrap().keeps_numbers(), kept, "{intent:?}");
+    }
 }

@@ -4663,6 +4663,7 @@ dependencies = [
  "jpeg-encoder",
  "kurbo 0.13.1",
  "log",
+ "moxcms",
  "proptest",
  "roxmltree 0.21.1",
  "ruzstd",

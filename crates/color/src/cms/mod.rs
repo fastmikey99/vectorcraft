@@ -357,28 +357,35 @@ pub fn working_rgb() -> Option<WorkingRgb> {
     Some(WorkingRgb { icc: icc_bytes(&st.rgb).ok()?, intent: st.intent, bpc: st.bpc })
 }
 
-/// Whether RGB profiles `a` and `b` (ICC files) describe the same colours: the same bytes, or
-/// their colours come out the same (within half an 8-bit step) in a wide reference space (ProPhoto
-/// RGB, relative colorimetric), on a grid through the whole cube and at every 8-bit value along
-/// each channel and the greys (where tone curves could part between the grid's points). Anything
-/// that isn't a readable RGB profile is not the same.
-pub fn same_rgb_profile(a: &[u8], b: &[u8]) -> bool {
+/// Whether RGB profiles `a` and `b` (ICC files) describe the same colours with rendering intent
+/// `intent` (the one the conversion they stand in for would use: a profile's tables can differ by
+/// intent): the same bytes, or their colours come out the same (within half an 8-bit step) in a
+/// wide reference space (ProPhoto RGB), relative colorimetric and with `intent`, on a grid through
+/// the whole cube and at every 8-bit value along each channel and the
+/// greys (where tone curves could part between the grid's points). Anything that isn't a readable
+/// RGB profile is not the same.
+pub fn same_rgb_profile(a: &[u8], b: &[u8], intent: Intent) -> bool {
     if a == b {
         return true;
     }
     let (Ok(pa), Ok(pb)) = (IccProfile::from_bytes(None, a), IccProfile::from_bytes(None, b)) else { return false };
-    same_colours(&pa, &pb)
+    same_colours(&pa, &pb, intent)
 }
 
 /// [`same_rgb_profile`] for parsed profiles.
-fn same_colours(pa: &IccProfile, pb: &IccProfile) -> bool {
+fn same_colours(pa: &IccProfile, pb: &IccProfile, intent: Intent) -> bool {
     if pa.kind != ProfileKind::Rgb || pb.kind != ProfileKind::Rgb {
         return false;
     }
     let Some(reference) = icc::builtin_rgb(PROPHOTO_RGB) else { return false };
+    let near = |x: [f32; 3], y: [f32; 3]| x.iter().zip(y).all(|(x, y)| (x - y).abs() <= 0.5 / 255.0);
+    // Relative colorimetric, and the intent asked for (a profile's tables can differ by intent).
+    let intents = if intent == Intent::RelativeColorimetric { vec![intent] } else { vec![Intent::RelativeColorimetric, intent] };
     let same = |rgb: [f32; 3]| {
-        let at = |p: &IccProfile| p.to_rgb_of(&reference, &rgb, Intent::RelativeColorimetric, false);
-        matches!((at(pa), at(pb)), (Some(x), Some(y)) if x.iter().zip(y).all(|(x, y)| (x - y).abs() <= 0.5 / 255.0))
+        intents.iter().all(|&i| {
+            let at = |p: &IccProfile| p.to_rgb_of(&reference, &rgb, i, false);
+            matches!((at(pa), at(pb)), (Some(x), Some(y)) if near(x, y))
+        })
     };
     const STEPS: [f32; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
     let cube = STEPS.iter().all(|&r| STEPS.iter().all(|&g| STEPS.iter().all(|&b| same([r, g, b]))));
@@ -414,7 +421,7 @@ impl RgbTransform {
         if s.kind != ProfileKind::Rgb || d.kind != ProfileKind::Rgb {
             return None;
         }
-        let same = src == &dest.icc[..] || same_colours(&s, &d);
+        let same = src == &dest.icc[..] || same_colours(&s, &d, dest.intent);
         Some(Self { src: s, dest: d, intent: dest.intent, bpc: dest.bpc, same })
     }
 

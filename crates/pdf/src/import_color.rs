@@ -495,11 +495,13 @@ impl<'p> Colors<'p> {
         f
     }
 
-    /// Profiles `ps` as a [`Group`].
+    /// Profiles `ps` as a [`Group`]: one when they all convert as the first does (with the working
+    /// space's intent).
     fn group(&mut self, ps: &[Vec<u8>]) -> Group {
         let Some((first, rest)) = ps.split_first() else { return Group::None };
+        let intent = self.working_rgb.as_ref().map_or(cms::Intent::RelativeColorimetric, |w| w.intent);
         match self.transform(first) {
-            Some(k) if rest.iter().all(|p| cms::same_rgb_profile(p, first)) => Group::One(k),
+            Some(k) if rest.iter().all(|p| cms::same_rgb_profile(p, first, intent)) => Group::One(k),
             _ => Group::Several,
         }
     }
