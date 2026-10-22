@@ -60,6 +60,7 @@ pub(crate) struct Ocg {
     /// Printed (its print usage isn't off).
     pub print: bool,
     pub locked: bool,
+    pub processing_white: bool,
     /// The group it is listed under in the layer order (a sublayer of it).
     pub parent: Option<usize>,
 }
@@ -173,7 +174,9 @@ impl Ocgs {
             _ => !self.off.contains(&id),
         };
         let name = if name.is_empty() { format!("Layer {}", self.list.len() + 1) } else { name };
-        self.list.push(Ocg { name, on, print, locked, parent: None });
+        let processing_white =
+            d.get::<Dict<'_>>(b"GTS_Metadata").and_then(|m| m.get::<Name<'_>>(b"GTS_ProcStepsGroup")).is_some_and(|n| n.as_ref() == b"White");
+        self.list.push(Ocg { name, on, print, locked, processing_white, parent: None });
         self.index.insert(id, self.list.len() - 1);
         self.list.len() - 1
     }

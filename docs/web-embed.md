@@ -221,8 +221,8 @@ post({ type: 'vectorcraft:colorSettings', id: 'cs1',
 - `rgb`, `cmyk`, `intent` (`perceptual`, `relative`, `saturation`, `absolute`) and `bpc` set the
   working spaces as Edit › Color Settings does; a field left out stays as it is. A space must be a
   built-in profile or one registered (by this message or earlier).
-- They are applied at the next frame **before** that frame's `vectorcraft:open` is read, so send
-  them before the open: the file is then read in them (see below). They last for the page's
+- They are applied in the order the parent's messages arrive, with the opens and exports, so
+  send them before the open: the file is then read in them (see below). They last for the page's
   life (every later open), like the person's own Color Settings; the page sends them again after
   a reload. They are not preferences (`vectorcraft:prefs` doesn't carry them) and not an edit:
   no `dirty: true`, no undo step.

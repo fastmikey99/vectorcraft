@@ -2,6 +2,71 @@
 use crate::protocol;
 use vectorcraft_ui_egui::VectorcraftApp;
 
+/// A parent operation; the bridge keeps all variants in a single FIFO.
+// Browser variants are exercised through the bridge on wasm; native builds compile tests only.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub enum Operation {
+    Export(protocol::Export),
+    Mark(String, serde_json::Value),
+    Place(protocol::Place),
+    Solidify(protocol::Solidify),
+    Open(vectorcraft_ui_egui::HostOpen),
+    Prefs(String),
+    /// `vectorcraft:colorSettings`: in the queue, so an open sent after it is read in its settings.
+    ColorSettings(protocol::ColorSettings),
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub enum Reply {
+    Export { name: String, bytes: Vec<u8>, bounds: Option<vectorcraft_geom::Rect>, native: bool, mark_saved: bool, preserve_source: bool },
+    Message { kind: &'static str, value: serde_json::Value },
+    None,
+}
+
+/// Execute one queued operation. Shared with native same-frame ordering tests.
+pub fn execute(app: &mut VectorcraftApp, operation: Operation) -> Result<Reply, String> {
+    use serde_json::json;
+    Ok(match operation {
+        Operation::Export(export) => {
+            let (name, bytes, bounds, native) = write_export(app, &export)?;
+            Reply::Export { name, bytes, bounds, native, mark_saved: export.mark_saved, preserve_source: export.preserve_source }
+        }
+        Operation::Mark(command, params) => {
+            app.run(&command, params)?;
+            let result = app.session.execute("sep.mark.list", &json!({})).map_err(|e| e.to_string())?;
+            Reply::Message { kind: "vectorcraft:sep.marks", value: json!({"marks":result["marks"], "units":"pt"}) }
+        }
+        Operation::Place(place) => Reply::Message { kind: "vectorcraft:placed", value: json!({"ids":place_file(app, &place)?}) },
+        Operation::Solidify(request) => {
+            let done = solidify(app, &request)?;
+            Reply::Message {
+                kind: "vectorcraft:solidified",
+                value: json!({"ids":done.ids,"form":done.form,"level":done.level,
+                "softPixels":done.soft,"clearPixels":done.clear,"opaquePixels":done.opaque}),
+            }
+        }
+        Operation::Open(open) => {
+            app.open_from_host(open);
+            Reply::None
+        }
+        Operation::ColorSettings(request) => {
+            let done = apply_color_settings(app, &request)?;
+            let text = |k: &str| done.settings[k].as_str().unwrap_or_default().to_string();
+            let profiles: Vec<&str> = done.settings["profiles"].as_array().into_iter().flatten().filter_map(|p| p["name"].as_str()).collect();
+            Reply::Message {
+                kind: "vectorcraft:colorSettingsApplied",
+                value: json!({"loaded":done.loaded, "rgb":text("rgb"), "cmyk":text("cmyk"), "intent":text("intent"),
+                "bpc":done.settings["bpc"].as_bool().unwrap_or(false), "profiles":profiles}),
+            }
+        }
+        Operation::Prefs(text) => {
+            app.ui = serde_json::from_str::<vectorcraft_ui_egui::UiState>(&text).map_err(|e| e.to_string())?.sanitized();
+            vectorcraft_ui_egui::prefs_dialog::restore(app);
+            Reply::None
+        }
+    })
+}
+
 /// The active document written as `export` asks → its file name and bytes.
 /// → the file's name, its bytes, the selection's bounds (with `selected_only`), and whether the bytes
 /// are a selected image's own pixels.
@@ -238,6 +303,17 @@ pub fn apply_color_settings(app: &mut VectorcraftApp, request: &protocol::ColorS
     Ok(ColorSettingsApplied { loaded, settings })
 }
 
+/// Summarize what was actually saved (also used for File > Save downloads and selection exports).
+pub fn saved_marks(name: &str, bytes: &[u8]) -> Result<serde_json::Value, String> {
+    if !name.to_ascii_lowercase().ends_with(".pdf") {
+        return Ok(serde_json::json!([]));
+    }
+    let loaded = vectorcraft_engine::cmd::fileio::load(name, bytes).map_err(|e| e.to_string())?;
+    let mut session = vectorcraft_engine::Session::new();
+    session.add_document(loaded.doc, None);
+    Ok(session.execute("sep.mark.list", &serde_json::json!({})).map_err(|e| e.to_string())?["marks"].clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +337,27 @@ mod tests {
         let mut session = Session::new();
         session.add_document(doc, None);
         VectorcraftApp::new(session, Default::default())
+    }
+
+    #[test]
+    fn host_marks_export_summary_and_production_reopen() {
+        let mut app = app();
+        app.run("select.all", json!({})).unwrap();
+        let (cmd, params) = protocol::mark_command("vectorcraft:sep.mark.set", Some(json!({"type":"noTrap"}))).unwrap();
+        app.run(cmd, params).unwrap();
+        let (name, bytes, _, _) = write_export(&mut app, &request()).unwrap();
+        let summary = saved_marks(&name, &bytes).unwrap();
+        assert_eq!(summary.as_array().unwrap().len(), 1);
+        assert_eq!(summary[0]["mark"], json!({"type":"noTrap"}));
+        assert!(summary[0]["bounds"]["width"].as_f64().unwrap() > 0.);
+        app.run("document.open", json!({"name":"reopen.pdf","dataBase64":vectorcraft_format::base64_encode(&bytes),"printProduction":true})).unwrap();
+        assert_eq!(app.run("sep.mark.list", json!({})).unwrap()["marks"].as_array().unwrap().len(), 1);
+        let (cmd, params) = protocol::mark_command("vectorcraft:sep.mark.clear", None).unwrap();
+        app.run("select.all", json!({})).unwrap();
+        app.run(cmd, params).unwrap();
+        assert_eq!(app.run("sep.mark.list", json!({})).unwrap()["marks"], json!([]));
+        app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(app.run("sep.mark.list", json!({})).unwrap()["marks"].as_array().unwrap().len(), 1);
     }
 
     fn request() -> protocol::Export {
@@ -428,6 +525,8 @@ mod tests {
         .unwrap();
         let done = apply_color_settings(&mut app, &request);
         let now = cms::active_settings();
+        // Through the bridge's queue, as the parent's message runs: the same, and its answer.
+        let queued = execute(&mut app, Operation::ColorSettings(request.clone()));
         // A request refused at its second profile changes nothing, not even the working space its
         // first one would have registered again.
         let shown = cms::active().rgb_to_srgb([0.2, 0.6, 0.4]);
@@ -446,6 +545,12 @@ mod tests {
         assert!(refused.unwrap_err().contains("profiles[1]"));
         assert_eq!(still, shown, "the working space kept its profile");
         let done = done.unwrap();
+        let Ok(Reply::Message { kind, value }) = queued else { panic!("no answer") };
+        assert_eq!(
+            (kind, &value["rgb"], &value["loaded"][0], &value["intent"]),
+            ("vectorcraft:colorSettingsApplied", &json!("Embed Test RGB"), &json!("Embed Test RGB"), &json!("perceptual"))
+        );
+        assert!(value["profiles"].as_array().unwrap().iter().any(|p| p == "Embed Test RGB"));
         assert_eq!(done.loaded, vec!["Embed Test RGB".to_string()]);
         assert_eq!((now.rgb.as_str(), now.intent), ("Embed Test RGB", cms::Intent::Perceptual));
         assert_eq!(done.settings["rgb"], "Embed Test RGB");
@@ -459,5 +564,19 @@ mod tests {
         let missing = protocol::color_settings(None, Some(Some("No Such RGB".into())), None, None, None).unwrap();
         assert!(apply_color_settings(&mut app, &missing).is_err());
         assert_eq!(cms::active_settings(), before);
+    }
+
+    #[test]
+    fn one_frame_queue_exports_after_the_preceding_image_mutation() {
+        let mut app = app();
+        let id = put(&mut app, [0., 0., 20., 20.]);
+        app.run("select.set", json!({"ids":[id]})).unwrap();
+        let export = protocol::export(Some("png".into()), None, Some(true), None, Some(true)).unwrap();
+        let queue = vec![Operation::Solidify(protocol::solidify(None, None).unwrap()), Operation::Export(export)];
+        let replies: Vec<_> = queue.into_iter().map(|op| execute(&mut app, op).unwrap()).collect();
+        let Reply::Export { bytes, .. } = &replies[1] else { panic!("missing export") };
+        let decoded = image::load_from_memory(bytes).unwrap().to_rgba8();
+        assert!(decoded.pixels().all(|p| p.0[3] == 0 || p.0[3] == 255));
+        assert_ne!(bytes.as_slice(), PNG_A);
     }
 }

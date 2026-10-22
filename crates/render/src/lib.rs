@@ -1978,9 +1978,9 @@ impl Renderer {
             let (key, pm) = if outline {
                 (key, pm)
             } else if let Some(proof) = f.opts.proof.as_ref().filter(|p| p.separations.is_some()) {
-                bitmap_proof::image(&key, &pm, f.doc.images.get(&im.key), proof, !mips)
+                bitmap_proof::image(f.doc, &key, &pm, f.doc.images.get(&im.key), proof, !mips)
             } else {
-                ink::ink_image(&key, &pm, f.ink, f.doc.images.get(&im.key), !mips)
+                ink::ink_image(f.doc, &key, &pm, f.ink, f.doc.images.get(&im.key), !mips)
             };
             let pm = if mips { image_mip(&key, pm, f.view * im.xf * Affine::scale_non_uniform(im.width as f64, im.height as f64)) } else { pm };
             let sx = im.width as f64 / pm.width().max(1) as f64;
@@ -2045,7 +2045,7 @@ impl Renderer {
     /// `touch` marks them used there.
     fn image_pixmap(&mut self, doc: &Document, key: &str, grey: bool, touch: bool) -> Option<(images::ImageKey, Arc<Pixmap>)> {
         let (key, colour) = match doc.images.get(key) {
-            Some(blob) => blob_pixmap(blob, touch)?,
+            Some(blob) => blob_pixmap(doc, blob, touch)?,
             None => {
                 let (src, hash, map) = self.adjusts.get(key)?.clone();
                 let (src_key, src) = self.image_pixmap(doc, &src, false, touch)?;
@@ -2095,10 +2095,12 @@ fn lookup(key: &images::ImageKey, touch: bool) -> Option<Arc<Pixmap>> {
 }
 
 /// The decoded pixels of `blob` (a CMYK image's inks shown through the working CMYK profile, again
-/// when the colour settings change), from the shared store, and their key there.
-fn blob_pixmap(blob: &vectorcraft_doc::ImageBlob, touch: bool) -> Option<(images::ImageKey, Arc<Pixmap>)> {
+/// when the colour settings change, its spot channels printed over them in their swatches' colours
+/// in `doc`), from the shared store, and their key there.
+fn blob_pixmap(doc: &Document, blob: &vectorcraft_doc::ImageBlob, touch: bool) -> Option<(images::ImageKey, Arc<Pixmap>)> {
     let id = images::blob_id(blob);
     let lut = id.cmyk.then(ink::display_lut);
+    let colors = ink::spot_colors(doc, &id.spots);
     let key = images::ImageKey {
         content: id.content,
         adjust: None,
@@ -2107,13 +2109,21 @@ fn blob_pixmap(blob: &vectorcraft_doc::ImageBlob, touch: bool) -> Option<(images
         luts: (lut.as_ref().map_or(0, |l| l.1), 0),
         mip: 0,
         separation: 0,
+        spots: ink::spots_key(&colors),
     };
     if let Some(pm) = lookup(&key, touch) {
         return Some((key, pm));
     }
     // Decoded outside the lock: other renderers carry on meanwhile.
     let pm = match lut.and_then(|(lut, _)| ink::cmyk_pixmap(blob, &lut)) {
-        Some(pm) => pm,
+        Some(mut pm) => {
+            if !colors.is_empty()
+                && let Some(spots) = blob.spot_inks()
+            {
+                ink::print_spots(&mut pm, &spots, &colors);
+            }
+            pm
+        }
         None => paint::decode_pixmap(&blob.bytes)?,
     };
     let pm = images::store().insert(key.clone(), Arc::new(pm));

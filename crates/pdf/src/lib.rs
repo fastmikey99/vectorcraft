@@ -41,6 +41,7 @@
 //!   opens an encrypted file.
 #![forbid(unsafe_code)]
 
+mod devicen;
 mod editing;
 mod encrypt;
 mod export;
@@ -80,6 +81,7 @@ pub use import::{
 };
 pub use pages::{PageInfo, PdfInfo, has_illustrator_data, illustrator_data, info, is_postscript};
 pub use post::{THUMBNAIL_SIZE, Thumbnail};
+pub use preserve::{preparation_output, set_preparation_boxes};
 pub use presets::*;
 pub use print::*;
 pub use settings::*;
@@ -268,6 +270,8 @@ mod tests_compression;
 #[cfg(test)]
 mod tests_dashalign;
 #[cfg(test)]
+mod tests_devicen_images;
+#[cfg(test)]
 mod tests_editing;
 #[cfg(test)]
 mod tests_encrypt;
@@ -325,3 +329,27 @@ mod tests_reader_streaming;
 
 #[cfg(test)]
 mod tests_reader_compat;
+
+mod sep_marks;
+
+/// Production diagnostic classification. Unknown diagnostics fail closed: a new importer
+/// warning must be reviewed before a separation builder can publish its result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagnosticClass {
+    /// The public printed page is unchanged (editing structure may differ).
+    PrintPreserving,
+    /// Printed content is lost, approximated, or its fidelity is not established.
+    FidelityLoss,
+}
+
+pub fn classify_diagnostic(message: &str) -> DiagnosticClass {
+    if crate::import::is_outlines_note(message)
+        || message == PAST_PAGE_NOTE
+        || message == OFF_ARTBOARD_NOTE
+        || message == crate::preserve::IRRELEVANT_BLEND_SPACE
+    {
+        DiagnosticClass::PrintPreserving
+    } else {
+        DiagnosticClass::FidelityLoss
+    }
+}

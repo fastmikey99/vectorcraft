@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use vectorcraft_color::Color;
 use vectorcraft_color::blend::{cmyk_planes, planes_cmyk};
 use vectorcraft_color::cms::{self, Cms, CmykLut, ProofLut, lab};
-use vectorcraft_doc::cmyk::Inks;
+use vectorcraft_doc::cmyk::{Inks, SpotInks};
 use vectorcraft_doc::{ColorMode, Document, ImageBlob};
 use vello_cpu::Pixmap;
 use vello_cpu::color::PremulRgba8;
@@ -311,9 +311,86 @@ pub(crate) fn cmyk_pixmap(blob: &ImageBlob, lut: &InkLut) -> Option<Pixmap> {
     inks_pixmap(&blob.cmyk()?, lut)
 }
 
+/// The colour of each spot channel `names` of an image in `doc`: its spot swatch's ink colour;
+/// `None` for a channel whose spot swatch isn't in the document (it prints nothing).
+pub(crate) fn spot_colors(doc: &Document, names: &[String]) -> Vec<Option<Color>> {
+    names.iter().map(|n| crate::proof::spot_color(doc, n)).collect()
+}
+
+/// What images printed with spot channels in `colors` are cached under (0 for none).
+pub(crate) fn spots_key(colors: &[Option<Color>]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    if colors.is_empty() {
+        return 0;
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for c in colors {
+        match c {
+            Some(c) => format!("{c:?}").hash(&mut h),
+            None => 0u8.hash(&mut h),
+        }
+    }
+    h.finish() | 1
+}
+
+/// Spot channels `spots` printed over the (premultiplied) pixels `pm` in `colors`: each ink
+/// multiplies its display colour in at its amount, as spot inks show over process inks.
+pub(crate) fn print_spots(pm: &mut Pixmap, spots: &SpotInks, colors: &[Option<Color>]) {
+    let c = cms::active();
+    let shown: Vec<Option<[f32; 3]>> = colors.iter().map(|col| col.map(|col| c.display_rgb(&col))).collect();
+    let per = spots.names.len();
+    if per == 0 || (u32::from(pm.width()), u32::from(pm.height())) != (spots.width, spots.height) {
+        return;
+    }
+    for (px, tints) in pm.data_mut().iter_mut().zip(spots.data.chunks_exact(per)) {
+        let mut f = [1.0f32; 3];
+        for (t, s) in tints.iter().zip(&shown) {
+            if let (Some(s), true) = (s, *t > 0) {
+                let t = f32::from(*t) / 255.0;
+                for i in 0..3 {
+                    f[i] *= 1.0 - t * (1.0 - s[i].clamp(0.0, 1.0));
+                }
+            }
+        }
+        let m = |v: u8, f: f32| (f32::from(v) * f).round().clamp(0.0, 255.0) as u8;
+        (px.r, px.g, px.b) = (m(px.r, f[0]), m(px.g, f[1]), m(px.b, f[2]));
+    }
+}
+
+/// Process ink amounts `inks` with spot channels `spots` folded in, each spot ink as its colour's
+/// process inks (`colors`, [`spot_colors`]): what the ink planes of a CMYK document draw.
+fn fold_spots(inks: &mut [u8], spots: &SpotInks, colors: &[Option<Color>]) {
+    let per = spots.names.len();
+    let alts: Vec<Option<[f32; 4]>> = colors.iter().map(|c| c.as_ref().map(self::inks)).collect();
+    if per == 0 {
+        return;
+    }
+    for (p, tints) in inks.as_chunks_mut::<4>().0.iter_mut().zip(spots.data.chunks_exact(per)) {
+        let mut paper = p.map(|v| 1.0 - f32::from(v) / 255.0);
+        for (t, alt) in tints.iter().zip(&alts) {
+            if let (Some(alt), true) = (alt, *t > 0) {
+                let t = f32::from(*t) / 255.0;
+                for (v, a) in paper.iter_mut().zip(alt) {
+                    *v *= 1.0 - t * a.clamp(0.0, 1.0);
+                }
+            }
+        }
+        for (o, v) in p.iter_mut().zip(paper) {
+            *o = q(1.0 - v);
+        }
+    }
+}
+
 /// Image pixels `pm` (cached as `key`, from `blob` when it is a document's image as it is) as
 /// painted with `ink`, cached with the images, and their key.
-pub(crate) fn ink_image(key: &ImageKey, pm: &Arc<Pixmap>, ink: Ink, blob: Option<&ImageBlob>, touch: bool) -> (ImageKey, Arc<Pixmap>) {
+pub(crate) fn ink_image(
+    doc: &Document,
+    key: &ImageKey,
+    pm: &Arc<Pixmap>,
+    ink: Ink,
+    blob: Option<&ImageBlob>,
+    touch: bool,
+) -> (ImageKey, Arc<Pixmap>) {
     if matches!(ink, Ink::Display | Ink::RichBlack) {
         return (key.clone(), pm.clone());
     }
@@ -333,7 +410,10 @@ pub(crate) fn ink_image(key: &ImageKey, pm: &Arc<Pixmap>, ink: Ink, blob: Option
     // CMYK images (shown through the display table) paint their own inks; the others are separated.
     let size = (pm.width() as u32, pm.height() as u32);
     let cmyk = key.luts.0 != 0 && key.adjust.is_none() && !key.grey;
-    let inks = blob.filter(|_| cmyk).and_then(ImageBlob::cmyk).filter(|i| (i.width, i.height) == size);
+    let mut inks = blob.filter(|_| cmyk).and_then(ImageBlob::cmyk).filter(|i| (i.width, i.height) == size);
+    if let (Some(inks), Some(spots)) = (inks.as_mut(), blob.filter(|_| key.spots != 0).and_then(ImageBlob::spot_inks)) {
+        fold_spots(&mut inks.data, &spots, &spot_colors(doc, &spots.names));
+    }
     let planes = [Ink::Cmy, Ink::K].map(|plane| {
         let mut out = Pixmap::new(pm.width(), pm.height());
         if let Some(inks) = &inks {

@@ -70,6 +70,19 @@ enum Colorant {
     Unknown,
 }
 
+/// What a channel of an image in a Separation or DeviceN space prints on ([`Colors::image_channels`]).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ImageChannel {
+    /// A process plate (CMYK channel).
+    Process(usize),
+    /// The plate of a spot swatch (its name).
+    Spot(String),
+    /// Every plate (Registration).
+    All,
+    /// Nothing.
+    None,
+}
+
 /// A Separation or DeviceN colour space of the file.
 struct InkSpace {
     /// `Debug` text of its tint transform: how a colour's space is matched to it.
@@ -581,6 +594,38 @@ impl<'p> Colors<'p> {
             .collect();
         self.spaces.push(InkSpace { key, device_n, names, colorants });
         Some(())
+    }
+
+    /// The plate each channel of image colour space `a` (`[/Separation name alt tint]` or
+    /// `[/DeviceN [names] alt tint …]`) prints on, spot inks as their swatches (the swatches of
+    /// paints in the same inks: [`Colors::ink`]), which the import then adds. `Err` (why, a warning)
+    /// when one is a spot ink whose colour can't be told.
+    pub fn image_channels(&mut self, a: &Array<'_>) -> Result<Vec<ImageChannel>, &'static str> {
+        const UNKNOWN: &str = "images in spot inks whose colour couldn't be read were imported in RGB, separated into process inks";
+        let mut it = a.flex_iter();
+        let (_, names) = ink_names(&mut it).ok_or(UNKNOWN)?;
+        let alt = it.next::<Object<'_>>().as_ref().and_then(alt_model);
+        let tint = it.next::<Object<'_>>().as_ref().and_then(Function::new);
+        let mut channels = Vec::with_capacity(names.len());
+        for (i, name) in names.iter().enumerate() {
+            channels.push(match name.as_str() {
+                "None" => ImageChannel::None,
+                "All" => ImageChannel::All,
+                n => match PROCESS.iter().position(|p| *p == n) {
+                    Some(ch) => ImageChannel::Process(ch),
+                    None => {
+                        // The ink alone at 100 %, through the tint transform, as for paints.
+                        let input: SmallVec<[f32; 4]> = (0..names.len()).map(|j| if i == j { 1.0 } else { 0.0 }).collect();
+                        let color = alt.zip(tint.as_ref()).and_then(|(alt, f)| alt_color(alt, &f.eval(input)?)).ok_or(UNKNOWN)?;
+                        let k = self.ink(n, color);
+                        let ink = self.inks.get_mut(k).ok_or(UNKNOWN)?;
+                        ink.used = true;
+                        ImageChannel::Spot(ink.name.clone())
+                    }
+                },
+            });
+        }
+        Ok(channels)
     }
 
     /// The ink named `source` (the first definition wins), its swatch name unique in the document.

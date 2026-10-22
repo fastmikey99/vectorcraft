@@ -5205,3 +5205,78 @@ effect	Points	Σημεία
 @msg	copies must be true or false	το copies πρέπει να είναι true ή false
 @msg	the image's opacity mask has its own transparency: release it first	η μάσκα αδιαφάνειας της εικόνας έχει δική της διαφάνεια: αποδεσμεύστε την πρώτα
 @msg	id must name an image	το id πρέπει να ορίζει μια εικόνα
+	Run Separation Action Lists	Εκτέλεση λιστών ενεργειών διαχωρισμού χρωμάτων
+@msg	PAL XML nesting exceeds 32 levels	Η εμφώλευση PAL XML υπερβαίνει τα 32 επίπεδα
+@msg	PAL action has no Type	Η ενέργεια PAL δεν έχει Type
+@msg	PAL action nesting exceeds 32 levels	Η εμφώλευση ενεργειών PAL υπερβαίνει τα 32 επίπεδα
+@msg	PAL exceeds 4 MiB	Το PAL υπερβαίνει τα 4 MiB
+@msg	PAL has more than 10000 actions	Το PAL έχει περισσότερες από 10000 ενέργειες
+@msg	PAL list paths must be relative names without parent traversal	Οι διαδρομές λιστών PAL πρέπει να είναι σχετικές χωρίς πρόσβαση σε γονικούς φακέλους
+@msg	PAL list resolves outside the action-list root	Η λίστα PAL βρίσκεται εκτός του ριζικού φακέλου λιστών ενεργειών
+@msg	expected PAL ActionList Version 2.0	αναμενόταν PAL ActionList Version 2.0
+@msg	PAL distance must be between 0 and 10000 mm	PAL distance must be between 0 and 10000 mm
+@msg	PAL miter limit must be between 1 and 500	PAL miter limit must be between 1 and 500
+@msg	PAL vector geometry requires opaque artwork without masks or effects	PAL vector geometry requires opaque artwork without masks or effects
+@msg	PAL clip mask must be a path	PAL clip mask must be a path
+@msg	PAL vector geometry cannot outline this object type	PAL vector geometry cannot outline this object type
+@msg	PAL dynamic mark exclusion is not implemented	PAL dynamic mark exclusion is not implemented
+@msg	white underprint requires exactly one selected separation	white underprint requires exactly one selected separation
+@msg	missing underprint separation	missing underprint separation
+@msg	PAL object disappeared	PAL object disappeared
+@msg	PAL spread/choke requires paths	PAL spread/choke requires paths
+@msg	PAL object position disappeared	PAL object position disappeared
+@msg	PAL shaper has no source	PAL shaper has no source
+@msg	PAL call parameters are not implemented	PAL call parameters are not implemented
+@msg	only FitAll or FitToSelection with Both content page boxes are supported	only FitAll or FitToSelection with Both content page boxes are supported
+@msg	PAL shape creation supports rectangles with zero corner radius	PAL shape creation supports rectangles with zero corner radius
+@msg	PAL object sizing supports the selection center with opacity masks included	PAL object sizing supports the selection center with opacity masks included
+@msg	unsupported JoinType {0}	unsupported JoinType {0}
+@msg	unsupported TrappingMode {0}	unsupported TrappingMode {0}
+@msg	unsupported SpreadTarget {0}	unsupported SpreadTarget {0}
+@msg	unsupported Shaper operation {0}	unsupported Shaper operation {0}
+@msg	not implemented for nonempty selection: {0}	not implemented for nonempty selection: {0}
+
+# Local PAL profile discovery
+@msg	profiles must be a nonempty folder path	profiles must be a nonempty folder path
+@msg	ambiguous document profile: {want}	ambiguous document profile: {want}
+@msg	profile folder exceeds 4096 entries	profile folder exceeds 4096 entries
+@msg	PAL profile folders are unavailable on the web	PAL profile folders are unavailable on the web
+@msg	document profile unavailable: {name}; set VECTORCRAFT_PROFILES or profiles to an ICC folder{detail}	document profile unavailable: {name}; set VECTORCRAFT_PROFILES or profiles to an ICC folder{detail}
+
+# PAL Dark trapping and rasterization
+@msg	unsupported trap tag {0}	unsupported trap tag {0}
+@msg	unsupported ExternalTrap {0}	unsupported ExternalTrap {0}
+@msg	TrapTask: {0} pixels; {1} seconds	TrapTask: {0} pixels; {1} seconds
+@msg	Rasterize supports 600 dpi, AntiAliasing None, ConsiderBackground 0	Rasterize supports 600 dpi, AntiAliasing None, ConsiderBackground 0
+@msg	Rasterize selection has no bounds	Rasterize selection has no bounds
+@msg	Rasterize exceeds 64 million pixels	Rasterize exceeds 64 million pixels
+@msg	Trap tag conflicts: {0} paints excluded by ink rules; {1} paints excluded by tags	Trap tag conflicts: {0} paints excluded by ink rules; {1} paints excluded by tags
+@msg	trap vector band exceeds one million runs	trap vector band exceeds one million runs
+@msg	invalid metallic intents	invalid metallic intents
+@msg	metallic intent contains an unavailable object id	metallic intent contains an unavailable object id
+@msg	invalid metallic intent rectangle	invalid metallic intent rectangle
+@msg	metallic intent selected no objects	metallic intent selected no objects
+@msg	prototype does not support neon artwork	prototype does not support neon artwork
+@msg	prototype does not support neon inks	prototype does not support neon inks
+@msg	PAL has no active layer	PAL has no active layer
+	Separation marks	Separation marks
+	Metallic	Metallic
+	No trap (no bleed)	No trap (no bleed)
+	Clear separation mark	Clear separation mark
+	Set Separation Mark	Set Separation Mark
+	Clear Separation Mark	Clear Separation Mark
+	Separation Marks	Separation Marks
+@id	sep.mark.set	Set Separation Mark
+@id	sep.mark.clear	Clear Separation Mark
+@id	sep.mark.list	Separation Marks
+@msg	invalid separation mark list	invalid separation mark list
+@msg	ids must be an array	ids must be an array
+@msg	too many separation mark targets	too many separation mark targets
+@msg	separation mark target is missing	separation mark target is missing
+@msg	NoTrap marks require exactly one trap ticket immediately followed by TrapTask	NoTrap marks require exactly one trap ticket immediately followed by TrapTask
+@msg	invalid separation mark	invalid separation mark
+@msg	missing separation mark	missing separation mark
+@msg	missing separation form	missing separation form
+@msg	unreadable separation form	unreadable separation form
+@msg	couldn't encode separation marks	couldn't encode separation marks
+@msg	unknown separation mark message	unknown separation mark message

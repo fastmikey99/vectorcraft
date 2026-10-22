@@ -11,7 +11,10 @@ pub struct Open {
 }
 
 /// The messages the bridge reads.
-pub const HEARD: [&str; 7] = [
+pub const HEARD: [&str; 10] = [
+    "vectorcraft:sep.mark.set",
+    "vectorcraft:sep.mark.clear",
+    "vectorcraft:sep.mark.list",
     "vectorcraft:open",
     "vectorcraft:export",
     "vectorcraft:place",
@@ -188,6 +191,7 @@ pub fn prefs(text: Option<String>) -> Result<String, String> {
 /// Check a `vectorcraft:place` the bridge accepted: a file name, its bytes, and `at` (when given) as
 /// four finite numbers with a positive width and height. The error is the text of the
 /// `vectorcraft:failed` reply.
+#[cfg(test)]
 pub fn place(name: Option<String>, bytes: Option<Vec<u8>>, at: Option<Vec<f64>>) -> Result<Place, String> {
     place_copies(name, bytes, at, None)
 }
@@ -647,5 +651,42 @@ mod tests {
             let e = open_unit("strokeUnits", Some(bad.clone())).unwrap_err();
             assert!(e.starts_with("vectorcraft:open: strokeUnits must name a unit"), "{bad:?}: {e}");
         }
+    }
+}
+
+/// Only selection-based mark commands are exposed to the parent; arbitrary commands are not.
+pub fn mark_command(kind: &str, mark: Option<serde_json::Value>) -> Result<(&'static str, serde_json::Value), String> {
+    match kind {
+        "vectorcraft:sep.mark.set" => {
+            let mark: vectorcraft_doc::SepMark = serde_json::from_value(mark.unwrap_or(serde_json::Value::Null)).map_err(|e| e.to_string())?;
+            if !mark.valid() {
+                return Err("invalid separation mark list".into());
+            }
+            Ok(("sep.mark.set", serde_json::json!({"mark":mark})))
+        }
+        "vectorcraft:sep.mark.clear" => Ok(("sep.mark.clear", serde_json::json!({}))),
+        "vectorcraft:sep.mark.list" => Ok(("sep.mark.list", serde_json::json!({}))),
+        _ => Err("unknown separation mark message".into()),
+    }
+}
+
+#[cfg(test)]
+mod mark_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn mark_messages_are_parent_only_and_validate_payloads() {
+        for kind in ["vectorcraft:sep.mark.set", "vectorcraft:sep.mark.clear", "vectorcraft:sep.mark.list"] {
+            assert!(accepts("https://example.test", "https://example.test", true, Some(kind)));
+            assert!(!accepts("https://example.test", "https://other.test", true, Some(kind)));
+            assert!(!accepts("https://example.test", "https://example.test", false, Some(kind)));
+        }
+        assert!(mark_command("vectorcraft:sep.mark.set", None).is_err());
+        assert!(mark_command("vectorcraft:sep.mark.set", Some(json!({"type":"metallic","list":"../outside"}))).is_err());
+        assert_eq!(
+            mark_command("vectorcraft:sep.mark.set", Some(json!({"type":"noTrap"}))).unwrap(),
+            ("sep.mark.set", json!({"mark":{"type":"noTrap"}}))
+        );
+        assert_eq!(mark_command("vectorcraft:sep.mark.clear", None).unwrap(), ("sep.mark.clear", json!({})));
     }
 }

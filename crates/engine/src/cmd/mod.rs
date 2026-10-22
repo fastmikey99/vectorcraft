@@ -73,6 +73,8 @@ mod recolor;
 pub mod recovery;
 pub mod scripts;
 mod select;
+mod sep;
+mod sep_trap;
 pub(crate) mod shaper;
 pub mod shortcutset;
 pub(crate) mod slices;
@@ -217,6 +219,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(object::specs());
         v.extend(path::specs());
         v.extend(select::specs());
+        v.extend(sep::specs());
         v.extend(wand::specs());
         v.extend(paint::specs());
         // Split out of `paint` (M3.8); kept next to it so lists in registry order (the command
@@ -301,6 +304,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(cut::specs());
         v.extend(halftone::specs());
         v.extend(solidify::specs());
+        v.extend(sep_trap::specs());
         v.extend(perspgrid::specs());
         v.extend(lineweight::specs());
         v.extend(shortcutset::specs());
