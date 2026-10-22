@@ -8,6 +8,7 @@ use vectorcraft_geom::{Rect, shapes};
 use vectorcraft_testkit::pdf::{PdfPage, first_extra, pdf, pdf_with};
 
 use crate::import_color::{Colors, Space};
+use crate::import_scan::Rgb;
 use crate::*;
 
 const Q: f32 = 1.0 / 255.0 + 1e-4;
@@ -390,7 +391,7 @@ fn colour_spaces_are_read_from_the_interpreters_debug_form() {
         ("ColorSpace(Separation(Separation { tint_transform: Function(Type2(..)) }))", 1, Space::Other),
         ("ColorSpace(DeviceCmyk)", 3, Space::Other),
     ] {
-        assert_eq!(c.space_of(text, n, None), want, "{text}");
+        assert_eq!(c.space_of(text, n, None, Rgb::Unknown), want, "{text}");
     }
     let t = "Color { color_space: ColorSpace(DeviceCmyk), components: [0.101960786, 0.2, 0.3, 0.4], opacity: 1.0 }";
     let (space, comps) = crate::import_color::split_color(t).unwrap();
@@ -411,7 +412,7 @@ fn inks_are_found_past_dictionary_values_the_reader_cannot_parse() {
         // Opened by the reader alone, without the checks of `pages::open`.
         let pdf = craft_pdf::syntax::Pdf::new(pdf(&[page], None)).unwrap();
         let mut c = Colors::new(&pdf, vec![]);
-        let space = c.space_of(&format!("ColorSpace(Separation(Separation {{ tint_transform: {key} }}))"), 1, None);
+        let space = c.space_of(&format!("ColorSpace(Separation(Separation {{ tint_transform: {key} }}))"), 1, None, Rgb::Unknown);
         assert_eq!(space, Space::Inks(0), "{junk}");
         let gold = c.native(space, &[1.0]).unwrap();
         assert_eq!(gold.link, Some(("Gold".to_string(), 1.0)), "{junk}");
@@ -475,4 +476,227 @@ fn fractional_process_inks_and_spot_tints_are_not_rounded_on_import() {
     assert_eq!(solid(&paints[0]).0, Color::cmyk(0.123456, 0.234567, 0.345678, 0.456789));
     assert_eq!(solid(&paints[1]).2, 0.543219);
     assert_eq!(doc.swatch("PrecisionWhite").unwrap().paint.color().unwrap(), Color::cmyk(0.123456, 0.234567, 0.345678, 0.456789));
+}
+
+/// An `ICCBased` profile stream for [`pdf_with`]: RGB profile `name`'s, its header naming the
+/// sRGB device model when `marked` (as sRGB profiles in files do; the reader then reads its colours
+/// as DeviceRGB).
+fn icc_stream(name: &str, marked: bool) -> String {
+    let mut bytes = vectorcraft_color::cms::icc_bytes(name).unwrap().to_vec();
+    if marked {
+        bytes[52..56].copy_from_slice(b"sRGB");
+    }
+    let h: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!("<< /N 3 /Filter /ASCIIHexDecode /Length {} >>\nstream\n{h}>\nendstream", h.len() + 1)
+}
+
+/// The RGB working space `name` as an import converts into it.
+fn working(name: &str) -> vectorcraft_color::cms::WorkingRgb {
+    use vectorcraft_color::cms::{self, Intent};
+    vectorcraft_color::cms::WorkingRgb { icc: cms::icc_bytes(name).unwrap(), intent: Intent::RelativeColorimetric, bpc: false }
+}
+
+/// RGB `rgb` of profile `from` in working space `to`'s numbers.
+fn converted(from: &str, to: &str, rgb: [f32; 3]) -> Color {
+    let t = vectorcraft_color::cms::RgbTransform::new(&vectorcraft_color::cms::icc_bytes(from).unwrap(), &working(to)).unwrap();
+    let [r, g, b] = t.apply(rgb).unwrap();
+    Color::rgb(r, g, b)
+}
+
+/// The fills of `bytes` imported with RGB working space `to` (`None`: sRGB).
+fn fills_in(bytes: &[u8], to: Option<&str>) -> Vec<Paint> {
+    fills(&import_with_report(bytes, &ImportOptions { working_rgb: to.map(working), ..Default::default() }).unwrap().document)
+}
+
+#[test]
+fn rgb_in_the_working_space_profile_keeps_its_numbers() {
+    // GUARDS: a PDF tagged with the RGB working space (Supacolour's seps: Adobe RGB both ways) was
+    // read through sRGB, and the sRGB numbers then taken as working-space ones: each re-read came
+    // out more saturated. Colours in the working space's profile keep their numbers.
+    use vectorcraft_color::cms::{DISPLAY_P3, PROPHOTO_RGB, SRGB};
+    let f = first_extra(1);
+    let one = pdf_with(&[page_with(&format!("/CS0 [/ICCBased {f} 0 R]"), &[("CS0", "0.2 0.6 0.4")])], &[&icc_stream(PROPHOTO_RGB, false)], None);
+    let two = pdf_with(
+        &[page_with(&format!("/CS0 [/ICCBased {f} 0 R] /CS1 [/ICCBased {} 0 R]", f + 1), &[("CS0", "0.2 0.6 0.4"), ("CS1", "0.5 0.5 0.5")])],
+        &[&icc_stream(PROPHOTO_RGB, false), &icc_stream(SRGB, false)],
+        None,
+    );
+    let color = |bytes: &[u8], to: Option<&str>| solid(&fills_in(bytes, to)[0]).0;
+    let kept = Color::rgb(0.2, 0.6, 0.4);
+    assert_eq!(color(&one, Some(PROPHOTO_RGB)), kept);
+    // Another working space: converted into it, not through sRGB.
+    assert!(near(color(&one, Some(DISPLAY_P3)), converted(PROPHOTO_RGB, DISPLAY_P3, [0.2, 0.6, 0.4])), "{:?}", color(&one, Some(DISPLAY_P3)));
+    // sRGB as the working space: the reader's sRGB, as before.
+    assert!(!near(color(&one, None), kept));
+    // A file with another RGB profile too: the page's walk tells which colour is in which.
+    let f2 = fills_in(&two, Some(PROPHOTO_RGB));
+    assert_eq!(solid(&f2[0]).0, kept);
+    assert!(near(solid(&f2[1]).0, converted(SRGB, PROPHOTO_RGB, [0.5; 3])), "{:?}", f2[1]);
+}
+
+#[test]
+fn tagged_rgb_lands_in_the_rgb_working_space() {
+    // GUARDS: an sRGB-tagged customer PDF read with Adobe RGB as the working space kept its sRGB
+    // numbers as Adobe RGB ones (the reader takes a profile that names the sRGB device model as
+    // DeviceRGB): it printed more saturated. Tagged RGB of any profile is converted into the
+    // working space; DeviceRGB numbers are the working space's and stand. On a page with both,
+    // the page's walk tells which colour is which.
+    use vectorcraft_color::cms::{PROPHOTO_RGB, SRGB, WIDE_GAMUT_RGB};
+    let f = first_extra(1);
+    let content = "/CS0 cs 0.8 0.3 0.1 scn 0 0 10 10 re f\n0.2 0.5 0.9 rg 12 0 10 10 re f\n/CS1 cs 0.1 0.7 0.3 scn 24 0 10 10 re f\n/CS0 cs 0.4 0.4 0.6 scn 36 0 10 10 re f\n";
+    let page = PdfPage {
+        resources: format!("/ColorSpace << /CS0 [/ICCBased {f} 0 R] /CS1 [/ICCBased {} 0 R] >>", f + 1),
+        ..PdfPage::new(200.0, 50.0, content)
+    };
+    let bytes = pdf_with(&[page], &[&icc_stream(SRGB, true), &icc_stream(PROPHOTO_RGB, false)], None);
+    let wide = fills_in(&bytes, Some(WIDE_GAMUT_RGB));
+    assert_eq!(wide.len(), 4);
+    assert!(near(solid(&wide[0]).0, converted(SRGB, WIDE_GAMUT_RGB, [0.8, 0.3, 0.1])), "{:?}", wide[0]);
+    assert_eq!(solid(&wide[1]).0, Color::rgb(0.2, 0.5, 0.9), "DeviceRGB numbers stand");
+    assert!(near(solid(&wide[2]).0, converted(PROPHOTO_RGB, WIDE_GAMUT_RGB, [0.1, 0.7, 0.3])), "{:?}", wide[2]);
+    assert!(near(solid(&wide[3]).0, converted(SRGB, WIDE_GAMUT_RGB, [0.4, 0.4, 0.6])), "{:?}", wide[3]);
+    // sRGB as the working space: as before (the sRGB numbers, the reader's sRGB of the rest).
+    let srgb = fills_in(&bytes, None);
+    assert!(near(solid(&srgb[0]).0, Color::rgb(0.8, 0.3, 0.1)) && solid(&srgb[1]).0 == Color::rgb(0.2, 0.5, 0.9));
+    // A file in one sRGB profile alone, with no DeviceRGB: its colours are all that profile's.
+    let only = pdf_with(&[page_with(&format!("/CS0 [/ICCBased {f} 0 R]"), &[("CS0", "0.8 0.3 0.1")])], &[&icc_stream(SRGB, true)], None);
+    assert!(near(solid(&fills_in(&only, Some(WIDE_GAMUT_RGB))[0]).0, converted(SRGB, WIDE_GAMUT_RGB, [0.8, 0.3, 0.1])));
+}
+
+#[test]
+fn tagged_shadings_and_other_spaces_land_in_the_rgb_working_space() {
+    // A shading in an sRGB profile: its stops are converted. A Lab colour, which the reader gives
+    // as sRGB: that sRGB is converted (it was taken as working-space numbers).
+    use vectorcraft_color::cms::{SRGB, WIDE_GAMUT_RGB};
+    let f = first_extra(1);
+    let content = "/Pattern cs /P0 scn 0 0 100 20 re f\n/CS1 cs 50 20 -30 scn 0 30 10 10 re f\n";
+    let page = PdfPage {
+        resources: format!(
+            "/ColorSpace << /CS1 [/Lab << /WhitePoint [0.9642 1 0.8249] /Range [-100 100 -100 100] >>] >> /Pattern << /P0 << /PatternType 2 /Shading << /ShadingType 2 /ColorSpace [/ICCBased {f} 0 R] /Coords [0 0 100 0] /Extend [true true] /Function << /FunctionType 2 /Domain [0 1] /C0 [0.9 0.1 0.1] /C1 [0.1 0.1 0.9] /N 1 >> >> >> >>"
+        ),
+        ..PdfPage::new(200.0, 50.0, content)
+    };
+    let bytes = pdf_with(&[page], &[&icc_stream(SRGB, true)], None);
+    let (wide, srgb) = (fills_in(&bytes, Some(WIDE_GAMUT_RGB)), fills_in(&bytes, None));
+    let stops = |p: &Paint| match p {
+        Paint::Gradient(g) => g.gradient.stops.clone(),
+        other => panic!("{other:?}"),
+    };
+    let (w, s) = (stops(&wide[0]), stops(&srgb[0]));
+    assert!(near(s[0].color, Color::rgb(0.9, 0.1, 0.1)), "{:?}", s[0]);
+    assert!(near(w[0].color, converted(SRGB, WIDE_GAMUT_RGB, [0.9, 0.1, 0.1])), "{:?}", w[0]);
+    assert!(near(w.last().unwrap().color, converted(SRGB, WIDE_GAMUT_RGB, [0.1, 0.1, 0.9])), "{:?}", w.last());
+    let Color::Rgb { r, g, b } = solid(&srgb[1]).0 else { panic!() };
+    assert!(near(solid(&wide[1]).0, converted(SRGB, WIDE_GAMUT_RGB, [r, g, b])), "{:?}", wide[1]);
+}
+
+#[test]
+fn device_rgb_as_an_array_and_in_readings_the_walk_does_not_follow_keeps_its_numbers() {
+    // `[/DeviceRGB]` is DeviceRGB: on a page with an sRGB-tagged space, its colours keep their
+    // numbers and the tagged ones are converted.
+    use vectorcraft_color::cms::{SRGB, WIDE_GAMUT_RGB};
+    let f = first_extra(1);
+    let page = page_with(&format!("/CS0 [/ICCBased {f} 0 R] /CS1 [/DeviceRGB]"), &[("CS0", "0.8 0.3 0.1"), ("CS1", "0.2 0.5 0.9")]);
+    let bytes = pdf_with(&[page], &[&icc_stream(SRGB, true)], None);
+    let wide = fills_in(&bytes, Some(WIDE_GAMUT_RGB));
+    assert!(near(solid(&wide[0]).0, converted(SRGB, WIDE_GAMUT_RGB, [0.8, 0.3, 0.1])), "{:?}", wide[0]);
+    assert_eq!(solid(&wide[1]).0, Color::rgb(0.2, 0.5, 0.9));
+    // In a file whose only RGB profile is an sRGB one the reader takes as DeviceRGB, a
+    // DeviceRGB-looking colour of the page is in it when the page sets no DeviceRGB colours; in a
+    // reading the walk doesn't follow (a pattern's cell, a soft mask) that isn't known: it stands.
+    let only = pdf_with(&[page_with(&format!("/CS0 [/ICCBased {f} 0 R]"), &[("CS0", "0.8 0.3 0.1")])], &[&icc_stream(SRGB, true)], None);
+    let pdf = craft_pdf::syntax::Pdf::new(only).unwrap();
+    let mut c = Colors::new(&pdf, vec![]);
+    c.working_rgb = Some(working(WIDE_GAMUT_RGB));
+    let rgb = "ColorSpace(DeviceRgb)";
+    assert!(matches!(c.space_of(rgb, 3, None, Rgb::Unknown), Space::Profile(_)));
+    assert_eq!(c.space_of(rgb, 3, None, Rgb::Nested), Space::Rgb);
+    c.begin_page(true);
+    assert_eq!(c.space_of(rgb, 3, None, Rgb::Unknown), Space::Rgb);
+    assert_eq!(c.space_of(rgb, 3, None, Rgb::NotIcc), Space::Rgb);
+}
+
+#[test]
+fn a_tagged_ramp_keeps_its_course_in_the_working_space() {
+    // A ramp straight in sRGB isn't straight in a working space with another tone curve: its stops
+    // are chosen in the numbers they keep, so the gradient between them follows the converted ramp.
+    use vectorcraft_color::cms::{SRGB, WIDE_GAMUT_RGB};
+    let f = first_extra(1);
+    let page = PdfPage {
+        resources: format!(
+            "/Pattern << /P0 << /PatternType 2 /Shading << /ShadingType 2 /ColorSpace [/ICCBased {f} 0 R] /Coords [0 0 100 0] /Extend [true true] /Function << /FunctionType 2 /Domain [0 1] /C0 [0 0 0] /C1 [1 1 1] /N 1 >> >> >> >>"
+        ),
+        ..PdfPage::new(200.0, 50.0, "/Pattern cs /P0 scn 0 0 100 20 re f\n")
+    };
+    let bytes = pdf_with(&[page], &[&icc_stream(SRGB, true)], None);
+    let Paint::Gradient(g) = &fills_in(&bytes, Some(WIDE_GAMUT_RGB))[0] else { panic!() };
+    let stops = &g.gradient.stops;
+    assert!(stops.len() > 2, "{stops:?}");
+    let value = |s: &GradientStop| match s.color {
+        Color::Rgb { r, .. } => r,
+        other => panic!("{other:?}"),
+    };
+    for i in 0..=32 {
+        let t = i as f32 / 32.0;
+        let k = stops.iter().position(|s| s.offset >= t).unwrap_or(stops.len() - 1).max(1);
+        let (a, b) = (&stops[k - 1], &stops[k]);
+        let u = ((t - a.offset) / (b.offset - a.offset).max(1e-6)).clamp(0.0, 1.0);
+        let between = value(a) + (value(b) - value(a)) * u;
+        let Color::Rgb { r: want, .. } = converted(SRGB, WIDE_GAMUT_RGB, [t; 3]) else { panic!() };
+        assert!((between - want).abs() <= 2.0 / 255.0, "at {t}: {between} vs {want}");
+    }
+}
+
+#[test]
+fn colours_under_a_transfer_function_are_the_readers_srgb() {
+    // The reader paints a colour under a transfer function (TR, TR2) as the sRGB it makes of it:
+    // those numbers go from sRGB into the working space, not through the colour's own profile.
+    use vectorcraft_color::cms::{PROPHOTO_RGB, SRGB};
+    let f = first_extra(1);
+    let identity = "<< /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >>";
+    let page = PdfPage {
+        resources: format!(
+            "/ColorSpace << /CS0 [/ICCBased {f} 0 R] >> /ExtGState << /T << /TR {identity} >> /I << /TR /Identity >> /X << /TR [] >> >>"
+        ),
+        ..PdfPage::new(
+            200.0,
+            50.0,
+            "/CS0 cs 0.2 0.6 0.4 scn q /T gs 0 0 10 10 re f Q 12 0 10 10 re f q /T gs /I gs 24 0 10 10 re f Q /X gs 36 0 10 10 re f\n",
+        )
+    };
+    let bytes = pdf_with(&[page], &[&icc_stream(PROPHOTO_RGB, false)], None);
+    let got = fills_in(&bytes, Some(PROPHOTO_RGB));
+    let Color::Rgb { r, g, b } = solid(&fills_in(&bytes, None)[0]).0 else { panic!() };
+    assert!(near(solid(&got[0]).0, converted(SRGB, PROPHOTO_RGB, [r, g, b])), "{:?} from sRGB {r} {g} {b}", got[0]);
+    // Not under one (after `Q`, or reset by /Identity): in the working space's own profile.
+    assert_eq!(solid(&got[1]).0, Color::rgb(0.2, 0.6, 0.4));
+    assert_eq!(solid(&got[2]).0, Color::rgb(0.2, 0.6, 0.4));
+    // One the reader can't read (`[]`) sets nothing, there as here.
+    assert_eq!(solid(&got[3]).0, Color::rgb(0.2, 0.6, 0.4));
+}
+
+#[test]
+fn profiles_that_read_alike_but_convert_apart_are_told_apart_by_the_walk() {
+    // Two LUT profiles with the same tables out of them, other perceptual tables into them, the
+    // second the working space: they read the same colours, but only the working space's own keep
+    // their numbers. Grouped as one, every colour took the first's conversion (in either order).
+    use vectorcraft_color::cms::{Intent, RgbTransform, WorkingRgb};
+    use vectorcraft_testkit::icc::rgb_lut_profile;
+    let (other, own) = (rgb_lut_profile(1.0, 1.0), rgb_lut_profile(1.0, 0.8));
+    let hex = |b: &[u8]| {
+        let h: String = b.iter().map(|b| format!("{b:02x}")).collect();
+        format!("<< /N 3 /Filter /ASCIIHexDecode /Length {} >>\nstream\n{h}>\nendstream", h.len() + 1)
+    };
+    let w = WorkingRgb { icc: own.clone().into(), intent: Intent::Perceptual, bpc: false };
+    let want = RgbTransform::new(&other, &w).unwrap().apply([0.4; 3]).unwrap();
+    assert!((want[0] - 0.4).abs() > 0.02, "the fixture converts: {want:?}");
+    let f = first_extra(1);
+    for (a, b, own_first) in [(&own, &other, true), (&other, &own, false)] {
+        let page = page_with(&format!("/CS0 [/ICCBased {f} 0 R] /CS1 [/ICCBased {} 0 R]", f + 1), &[("CS0", "0.4 0.4 0.4"), ("CS1", "0.4 0.4 0.4")]);
+        let bytes = pdf_with(&[page], &[&hex(a), &hex(b)], None);
+        let got = fills(&import_with_report(&bytes, &ImportOptions { working_rgb: Some(w.clone()), ..Default::default() }).unwrap().document);
+        let (mine, theirs) = if own_first { (&got[0], &got[1]) } else { (&got[1], &got[0]) };
+        assert_eq!(solid(mine).0, Color::rgb(0.4, 0.4, 0.4), "own_first {own_first}");
+        assert!(near(solid(theirs).0, Color::rgb(want[0], want[1], want[2])), "own_first {own_first}: {:?}", theirs);
+    }
 }

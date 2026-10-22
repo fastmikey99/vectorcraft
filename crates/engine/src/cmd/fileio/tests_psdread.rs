@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 
-use super::psdread::{decode, is_psd, resolution};
+use super::psdread::{decode, is_psd, resolution, rgb_profile};
 use super::*;
 
 /// A Photoshop document built from its parts: `version` 1 (PSD) or 2 (PSB), the header's fields,
@@ -164,6 +164,67 @@ fn the_resolution_resource_sizes_the_placed_image() {
         (r["width"].as_f64().unwrap() - 72.0).abs() < 0.01 && (r["height"].as_f64().unwrap() - 36.0).abs() < 0.01,
         "an inch by half an inch: {r}"
     );
+}
+
+/// An ICC Profile resource (1039) holding `icc`.
+fn icc_resource(icc: &[u8]) -> Vec<u8> {
+    let mut res = b"8BIM".to_vec();
+    res.extend(0x040fu16.to_be_bytes());
+    res.extend([0, 0]);
+    res.extend((icc.len() as u32).to_be_bytes());
+    res.extend(icc);
+    if icc.len() % 2 == 1 {
+        res.push(0);
+    }
+    res
+}
+
+#[test]
+fn an_rgb_psd_is_read_in_the_profile_it_embeds() {
+    // GUARDS: a PSD's embedded profile was ignored: its numbers were read as sRGB, so an Adobe RGB
+    // PSD came out duller (and choosing the working space didn't help: images are sRGB). Its
+    // pixels are converted from the profile into sRGB; an sRGB profile, or none, leaves them be.
+    use vectorcraft_color::cms::{self, Intent, SRGB, WIDE_GAMUT_RGB};
+    let planes = raw(&[&[230, 10], &[26, 200], &[26, 40]]);
+    let wide = cms::icc_bytes(WIDE_GAMUT_RGB).unwrap();
+    let read = |res: &[u8]| -> Vec<[u8; 4]> {
+        let f = psd(1, 3, (2, 1), 8, 3, &[], res, &[], &planes);
+        let img = raster_image(&f).unwrap();
+        image::load_from_memory(&img.blob.bytes).unwrap().to_rgba8().pixels().map(|p| p.0).collect()
+    };
+    let plain = read(&[]);
+    assert_eq!(plain, vec![[230, 26, 26, 255], [10, 200, 40, 255]]);
+    assert_eq!(read(&icc_resource(&cms::icc_bytes(SRGB).unwrap())), plain, "an sRGB profile keeps the numbers");
+    let f = psd(1, 3, (2, 1), 8, 3, &[], &icc_resource(&wide), &[], &planes);
+    assert_eq!(rgb_profile(&f), Some(&wide[..]));
+    let profile = cms::icc::builtin_rgb(WIDE_GAMUT_RGB).unwrap();
+    for (got, src) in read(&icc_resource(&wide)).iter().zip([[230.0, 26.0, 26.0], [10.0, 200.0, 40.0]]) {
+        let want = profile.to_srgb(&src.map(|c: f32| c / 255.0), Intent::RelativeColorimetric).unwrap().map(|c| (c * 255.0).round() as i32);
+        assert!(got.iter().zip(want).all(|(a, b)| (*a as i32 - b).abs() <= 1), "{got:?} vs {want:?}");
+    }
+    // Not RGB (a grey document's profile isn't read as RGB), and a profile that can't be read.
+    let grey = psd(1, 1, (2, 1), 8, 1, &[], &icc_resource(&wide), &[], &raw(&[&[9, 9]]));
+    assert_eq!(rgb_profile(&grey), None);
+    assert_eq!(read(&icc_resource(b"not a profile")), plain);
+}
+
+#[test]
+fn a_16_bit_psd_is_converted_from_its_profile_before_it_is_quantised() {
+    // GUARDS: 16-bit samples were cut to 8 bits before the profile's conversion: in a profile with
+    // a linear tone curve, 128/65535 became black instead of about 6/255 in sRGB.
+    use vectorcraft_color::cms::{self, Intent};
+    let icc = vectorcraft_testkit::icc::linear_srgb();
+    // Two pixels: 128 and 20000 in each channel.
+    let row = [128u16.to_be_bytes(), 20000u16.to_be_bytes()].concat();
+    let f = psd(1, 3, (2, 1), 16, 3, &[], &icc_resource(&icc), &[], &raw(&[&row, &row, &row]));
+    let img = raster_image(&f).unwrap();
+    let px: Vec<[u8; 4]> = image::load_from_memory(&img.blob.bytes).unwrap().to_rgba8().pixels().map(|p| p.0).collect();
+    let profile = cms::IccProfile::from_bytes(None, &icc).unwrap();
+    for (got, v) in px.iter().zip([128.0f32, 20000.0]) {
+        let want = profile.to_srgb(&[v / 65535.0; 3], Intent::RelativeColorimetric).unwrap().map(|c| (c * 255.0).round() as i32);
+        assert!(got[..3].iter().zip(want).all(|(a, b)| (*a as i32 - b).abs() <= 1), "{got:?} vs {want:?}");
+    }
+    assert!(px[0][0] >= 5, "not black: {:?}", px[0]);
 }
 
 /// A 60 × 40 pt document: a red square on a transparent page, and a half-transparent blue one.

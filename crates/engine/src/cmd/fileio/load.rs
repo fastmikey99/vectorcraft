@@ -519,7 +519,9 @@ pub fn raster_image(bytes: &[u8]) -> Result<RasterImage> {
     }
     if psdread::is_psd(bytes) {
         let cms = vectorcraft_color::cms::active();
-        return as_png(psdread::decode(bytes, MAX_RASTER_ALLOC, |c| cms.cmyk_to_srgb(c, false)).map_err(err)?, ppi);
+        let convert = psdread::rgb_profile(bytes).and_then(|icc| psd_into_srgb(icc, cms.settings().intent));
+        let img = psdread::decode_rgb(bytes, MAX_RASTER_ALLOC, |c| cms.cmyk_to_srgb(c, false), convert.as_deref()).map_err(err)?;
+        return as_png(img, ppi);
     }
     let mut reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(err)?;
     if reader.format().is_none() && super::tgaread::is_targa(bytes) {
@@ -563,6 +565,19 @@ pub fn raster_image(bytes: &[u8]) -> Result<RasterImage> {
         super::tgaread::fix_alpha(bytes, &mut img);
     }
     as_png(img, ppi)
+}
+
+/// How an RGB Photoshop document's colours, in the numbers of the profile it embeds (`icc`),
+/// become the sRGB pixels a document's images are: converted with `intent` before they are
+/// quantised ([`psdread::decode_rgb`]). `None` keeps the numbers: a profile with sRGB's colours,
+/// or one that can't be read (read as sRGB, as before).
+fn psd_into_srgb(icc: &[u8], intent: vectorcraft_color::cms::Intent) -> Option<Box<psdread::RgbRows>> {
+    use vectorcraft_color::cms;
+    if cms::icc_bytes(cms::SRGB).is_ok_and(|srgb| cms::same_rgb_profile(icc, &srgb, intent)) {
+        return None;
+    }
+    let profile = cms::IccProfile::from_bytes(None, icc).ok()?;
+    profile.rgb_rows_to_srgb(intent).map(|f| Box::new(f) as Box<psdread::RgbRows>)
 }
 
 /// `img` stored as a PNG that keeps the file's resolution.

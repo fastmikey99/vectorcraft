@@ -145,6 +145,9 @@ impl LoadOptions {
             text_as: self.text_as,
             layers: self.layers,
             uncalibrated_rgb: editor_document,
+            // RGB in a profile lands in the RGB working space (Edit › Color Settings); colours
+            // already in it keep their numbers.
+            working_rgb: vectorcraft_color::cms::working_rgb(),
             reject_depth_loss: self.print_production,
             ..Default::default()
         })
@@ -177,6 +180,7 @@ pub fn page_document(bytes: &[u8], page: usize, o: &LoadOptions) -> Result<(Docu
         password: o.password.clone(),
         text_as: TextAs::Outlines,
         layers: false,
+        working_rgb: vectorcraft_color::cms::working_rgb(),
         ..Default::default()
     };
     vectorcraft_pdf::import_with_report(bytes, &opts).map(|r| (r.document, r.warnings)).map_err(err)

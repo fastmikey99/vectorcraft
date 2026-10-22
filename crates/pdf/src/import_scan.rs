@@ -14,6 +14,7 @@
 //! group on.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::import_color::items;
 use craft_pdf::interpret::CacheKey;
@@ -24,7 +25,7 @@ use craft_pdf::syntax::object::{Array, Dict, FromBytes, MaybeRef, Name, Object, 
 use craft_pdf::syntax::page::{Page, Resources};
 
 use crate::PdfError;
-use crate::import_color::ink_names;
+use crate::import_color::{IccRgb, MAX_ICC_TOTAL, icc_rgb, ink_names};
 
 /// The interpreter's limit on nested form XObjects.
 const MAX_DEPTH: u32 = 50;
@@ -45,6 +46,8 @@ const MAX_WINDOW: usize = 256 << 20;
 const MAX_INKS: usize = 4096;
 /// The most changes of ink noted per page in the paths, and in the text (24 bytes each).
 const MAX_INK_CHANGES: usize = 2_000_000;
+/// The most different `ICCBased` RGB profiles noted per page.
+const MAX_RGB_PROFILES: usize = 64;
 /// The deepest layers nest in the configuration's `/Order`.
 pub(crate) const MAX_NESTING: usize = 32;
 
@@ -280,6 +283,21 @@ pub(crate) struct Scan {
     /// fills and of its strokes (indices into [`Self::inks`]), where all of its text shown in an
     /// ink is shown in the same one.
     text_inks: Changes<[Option<u32>; 2]>,
+    /// The profiles of the 3-component `ICCBased` spaces the page sets (`cs`, `CS`) and of its
+    /// shadings' spaces, each once (decoded).
+    pub rgb_profiles: Vec<Arc<[u8]>>,
+    /// The page sets DeviceRGB colours (`rg`, `RG`, or a space that is DeviceRGB): its RGB isn't
+    /// all in profiles.
+    pub device_rgb: bool,
+    /// The page sets a transfer function (`TR`, `TR2`): the reader gives the colours painted under
+    /// it as sRGB, whatever their space ([`Rgb::Srgb`]).
+    pub transfer: bool,
+    /// The RGB space of the text before each of [`Self::paints`] (counted as [`Self::texts`] is),
+    /// of its fills and of its strokes: [`RgbAt::Unknown`] where its text is shown in several.
+    text_rgb: Changes<[RgbAt; 2]>,
+    /// The RGB spaces of the paints aren't known (too many profiles or changes, or the page's
+    /// paths can't be matched with the interpreter's): [`Self::rgb`] says so.
+    rgb_unknown: bool,
 }
 
 impl Scan {
@@ -297,6 +315,95 @@ impl Scan {
         }?;
         self.inks.get(usize::try_from(i).ok()?).map(Vec::as_slice)
     }
+
+    /// The RGB space the walk found `at` painted in (as for [`Self::ink`]): whether its numbers
+    /// are in a profile, and which.
+    pub fn rgb(&self, at: Walked, stroke: bool, pattern: bool) -> Rgb<'_> {
+        if self.rgb_unknown {
+            return Rgb::Unknown;
+        }
+        let space = match at {
+            Walked::Path(k) => {
+                let inks = self.paint_inks.at(k);
+                if pattern { inks.pattern_rgb } else { inks.rgb }
+            }
+            Walked::Text(_) if pattern => RgbAt::Unknown,
+            Walked::Text(k) => self.text_rgb.at(k)[usize::from(stroke)],
+        };
+        match space {
+            RgbAt::NotIcc => Rgb::NotIcc,
+            RgbAt::Icc(i) => usize::try_from(i).ok().and_then(|i| self.rgb_profiles.get(i)).map_or(Rgb::Unknown, Rgb::Icc),
+            RgbAt::Unknown => Rgb::Unknown,
+            RgbAt::Srgb => Rgb::Srgb,
+        }
+    }
+
+    /// Forget the RGB spaces of the paints ([`Self::rgb`] says [`Rgb::Unknown`]): the import can't
+    /// match the page's paths with the interpreter's.
+    pub fn forget_rgb(&mut self) {
+        self.rgb_unknown = true;
+    }
+}
+
+/// The RGB space a colour is painted in, as the page's walk found it ([`Scan::rgb`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Rgb<'a> {
+    /// Not an `ICCBased` RGB space: DeviceRGB numbers (or not RGB at all).
+    NotIcc,
+    /// An `ICCBased` space with this RGB profile.
+    Icc(&'a Arc<[u8]>),
+    /// Not known: text shown in several spaces, a limit passed, or the page's paths can't be
+    /// matched with the reader's ([`Scan::forget_rgb`]).
+    Unknown,
+    /// A reading the walk doesn't follow (a tiling pattern's cell, a soft mask, a Type 3 glyph):
+    /// whether the page sets DeviceRGB colours there isn't known either.
+    Nested,
+    /// Painted under a transfer function: the reader gives the colour as sRGB numbers.
+    Srgb,
+}
+
+/// The RGB space a fill or a stroke paints in, as the walk notes it: an index into
+/// [`Scan::rgb_profiles`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum RgbAt {
+    #[default]
+    NotIcc,
+    Icc(u32),
+    /// An `ICCBased` space whose profile isn't noted (a Lab one, one that doesn't decode, or past
+    /// [`MAX_RGB_PROFILES`]).
+    Unknown,
+    /// Under a transfer function ([`Rgb::Srgb`]).
+    Srgb,
+}
+
+/// The RGB space of the text shown between two painted paths: of its fills, or of its strokes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum RunRgb {
+    /// No text is shown.
+    #[default]
+    None,
+    /// All of it is shown in this space.
+    One(RgbAt),
+    /// Text is shown in several spaces, which can't be told apart by glyph.
+    Several,
+}
+
+impl RunRgb {
+    fn and(self, space: RgbAt) -> Self {
+        match self {
+            Self::None => Self::One(space),
+            Self::One(s) if s == space => self,
+            _ => Self::Several,
+        }
+    }
+
+    fn at(self) -> RgbAt {
+        match self {
+            Self::One(s) => s,
+            Self::None => RgbAt::NotIcc,
+            Self::Several => RgbAt::Unknown,
+        }
+    }
 }
 
 /// The inks a fill or a stroke paints in (indices into [`Scan::inks`]): that of the color space
@@ -306,6 +413,9 @@ impl Scan {
 struct Inks {
     space: Option<u32>,
     pattern: Option<u32>,
+    /// The RGB spaces of the color space and of the pattern's shading ([`Scan::rgb`]).
+    rgb: RgbAt,
+    pattern_rgb: RgbAt,
 }
 
 /// What the interpreter draws, counted as the walk counts it.
@@ -396,6 +506,8 @@ struct State {
     nonzero: bool,
     /// The inks of fills and of strokes.
     inks: [Inks; 2],
+    /// A transfer function is in effect (`TR`, `TR2`).
+    transfer: bool,
 }
 
 /// A marked-content tag as [`Scan::tags`] keeps it: its FNV-1a hash (the tags are only compared,
@@ -480,6 +592,13 @@ struct Walker<'w, 'p> {
     ink_index: HashMap<Vec<String>, u32>,
     /// More inks or changes of ink than are kept: the page's inks are left out.
     inks_cut: bool,
+    /// The RGB space of each `ICCBased` stream met, by its object and its dictionary (a stream's
+    /// cache key is its dictionary's alone: profiles of the same length share it).
+    rgb_index: HashMap<(ObjectIdentifier, u128), RgbAt>,
+    /// The RGB spaces of the text shown since the last painted path: of its fills, of its strokes.
+    text_rgb: [RunRgb; 2],
+    /// Note the profiles of `ICCBased` RGB spaces (only an import converting RGB needs them).
+    rgb: bool,
 }
 
 impl Walker<'_, '_> {
@@ -548,8 +667,16 @@ impl Walker<'_, '_> {
         self.out.paints.push(on);
         self.out.paint_zero.push(!s.nonzero);
         self.out.texts.push(std::mem::take(&mut self.text));
-        self.inks_cut |= !self.out.paint_inks.set(k, s.inks[usize::from(stroke)]);
+        // The paints' RGB spaces are kept in the same list: past its limit they aren't known.
+        let mut inks = s.inks[usize::from(stroke)];
+        if s.transfer {
+            inks.rgb = RgbAt::Srgb;
+        }
+        let kept = self.out.paint_inks.set(k, inks);
+        self.inks_cut |= !kept;
+        self.out.rgb_unknown |= !kept;
         self.inks_cut |= !self.out.text_inks.set(k, std::mem::take(&mut self.text_inks).map(RunInk::ink));
+        self.out.rgb_unknown |= !self.out.text_rgb.set(k, std::mem::take(&mut self.text_rgb).map(RunRgb::at));
     }
 
     /// The interpreter shows text.
@@ -565,42 +692,106 @@ impl Walker<'_, '_> {
         for (run, inks) in self.text_inks.iter_mut().zip(s.inks) {
             *run = run.and(inks.space);
         }
+        for (run, inks) in self.text_rgb.iter_mut().zip(s.inks) {
+            *run = run.and(if s.transfer { RgbAt::Srgb } else { inks.rgb });
+        }
     }
 
-    /// The color space of fills (or of `stroke`s) is in ink `ink` from now on.
-    fn set_space(&mut self, stroke: bool, ink: Option<u32>) {
+    /// The color space of fills (or of `stroke`s) is in ink `ink` and RGB space `rgb` from now on.
+    fn set_space(&mut self, stroke: bool, (ink, rgb): (Option<u32>, RgbAt)) {
         if let Some(s) = self.states.last_mut() {
-            s.inks[usize::from(stroke)].space = ink;
+            let i = &mut s.inks[usize::from(stroke)];
+            (i.space, i.rgb) = (ink, rgb);
         }
     }
 
-    /// The pattern of fills (or of `stroke`s) is in ink `ink` from now on.
-    fn set_pattern(&mut self, stroke: bool, ink: Option<u32>) {
+    /// The pattern of fills (or of `stroke`s) is in ink `ink` and RGB space `rgb` from now on.
+    fn set_pattern(&mut self, stroke: bool, (ink, rgb): (Option<u32>, RgbAt)) {
         if let Some(s) = self.states.last_mut() {
-            s.inks[usize::from(stroke)].pattern = ink;
+            let i = &mut s.inks[usize::from(stroke)];
+            (i.pattern, i.pattern_rgb) = (ink, rgb);
         }
     }
 
-    /// The ink of color space `name` (`cs`, `CS`): a Separation or DeviceN space of the resources.
-    /// The names the interpreter reads as device and pattern spaces come first, as it reads them.
-    fn space_ink(&mut self, name: &Name<'_>, res: &Resources<'_>) -> Option<u32> {
-        if matches!(name.as_ref(), b"DeviceRGB" | b"RGB" | b"DeviceGray" | b"G" | b"DeviceCMYK" | b"CMYK" | b"CalCMYK" | b"Pattern") {
-            return None;
+    /// The ink and the RGB space of color space `name` (`cs`, `CS`): a Separation or DeviceN space
+    /// of the resources, an `ICCBased` RGB one. The names the interpreter reads as device and
+    /// pattern spaces come first, as it reads them.
+    fn space_ink(&mut self, name: &Name<'_>, res: &Resources<'_>) -> (Option<u32>, RgbAt) {
+        match name.as_ref() {
+            b"DeviceRGB" | b"RGB" => {
+                self.out.device_rgb = true;
+                return (None, RgbAt::NotIcc);
+            }
+            b"DeviceGray" | b"G" | b"DeviceCMYK" | b"CMYK" | b"CalCMYK" | b"Pattern" => return (None, RgbAt::NotIcc),
+            _ => {}
         }
-        self.ink_of(&res.get_color_space(name)?)
+        match res.get_color_space(name) {
+            Some(o) => (self.ink_of(&o), self.rgb_of(&o)),
+            None => (None, RgbAt::NotIcc),
+        }
     }
 
-    /// The ink pattern `name` paints in (`scn`, `SCN`): a shading pattern's (a dictionary, where a
-    /// tiling pattern is a stream) is its shading's.
-    fn pattern_ink(&mut self, name: &Name<'_>, res: &Resources<'_>) -> Option<u32> {
-        let Object::Dict(p) = res.get_pattern(name)? else { return None };
-        self.shading_ink(&p.get::<Object<'_>>(b"Shading")?)
+    /// The ink and the RGB space pattern `name` paints in (`scn`, `SCN`): a shading pattern's (a
+    /// dictionary, where a tiling pattern is a stream) are its shading's.
+    fn pattern_ink(&mut self, name: &Name<'_>, res: &Resources<'_>) -> (Option<u32>, RgbAt) {
+        let Some(Object::Dict(p)) = res.get_pattern(name) else { return (None, RgbAt::NotIcc) };
+        match p.get::<Object<'_>>(b"Shading") {
+            Some(sh) => self.shading_ink(&sh),
+            None => (None, RgbAt::NotIcc),
+        }
     }
 
-    /// The ink of a shading (a dictionary or a stream): its color space's.
-    fn shading_ink(&mut self, shading: &Object<'_>) -> Option<u32> {
-        let (d, _) = dict_or_stream(shading)?;
-        self.ink_of(&d.get::<Object<'_>>(b"ColorSpace")?)
+    /// The ink and the RGB space of a shading (a dictionary or a stream): its color space's.
+    fn shading_ink(&mut self, shading: &Object<'_>) -> (Option<u32>, RgbAt) {
+        match dict_or_stream(shading).and_then(|(d, _)| d.get::<Object<'_>>(b"ColorSpace")) {
+            Some(cs) => (self.ink_of(&cs), self.rgb_of(&cs)),
+            None => (None, RgbAt::NotIcc),
+        }
+    }
+
+    /// The RGB space of color space `o`: an `ICCBased` one with 3 components is its profile's
+    /// (noted when new), DeviceRGB is noted as the page's.
+    fn rgb_of(&mut self, o: &Object<'_>) -> RgbAt {
+        let a = match o {
+            _ if !self.rgb => return RgbAt::NotIcc,
+            Object::Name(n) => {
+                self.out.device_rgb |= matches!(n.as_ref(), b"DeviceRGB" | b"RGB");
+                return RgbAt::NotIcc;
+            }
+            Object::Array(a) => a,
+            _ => return RgbAt::NotIcc,
+        };
+        let mut it = a.flex_iter();
+        match it.next::<Name<'_>>() {
+            Some(n) if n.as_ref() == b"ICCBased" => {}
+            Some(n) => {
+                // `[/DeviceRGB]` is DeviceRGB too.
+                self.out.device_rgb |= matches!(n.as_ref(), b"DeviceRGB" | b"RGB");
+                return RgbAt::NotIcc;
+            }
+            None => return RgbAt::NotIcc,
+        }
+        let Some(stream) = it.next::<craft_pdf::syntax::object::Stream<'_>>() else { return RgbAt::NotIcc };
+        let key = (stream.obj_id(), stream.cache_key());
+        if let Some(at) = self.rgb_index.get(&key) {
+            return *at;
+        }
+        let at = match icc_rgb(&stream) {
+            IccRgb::NotRgb => RgbAt::NotIcc,
+            IccRgb::Unreadable => RgbAt::Unknown,
+            IccRgb::Rgb(bytes) => match self.out.rgb_profiles.iter().position(|p| p[..] == bytes[..]) {
+                Some(i) => u32::try_from(i).map_or(RgbAt::Unknown, RgbAt::Icc),
+                None if self.out.rgb_profiles.len() < MAX_RGB_PROFILES
+                    && self.out.rgb_profiles.iter().map(|p| p.len()).sum::<usize>().saturating_add(bytes.len()) <= MAX_ICC_TOTAL =>
+                {
+                    self.out.rgb_profiles.push(bytes.into());
+                    u32::try_from(self.out.rgb_profiles.len() - 1).map_or(RgbAt::Unknown, RgbAt::Icc)
+                }
+                None => RgbAt::Unknown,
+            },
+        };
+        self.rgb_index.insert(key, at);
+        at
     }
 
     /// The index in [`Scan::inks`] of color space `o` when it is a Separation or DeviceN array, its
@@ -740,6 +931,23 @@ impl Walker<'_, '_> {
                         // Without `/op`, `/OP` sets both.
                         s.fill = d.get::<bool>(b"op").or(stroke).unwrap_or(s.fill);
                         s.nonzero = d.get::<u8>(b"OPM").map_or(s.nonzero, |m| m != 0);
+                        // As the reader takes it: `TR2` before `TR`; a name (Identity, Default)
+                        // resets it, a function or four of them set one, anything else leaves it.
+                        if let Some(tr) = d.get::<Object<'_>>(b"TR2").or_else(|| d.get::<Object<'_>>(b"TR")) {
+                            let function = |o: &Object<'_>| craft_pdf::interpret::Function::new(o).is_some();
+                            let set = match &tr {
+                                Object::Name(_) => Some(false),
+                                Object::Array(a) => {
+                                    let mut it = a.iter::<Object<'_>>();
+                                    (0..4).all(|_| it.next().is_some_and(|f| function(&f))).then_some(true)
+                                }
+                                o => function(o).then_some(true),
+                            };
+                            if let Some(on) = set {
+                                s.transfer = on;
+                                self.out.transfer |= on;
+                            }
+                        }
                     }
                 }
                 TypedInstruction::FillPathEvenOdd(_) | TypedInstruction::FillPathNonZero(_) | TypedInstruction::FillPathNonZeroCompatibility(_) => {
@@ -785,13 +993,19 @@ impl Walker<'_, '_> {
                         self.set_pattern(true, ink);
                     }
                 }
-                TypedInstruction::NonStrokeColorDeviceGray(_)
-                | TypedInstruction::NonStrokeColorDeviceRgb(_)
-                | TypedInstruction::NonStrokeColorCmyk(_) => {
-                    self.set_space(false, None);
+                TypedInstruction::NonStrokeColorDeviceGray(_) | TypedInstruction::NonStrokeColorCmyk(_) => {
+                    self.set_space(false, (None, RgbAt::NotIcc));
                 }
-                TypedInstruction::StrokeColorDeviceGray(_) | TypedInstruction::StrokeColorDeviceRgb(_) | TypedInstruction::StrokeColorCmyk(_) => {
-                    self.set_space(true, None);
+                TypedInstruction::StrokeColorDeviceGray(_) | TypedInstruction::StrokeColorCmyk(_) => {
+                    self.set_space(true, (None, RgbAt::NotIcc));
+                }
+                TypedInstruction::NonStrokeColorDeviceRgb(_) => {
+                    self.out.device_rgb = true;
+                    self.set_space(false, (None, RgbAt::NotIcc));
+                }
+                TypedInstruction::StrokeColorDeviceRgb(_) => {
+                    self.out.device_rgb = true;
+                    self.set_space(true, (None, RgbAt::NotIcc));
                 }
                 TypedInstruction::ShowText(_)
                 | TypedInstruction::ShowTexts(_)
@@ -891,17 +1105,38 @@ fn embeds_glyphs(f: &Dict<'_>) -> bool {
     program(f) || f.get::<Array<'_>>(b"DescendantFonts").and_then(|a| a.iter::<Dict<'_>>().next()).is_some_and(|d| program(&d))
 }
 
+/// [`scan_page_rgb`] without the RGB spaces (tests).
+#[cfg(test)]
+pub(crate) fn scan_page(page: &Page<'_>, ocgs: &mut Ocgs, all_on: bool, fonts: &mut FontNames, max_form_bytes: usize) -> Result<Scan, PdfError> {
+    scan_page_rgb(page, ocgs, all_on, fonts, max_form_bytes, false)
+}
+
 /// Walk `page` as the interpreter will: `all_on` when [`all_on`] turned every group on. Fonts
 /// found are noted in `fonts` (their cache key → base font name, and whether the file carries its
-/// glyphs).
-pub(crate) fn scan_page(page: &Page<'_>, ocgs: &mut Ocgs, all_on: bool, fonts: &mut FontNames, max_form_bytes: usize) -> Result<Scan, PdfError> {
-    let scan = walk_page(page, ocgs, all_on, fonts, max_form_bytes).out;
+/// glyphs). With `rgb`, the profiles of the `ICCBased` RGB spaces each paint is in are noted
+/// ([`Scan::rgb`]).
+pub(crate) fn scan_page_rgb(
+    page: &Page<'_>,
+    ocgs: &mut Ocgs,
+    all_on: bool,
+    fonts: &mut FontNames,
+    max_form_bytes: usize,
+    rgb: bool,
+) -> Result<Scan, PdfError> {
+    let mut w = walker(page, ocgs, all_on, fonts, max_form_bytes);
+    w.rgb = rgb;
+    let scan = walked(w, page).out;
     if scan.cut { Err(incomplete_content()) } else { Ok(scan) }
 }
 
 fn walk_page<'w, 'p>(page: &Page<'p>, ocgs: &'w mut Ocgs, all_on: bool, fonts: &'w mut FontNames, max_form_bytes: usize) -> Walker<'w, 'p> {
+    walked(walker(page, ocgs, all_on, fonts, max_form_bytes), page)
+}
+
+/// A walker for `page`, before the walk.
+fn walker<'w, 'p>(page: &Page<'p>, ocgs: &'w mut Ocgs, all_on: bool, fonts: &'w mut FontNames, max_form_bytes: usize) -> Walker<'w, 'p> {
     let off = if all_on { HashSet::new() } else { ocgs.off.clone() };
-    let mut w = Walker {
+    Walker {
         ocgs,
         off,
         xref: page.xref(),
@@ -917,9 +1152,17 @@ fn walk_page<'w, 'p>(page: &Page<'p>, ocgs: &'w mut Ocgs, all_on: bool, fonts: &
         text_inks: [RunInk::None; 2],
         ink_index: HashMap::new(),
         inks_cut: false,
-    };
+        rgb_index: HashMap::new(),
+        text_rgb: [RunRgb::None; 2],
+        rgb: false,
+    }
+}
+
+/// `w` with `page` (its own) walked.
+fn walked<'w, 'p>(mut w: Walker<'w, 'p>, page: &Page<'p>) -> Walker<'w, 'p> {
     w.page(page);
     w.inks_cut |= !w.out.text_inks.set(w.out.paints.len(), w.text_inks.map(RunInk::ink));
+    w.out.rgb_unknown |= !w.out.text_rgb.set(w.out.paints.len(), w.text_rgb.map(RunRgb::at));
     if w.inks_cut {
         w.out.inks.clear();
     }

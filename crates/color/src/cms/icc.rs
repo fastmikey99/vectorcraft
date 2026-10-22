@@ -296,6 +296,32 @@ impl IccProfile {
         Some((lin[0] * y(&hub.red_colorant) + lin[1] * y(&hub.green_colorant) + lin[2] * y(&hub.blue_colorant)).clamp(0.0, 0.5))
     }
 
+    /// A conversion of interleaved RGB values of this RGB profile (0..1, any length that is a
+    /// whole number of colours) into sRGB with `intent`, in place, at full precision: how an image
+    /// carrying its own profile becomes the sRGB pixels a document's images are. It returns
+    /// `false`, the values untouched, for a length that isn't whole colours or a failed transform.
+    /// `None` when this isn't an RGB profile or no transform can be built.
+    pub fn rgb_rows_to_srgb(&self, intent: Intent) -> Option<impl Fn(&mut [f32]) -> bool + use<>> {
+        if self.kind != ProfileKind::Rgb {
+            return None;
+        }
+        let xf = self.to_xf(intent)?;
+        Some(move |rgb: &mut [f32]| {
+            if !rgb.len().is_multiple_of(3) {
+                return false;
+            }
+            let src: Vec<f32> = rgb.iter().map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }).collect();
+            if xf.transform(&src, rgb).is_err() {
+                rgb.copy_from_slice(&src);
+                return false;
+            }
+            for v in rgb.iter_mut() {
+                *v = if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+            }
+            true
+        })
+    }
+
     /// Whether transforms can be built for this profile (checked at registration).
     pub fn usable(&self) -> bool {
         self.to_xf(Intent::RelativeColorimetric).is_some() && self.inverse_xf(Intent::RelativeColorimetric).is_some()

@@ -37,6 +37,12 @@
 //!   the same printed size; one undo step. Answered with `vectorcraft:solidified { id, ids, form,
 //!   level, softPixels, clearPixels, opaquePixels }` or `vectorcraft:failed { error, id }`. `ready`
 //!   says `solidify: true`.
+//! - `vectorcraft:colorSettings` (from the parent): `{ id?, profiles?: [{ name?, bytes }], rgb?,
+//!   cmyk?, intent?, bpc? }`, ICC profiles registered (each under `name`, else its own
+//!   description) and Edit › Color Settings set with them, before the frame's open is read; not an
+//!   edit (no dirty, no undo). Answered with `vectorcraft:colorSettingsApplied { id, loaded, rgb,
+//!   cmyk, intent, bpc, profiles }` or `vectorcraft:failed { error, id }`. `ready` says
+//!   `colorSettings: true`.
 //! - `vectorcraft:prefs` (both ways): `{ prefs }`, the preferences and workspace as JSON text. The
 //!   editor sends them when they change (the page stores them for the person signed in); the page
 //!   sends them back before opening a file, and the editor takes them on. In host mode the editor
@@ -121,6 +127,7 @@ impl Bridge {
             ("rasterEffectsResolution", true.into()),
             ("units", true.into()),
             ("solidify", true.into()),
+            ("colorSettings", true.into()),
             ("separationMarks", true.into()),
         ]);
     }
@@ -308,6 +315,45 @@ impl Bridge {
                 }
                 return;
             }
+            if string(&data, "type").as_deref() == Some("vectorcraft:colorSettings") {
+                let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
+                // A field left out is `None`; one that is there but of the wrong type is `Some(None)`.
+                let given = |key: &str| js_sys::Reflect::get(&data, &JsValue::from_str(key)).ok().filter(|v| !v.is_undefined());
+                // Counted and sized before anything is copied out of the page.
+                let fits = given("profiles").and_then(|v| v.dyn_ref::<js_sys::Array>().cloned()).map_or(Ok(()), |list| {
+                    protocol::profiles_fit(list.length() as usize, list.iter().take(protocol::MAX_PROFILES).map(|p| byte_length(&p)))
+                });
+                if let Err(error) = fits {
+                    bridge.post_export_failed(&id, &error);
+                    return;
+                }
+                let profiles = given("profiles").map(|v| {
+                    v.dyn_ref::<js_sys::Array>().map(|list| {
+                        list.iter()
+                            .map(|p| {
+                                let name =
+                                    js_sys::Reflect::get(&p, &JsValue::from_str("name")).ok().filter(|v| !v.is_undefined()).map(|v| v.as_string());
+                                (name, bytes(&p))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                });
+                let request = protocol::color_settings(
+                    profiles,
+                    given("rgb").map(|v| v.as_string()),
+                    given("cmyk").map(|v| v.as_string()),
+                    given("intent").map(|v| v.as_string()),
+                    given("bpc").map(|v| v.as_bool()),
+                );
+                match request {
+                    Ok(request) => {
+                        bridge.operations.borrow_mut().push((id, crate::operations::Operation::ColorSettings(request)));
+                        wake();
+                    }
+                    Err(error) => bridge.post_export_failed(&id, &error),
+                }
+                return;
+            }
             if string(&data, "type").as_deref() == Some("vectorcraft:place") {
                 let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
                 let copies = js_sys::Reflect::get(&data, &JsValue::from_str("copies")).ok().filter(|v| !v.is_undefined());
@@ -443,6 +489,16 @@ fn string(data: &JsValue, key: &str) -> Option<String> {
 }
 
 /// `bytes` as an `ArrayBuffer` or `Uint8Array`.
+/// The length of `data.bytes` (as [`bytes`] reads it) without copying it.
+fn byte_length(data: &JsValue) -> Option<usize> {
+    let bytes = js_sys::Reflect::get(data, &JsValue::from_str("bytes")).ok()?;
+    if let Some(array) = bytes.dyn_ref::<js_sys::Uint8Array>() {
+        Some(array.byte_length() as usize)
+    } else {
+        bytes.dyn_ref::<js_sys::ArrayBuffer>().map(|b| b.byte_length() as usize)
+    }
+}
+
 fn bytes(data: &JsValue) -> Option<Vec<u8>> {
     let bytes = js_sys::Reflect::get(data, &JsValue::from_str("bytes")).ok()?;
     if let Some(array) = bytes.dyn_ref::<js_sys::Uint8Array>() {

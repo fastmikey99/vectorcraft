@@ -11,7 +11,7 @@ pub struct Open {
 }
 
 /// The messages the bridge reads.
-pub const HEARD: [&str; 9] = [
+pub const HEARD: [&str; 10] = [
     "vectorcraft:sep.mark.set",
     "vectorcraft:sep.mark.clear",
     "vectorcraft:sep.mark.list",
@@ -21,6 +21,7 @@ pub const HEARD: [&str; 9] = [
     "vectorcraft:solidify",
     "vectorcraft:prefs",
     "vectorcraft:hello",
+    "vectorcraft:colorSettings",
 ];
 
 /// The longest preferences text a page may hand over (bytes).
@@ -243,6 +244,124 @@ pub fn solidify(level: Option<Option<f64>>, copies: Option<Option<bool>>) -> Res
     Ok(Solidify { level, copies })
 }
 
+/// The most ICC profiles one `vectorcraft:colorSettings` loads, and the largest (bytes; as
+/// `color.loadProfile` reads).
+pub const MAX_PROFILES: usize = 16;
+pub const MAX_PROFILE_BYTES: usize = 32 << 20;
+/// The most bytes the profiles of one `vectorcraft:colorSettings` take together.
+pub const MAX_PROFILES_BYTES: usize = 64 << 20;
+
+/// Whether a `vectorcraft:colorSettings`'s profiles fit the limits, told from their count and
+/// sizes alone (`None`: an entry without bytes, which [`color_settings`] refuses), so the bridge
+/// can refuse them before copying any out of the page. The error is the text of the
+/// `vectorcraft:failed` reply.
+pub fn profiles_fit(count: usize, sizes: impl IntoIterator<Item = Option<usize>>) -> Result<(), String> {
+    const C: &str = "vectorcraft:colorSettings";
+    if count > MAX_PROFILES {
+        return Err(format!("{C}: at most {MAX_PROFILES} profiles"));
+    }
+    let mut total = 0usize;
+    for (i, size) in sizes.into_iter().enumerate() {
+        let size = size.unwrap_or(0);
+        if size > MAX_PROFILE_BYTES {
+            return Err(format!("{C}: profiles[{i}] is larger than {MAX_PROFILE_BYTES} bytes"));
+        }
+        total = total.saturating_add(size);
+        if total > MAX_PROFILES_BYTES {
+            return Err(format!("{C}: the profiles take more than {MAX_PROFILES_BYTES} bytes together"));
+        }
+    }
+    Ok(())
+}
+
+/// What a `vectorcraft:colorSettings` asks for: ICC profiles registered (each under `name`, else
+/// its own description), then the working spaces, intent and black-point compensation set, as
+/// Edit › Color Settings sets them. A field left out stays as it is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColorSettings {
+    pub profiles: Vec<(Option<String>, Vec<u8>)>,
+    pub rgb: Option<String>,
+    pub cmyk: Option<String>,
+    pub intent: Option<vectorcraft_color::cms::Intent>,
+    pub bpc: Option<bool>,
+}
+
+impl ColorSettings {
+    /// The `edit.colorSettings` params for the fields given.
+    pub fn params(&self) -> serde_json::Value {
+        let mut p = serde_json::Map::new();
+        if let Some(v) = &self.rgb {
+            p.insert("rgb".into(), v.clone().into());
+        }
+        if let Some(v) = &self.cmyk {
+            p.insert("cmyk".into(), v.clone().into());
+        }
+        if let Some(i) = self.intent {
+            p.insert("intent".into(), i.id().into());
+        }
+        if let Some(b) = self.bpc {
+            p.insert("bpc".into(), b.into());
+        }
+        p.into()
+    }
+}
+
+/// Check a `vectorcraft:colorSettings` the bridge accepted. `profiles`: each entry's `name` (`None`
+/// left out, `Some(None)` not a string) and `bytes` (`None`: missing or not bytes); `None` for no
+/// `profiles` field, `Some(None)` for one that isn't an array. The other fields as for
+/// [`solidify`]: `None` left out, `Some(None)` of the wrong type. The error is the text of the
+/// `vectorcraft:failed` reply.
+#[allow(clippy::type_complexity)]
+pub fn color_settings(
+    profiles: Option<Option<Vec<(Option<Option<String>>, Option<Vec<u8>>)>>>,
+    rgb: Option<Option<String>>,
+    cmyk: Option<Option<String>>,
+    intent: Option<Option<String>>,
+    bpc: Option<Option<bool>>,
+) -> Result<ColorSettings, String> {
+    const C: &str = "vectorcraft:colorSettings";
+    let profiles = match profiles {
+        None => vec![],
+        Some(None) => return Err(format!("{C}: profiles must be an array of {{name?, bytes}}")),
+        Some(Some(list)) => {
+            profiles_fit(list.len(), list.iter().map(|(_, b)| b.as_ref().map(Vec::len)))?;
+            let mut out = vec![];
+            for (i, (name, bytes)) in list.into_iter().enumerate() {
+                let name = match name {
+                    None => None,
+                    Some(Some(n)) if !n.trim().is_empty() => Some(n.trim().to_string()),
+                    Some(_) => return Err(format!("{C}: profiles[{i}].name must be a non-empty string")),
+                };
+                let Some(bytes) = bytes else {
+                    return Err(format!("{C}: profiles[{i}] needs the profile's contents (`bytes`, an ArrayBuffer or Uint8Array)"));
+                };
+                out.push((name, bytes));
+            }
+            out
+        }
+    };
+    let text = |key: &str, v: Option<Option<String>>| match v {
+        None => Ok(None),
+        Some(Some(t)) if !t.trim().is_empty() => Ok(Some(t)),
+        Some(_) => Err(format!("{C}: {key} must name a profile")),
+    };
+    let (rgb, cmyk) = (text("rgb", rgb)?, text("cmyk", cmyk)?);
+    let intent = match intent {
+        None => None,
+        Some(Some(i)) if vectorcraft_color::cms::Intent::parse(&i).is_some() => vectorcraft_color::cms::Intent::parse(&i),
+        Some(_) => return Err(format!("{C}: intent must be perceptual, relative, saturation or absolute")),
+    };
+    let bpc = match bpc {
+        None => None,
+        Some(Some(b)) => Some(b),
+        Some(None) => return Err(format!("{C}: bpc must be a boolean")),
+    };
+    if profiles.is_empty() && rgb.is_none() && cmyk.is_none() && intent.is_none() && bpc.is_none() {
+        return Err(format!("{C}: nothing to set (profiles, rgb, cmyk, intent or bpc)"));
+    }
+    Ok(ColorSettings { profiles, rgb, cmyk, intent, bpc })
+}
+
 /// Check a `vectorcraft:open`'s `units` or `strokeUnits` (`field`): left out (`None`), or a string
 /// naming a unit as Preferences ▸ Units name them: its key, label or suffix in any case
 /// (`inches`, `Millimeters`, `mm`, `in`; [`vectorcraft_doc::Unit::named`]). `Some(None)` is a value
@@ -461,6 +580,57 @@ mod tests {
             assert_eq!(e, "vectorcraft:solidify: level must be a whole number from 1 to 255", "{bad:?}");
         }
         assert_eq!(solidify(None, Some(None)).unwrap_err(), "vectorcraft:solidify: copies must be a boolean");
+    }
+
+    #[test]
+    fn accepts_color_settings_from_the_parent_on_the_same_origin() {
+        assert!(accepts(SITE, SITE, true, Some("vectorcraft:colorSettings")));
+        assert!(!accepts(SITE, "https://evil.example", true, Some("vectorcraft:colorSettings")));
+        assert!(!accepts(SITE, SITE, false, Some("vectorcraft:colorSettings")));
+        assert!(!accepts(SITE, SITE, true, Some("vectorcraft:colorSettingsApplied")), "the answer isn't heard");
+    }
+
+    #[test]
+    fn color_settings_take_profiles_spaces_intent_and_compensation() {
+        use vectorcraft_color::cms::Intent;
+        let s = color_settings(
+            Some(Some(vec![(None, Some(vec![1, 2])), (Some(Some(" Press ".into())), Some(vec![3]))])),
+            Some(Some("Adobe RGB (1998)".into())),
+            Some(Some("U.S. Web Coated (SWOP) v2".into())),
+            Some(Some("perceptual".into())),
+            Some(Some(true)),
+        )
+        .unwrap();
+        assert_eq!(s.profiles, vec![(None, vec![1, 2]), (Some("Press".into()), vec![3])]);
+        assert_eq!(s.intent, Some(Intent::Perceptual));
+        assert_eq!(
+            s.params(),
+            serde_json::json!({"rgb": "Adobe RGB (1998)", "cmyk": "U.S. Web Coated (SWOP) v2", "intent": "perceptual", "bpc": true})
+        );
+        // A field left out stays as it is.
+        let only = color_settings(None, None, None, None, Some(Some(false))).unwrap();
+        assert_eq!((only.profiles.len(), only.params()), (0, serde_json::json!({"bpc": false})));
+    }
+
+    #[test]
+    fn color_settings_refuse_bad_fields_and_an_empty_message() {
+        let e = |r: Result<ColorSettings, String>| r.unwrap_err();
+        assert!(e(color_settings(None, None, None, None, None)).contains("nothing to set"));
+        assert!(e(color_settings(Some(None), None, None, None, None)).contains("profiles must be an array"));
+        assert!(e(color_settings(Some(Some(vec![(None, None)])), None, None, None, None)).contains("profiles[0] needs"));
+        assert!(e(color_settings(Some(Some(vec![(Some(None), Some(vec![1]))])), None, None, None, None)).contains("name must be"));
+        assert!(e(color_settings(Some(Some(vec![(None, Some(vec![0; MAX_PROFILE_BYTES + 1]))])), None, None, None, None)).contains("larger"));
+        let many = (0..=MAX_PROFILES).map(|_| (None, Some(vec![1]))).collect();
+        assert!(e(color_settings(Some(Some(many)), None, None, None, None)).contains("at most"));
+        // Sized before being copied out of the page; several large ones together are too much.
+        assert!(profiles_fit(MAX_PROFILES + 1, []).is_err_and(|e| e.contains("at most")));
+        assert!(profiles_fit(1, [Some(MAX_PROFILE_BYTES + 1)]).is_err_and(|e| e.contains("larger")));
+        assert!(profiles_fit(3, [Some(MAX_PROFILE_BYTES); 3]).is_err_and(|e| e.contains("together")));
+        assert_eq!(profiles_fit(2, [Some(MAX_PROFILE_BYTES), None]), Ok(()));
+        assert!(e(color_settings(None, Some(None), None, None, None)).contains("rgb must name"));
+        assert!(e(color_settings(None, None, Some(Some(" ".into())), None, None)).contains("cmyk must name"));
+        assert!(e(color_settings(None, None, None, Some(Some("vivid".into())), None)).contains("intent must be"));
+        assert!(e(color_settings(None, None, None, None, Some(None))).contains("bpc must be"));
     }
 
     #[test]

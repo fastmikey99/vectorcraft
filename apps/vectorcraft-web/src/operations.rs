@@ -12,6 +12,8 @@ pub enum Operation {
     Solidify(protocol::Solidify),
     Open(vectorcraft_ui_egui::HostOpen),
     Prefs(String),
+    /// `vectorcraft:colorSettings`: in the queue, so an open sent after it is read in its settings.
+    ColorSettings(protocol::ColorSettings),
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -46,6 +48,16 @@ pub fn execute(app: &mut VectorcraftApp, operation: Operation) -> Result<Reply, 
         Operation::Open(open) => {
             app.open_from_host(open);
             Reply::None
+        }
+        Operation::ColorSettings(request) => {
+            let done = apply_color_settings(app, &request)?;
+            let text = |k: &str| done.settings[k].as_str().unwrap_or_default().to_string();
+            let profiles: Vec<&str> = done.settings["profiles"].as_array().into_iter().flatten().filter_map(|p| p["name"].as_str()).collect();
+            Reply::Message {
+                kind: "vectorcraft:colorSettingsApplied",
+                value: json!({"loaded":done.loaded, "rgb":text("rgb"), "cmyk":text("cmyk"), "intent":text("intent"),
+                "bpc":done.settings["bpc"].as_bool().unwrap_or(false), "profiles":profiles}),
+            }
         }
         Operation::Prefs(text) => {
             app.ui = serde_json::from_str::<vectorcraft_ui_egui::UiState>(&text).map_err(|e| e.to_string())?.sanitized();
@@ -241,6 +253,54 @@ pub fn solidify(app: &mut VectorcraftApp, request: &protocol::Solidify) -> Resul
         clear: n("clearPixels")?,
         opaque: n("opaquePixels")?,
     })
+}
+
+/// What a `vectorcraft:colorSettings` did: the profiles it registered (their names) and the
+/// colour settings now in effect (`edit.colorSettings`'s answer).
+#[derive(Debug)]
+pub struct ColorSettingsApplied {
+    pub loaded: Vec<String>,
+    pub settings: serde_json::Value,
+}
+
+/// Register `request`'s profiles and set its working spaces, intent and compensation, as Edit ›
+/// Color Settings does: process-wide, for this document and the next ones the page opens. Not an
+/// edit: no undo step, and an unmodified document stays unmodified. Nothing is registered or set
+/// when any profile can't be registered or a named space isn't available: the profiles and the
+/// spaces are checked first (a profile registered again under a working space's name would take
+/// effect at once).
+pub fn apply_color_settings(app: &mut VectorcraftApp, request: &protocol::ColorSettings) -> Result<ColorSettingsApplied, String> {
+    use vectorcraft_color::cms::{self, ProfileKind};
+    const C: &str = "vectorcraft:colorSettings";
+    let mut checked = vec![];
+    for (i, (name, bytes)) in request.profiles.iter().enumerate() {
+        checked.push(cms::check_icc(bytes, name.clone()).map_err(|e| format!("{C}: profiles[{i}]: {e}"))?);
+    }
+    for (key, name, kind) in [("rgb", &request.rgb, ProfileKind::Rgb), ("cmyk", &request.cmyk, ProfileKind::Cmyk)] {
+        let Some(name) = name else { continue };
+        let name = cms::canonical_name(name);
+        let known = checked.iter().rev().find(|p| p.name == name).or(cms::profile(name).as_ref()).map(|p| p.kind);
+        match known {
+            Some(k) if k == kind => {}
+            Some(_) => return Err(format!("{C}: edit.colorSettings: {name} is not a{} profile", if key == "rgb" { "n RGB" } else { " CMYK" })),
+            None => return Err(format!("{C}: edit.colorSettings: unknown {key} profile `{name}`")),
+        }
+    }
+    let mut loaded = vec![];
+    for (i, (name, bytes)) in request.profiles.iter().enumerate() {
+        let info = cms::register_icc(bytes, name.clone()).map_err(|e| format!("{C}: profiles[{i}]: {e}"))?;
+        loaded.push(info.name);
+    }
+    // A working space registered again (`register_icc` makes it take the new profile) draws anew,
+    // although the settings' names don't change.
+    let active = vectorcraft_color::cms::active_settings();
+    if loaded.iter().any(|n| *n == active.rgb || *n == active.cmyk)
+        && let Some(st) = app.session.active_mut()
+    {
+        st.revision += 1;
+    }
+    let settings = app.session.execute("edit.colorSettings", &request.params()).map_err(|e| format!("vectorcraft:colorSettings: {e}"))?;
+    Ok(ColorSettingsApplied { loaded, settings })
 }
 
 /// Summarize what was actually saved (also used for File > Save downloads and selection exports).
@@ -446,6 +506,66 @@ mod tests {
         assert_eq!((done.ids, done.clear, done.opaque), (vec![a, b], 3, 1));
         assert_eq!(app.session.active().unwrap().history.undo.len(), undo + 1, "copies too in one undo step");
     }
+
+    #[test]
+    fn color_settings_load_profiles_under_their_names_without_editing_the_document() {
+        use vectorcraft_color::cms;
+        let mut app = app();
+        let undo = app.session.active().unwrap().history.undo.len();
+        assert!(!app.session.active().unwrap().is_dirty());
+        let before = cms::active_settings();
+        let rgb = cms::icc_bytes(cms::WIDE_GAMUT_RGB).unwrap().to_vec();
+        let request = protocol::color_settings(
+            Some(Some(vec![(Some(Some("Embed Test RGB".into())), Some(rgb))])),
+            Some(Some("Embed Test RGB".into())),
+            None,
+            Some(Some("perceptual".into())),
+            None,
+        )
+        .unwrap();
+        let done = apply_color_settings(&mut app, &request);
+        let now = cms::active_settings();
+        // Through the bridge's queue, as the parent's message runs: the same, and its answer.
+        let queued = execute(&mut app, Operation::ColorSettings(request.clone()));
+        // A request refused at its second profile changes nothing, not even the working space its
+        // first one would have registered again.
+        let shown = cms::active().rgb_to_srgb([0.2, 0.6, 0.4]);
+        let prophoto = cms::icc_bytes(cms::PROPHOTO_RGB).unwrap().to_vec();
+        let half = protocol::color_settings(
+            Some(Some(vec![(Some(Some("Embed Test RGB".into())), Some(prophoto)), (None, Some(b"junk".to_vec()))])),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let refused = apply_color_settings(&mut app, &half);
+        let still = cms::active().rgb_to_srgb([0.2, 0.6, 0.4]);
+        cms::set_active(&before).unwrap(); // process-wide: put back before asserting
+        assert!(refused.unwrap_err().contains("profiles[1]"));
+        assert_eq!(still, shown, "the working space kept its profile");
+        let done = done.unwrap();
+        let Ok(Reply::Message { kind, value }) = queued else { panic!("no answer") };
+        assert_eq!(
+            (kind, &value["rgb"], &value["loaded"][0], &value["intent"]),
+            ("vectorcraft:colorSettingsApplied", &json!("Embed Test RGB"), &json!("Embed Test RGB"), &json!("perceptual"))
+        );
+        assert!(value["profiles"].as_array().unwrap().iter().any(|p| p == "Embed Test RGB"));
+        assert_eq!(done.loaded, vec!["Embed Test RGB".to_string()]);
+        assert_eq!((now.rgb.as_str(), now.intent), ("Embed Test RGB", cms::Intent::Perceptual));
+        assert_eq!(done.settings["rgb"], "Embed Test RGB");
+        assert!(done.settings["profiles"].as_array().unwrap().iter().any(|p| p["name"] == "Embed Test RGB" && p["kind"] == "rgb"));
+        let st = app.session.active().unwrap();
+        assert!(!st.is_dirty(), "colour settings aren't an edit");
+        assert_eq!(st.history.undo.len(), undo, "no undo step");
+        // A profile that isn't one, or a space that isn't there, is refused and sets nothing.
+        let bad = protocol::color_settings(Some(Some(vec![(None, Some(b"junk".to_vec()))])), None, None, None, Some(Some(false))).unwrap();
+        assert!(apply_color_settings(&mut app, &bad).unwrap_err().contains("profiles[0]"));
+        let missing = protocol::color_settings(None, Some(Some("No Such RGB".into())), None, None, None).unwrap();
+        assert!(apply_color_settings(&mut app, &missing).is_err());
+        assert_eq!(cms::active_settings(), before);
+    }
+
     #[test]
     fn one_frame_queue_exports_after_the_preceding_image_mutation() {
         let mut app = app();
