@@ -674,3 +674,29 @@ fn colours_under_a_transfer_function_are_the_readers_srgb() {
     // One the reader can't read (`[]`) sets nothing, there as here.
     assert_eq!(solid(&got[3]).0, Color::rgb(0.2, 0.6, 0.4));
 }
+
+#[test]
+fn profiles_that_read_alike_but_convert_apart_are_told_apart_by_the_walk() {
+    // Two LUT profiles with the same tables out of them, other perceptual tables into them, the
+    // second the working space: they read the same colours, but only the working space's own keep
+    // their numbers. Grouped as one, every colour took the first's conversion (in either order).
+    use vectorcraft_color::cms::{Intent, RgbTransform, WorkingRgb};
+    use vectorcraft_testkit::icc::rgb_lut_profile;
+    let (other, own) = (rgb_lut_profile(1.0, 1.0), rgb_lut_profile(1.0, 0.8));
+    let hex = |b: &[u8]| {
+        let h: String = b.iter().map(|b| format!("{b:02x}")).collect();
+        format!("<< /N 3 /Filter /ASCIIHexDecode /Length {} >>\nstream\n{h}>\nendstream", h.len() + 1)
+    };
+    let w = WorkingRgb { icc: own.clone().into(), intent: Intent::Perceptual, bpc: false };
+    let want = RgbTransform::new(&other, &w).unwrap().apply([0.4; 3]).unwrap();
+    assert!((want[0] - 0.4).abs() > 0.02, "the fixture converts: {want:?}");
+    let f = first_extra(1);
+    for (a, b, own_first) in [(&own, &other, true), (&other, &own, false)] {
+        let page = page_with(&format!("/CS0 [/ICCBased {f} 0 R] /CS1 [/ICCBased {} 0 R]", f + 1), &[("CS0", "0.4 0.4 0.4"), ("CS1", "0.4 0.4 0.4")]);
+        let bytes = pdf_with(&[page], &[&hex(a), &hex(b)], None);
+        let got = fills(&import_with_report(&bytes, &ImportOptions { working_rgb: Some(w.clone()), ..Default::default() }).unwrap().document);
+        let (mine, theirs) = if own_first { (&got[0], &got[1]) } else { (&got[1], &got[0]) };
+        assert_eq!(solid(mine).0, Color::rgb(0.4, 0.4, 0.4), "own_first {own_first}");
+        assert!(near(solid(theirs).0, Color::rgb(want[0], want[1], want[2])), "own_first {own_first}: {:?}", theirs);
+    }
+}

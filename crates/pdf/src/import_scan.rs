@@ -589,8 +589,9 @@ struct Walker<'w, 'p> {
     ink_index: HashMap<Vec<String>, u32>,
     /// More inks or changes of ink than are kept: the page's inks are left out.
     inks_cut: bool,
-    /// The RGB space of each `ICCBased` stream met, by its cache key.
-    rgb_index: HashMap<u128, RgbAt>,
+    /// The RGB space of each `ICCBased` stream met, by its object and its dictionary (a stream's
+    /// cache key is its dictionary's alone: profiles of the same length share it).
+    rgb_index: HashMap<(ObjectIdentifier, u128), RgbAt>,
     /// The RGB spaces of the text shown since the last painted path: of its fills, of its strokes.
     text_rgb: [RunRgb; 2],
     /// Note the profiles of `ICCBased` RGB spaces (only an import converting RGB needs them).
@@ -768,7 +769,7 @@ impl Walker<'_, '_> {
             None => return RgbAt::NotIcc,
         }
         let Some(stream) = it.next::<craft_pdf::syntax::object::Stream<'_>>() else { return RgbAt::NotIcc };
-        let key = stream.cache_key();
+        let key = (stream.obj_id(), stream.cache_key());
         if let Some(at) = self.rgb_index.get(&key) {
             return *at;
         }

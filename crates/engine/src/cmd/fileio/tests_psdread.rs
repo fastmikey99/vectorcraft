@@ -213,12 +213,7 @@ fn a_16_bit_psd_is_converted_from_its_profile_before_it_is_quantised() {
     // GUARDS: 16-bit samples were cut to 8 bits before the profile's conversion: in a profile with
     // a linear tone curve, 128/65535 became black instead of about 6/255 in sRGB.
     use vectorcraft_color::cms::{self, Intent};
-    let mut linear = moxcms::ColorProfile::new_srgb();
-    linear.cicp = None;
-    for trc in [&mut linear.red_trc, &mut linear.green_trc, &mut linear.blue_trc] {
-        *trc = Some(moxcms::ToneReprCurve::Parametric(vec![1.0]));
-    }
-    let icc = linear.encode().unwrap();
+    let icc = vectorcraft_testkit::icc::linear_srgb();
     // Two pixels: 128 and 20000 in each channel.
     let row = [128u16.to_be_bytes(), 20000u16.to_be_bytes()].concat();
     let f = psd(1, 3, (2, 1), 16, 3, &[], &icc_resource(&icc), &[], &raw(&[&row, &row, &row]));

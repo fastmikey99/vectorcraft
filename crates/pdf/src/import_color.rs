@@ -495,15 +495,26 @@ impl<'p> Colors<'p> {
         f
     }
 
-    /// Profiles `ps` as a [`Group`]: one when they all convert as the first does (with the working
-    /// space's intent).
+    /// Profiles `ps` as a [`Group`]: one when they all convert as the first does (the same
+    /// colours with the working space's intent, and each keeps its numbers in the working space
+    /// or each doesn't: a profile with the working space's tables out of it but not into it is
+    /// converted, the working space's own isn't).
     fn group(&mut self, ps: &[Vec<u8>]) -> Group {
         let Some((first, rest)) = ps.split_first() else { return Group::None };
         let intent = self.working_rgb.as_ref().map_or(cms::Intent::RelativeColorimetric, |w| w.intent);
-        match self.transform(first) {
-            Some(k) if rest.iter().all(|p| cms::same_rgb_profile(p, first, intent)) => Group::One(k),
-            _ => Group::Several,
+        let Some(k) = self.transform(first) else { return Group::Several };
+        let keeps = |c: &Self, k: usize| c.transforms.get(k).and_then(|t| t.1.as_ref()).map(RgbTransform::keeps_numbers);
+        let kept = keeps(self, k);
+        for p in rest {
+            if !cms::same_rgb_profile(p, first, intent) {
+                return Group::Several;
+            }
+            match self.transform(p) {
+                Some(j) if keeps(self, j) == kept => {}
+                _ => return Group::Several,
+            }
         }
+        Group::One(k)
     }
 
     /// A colour the interpreter gives as sRGB (a space that isn't one of those mapped in their own

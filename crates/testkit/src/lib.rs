@@ -28,6 +28,7 @@ pub mod ase;
 pub mod fixtures;
 pub mod fonts;
 pub mod geom;
+pub mod icc;
 pub mod invariants;
 pub mod pdf;
 pub mod raster;
