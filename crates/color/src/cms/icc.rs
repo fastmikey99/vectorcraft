@@ -301,11 +301,12 @@ impl IccProfile {
     /// becomes the sRGB pixels a document's images are. `false`, the pixels untouched, when this
     /// isn't an RGB profile or no transform can be built.
     pub fn rgba8_to_srgb(&self, px: &mut [u8], width: usize, intent: Intent) -> bool {
-        if self.kind != ProfileKind::Rgb || width == 0 {
+        // Whole rows of whole pixels, or nothing is touched.
+        let Some(row) = width.checked_mul(4).filter(|r| *r > 0 && px.len().is_multiple_of(*r)) else { return false };
+        if self.kind != ProfileKind::Rgb || px.is_empty() {
             return false;
         }
         let Ok(xf) = self.profile.create_transform_8bit(Layout::Rgba, &self.srgb, Layout::Rgba, Self::opts(intent)) else { return false };
-        let row = width.saturating_mul(4);
         let mut out = vec![0u8; row];
         for line in px.chunks_mut(row) {
             let Some(dst) = out.get_mut(..line.len()) else { return false };

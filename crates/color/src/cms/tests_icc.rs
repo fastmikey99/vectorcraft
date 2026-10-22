@@ -268,6 +268,11 @@ fn rgba_pixels_of_a_profile_become_srgb_with_their_alpha() {
     assert!(px[0] == 255 && px[1] < 26, "a saturated red is more saturated in sRGB: {px:?}");
     let cmyk = IccProfile::from_bytes(None, &icc_bytes(GENERIC_CMYK).unwrap()).unwrap();
     assert!(!cmyk.rgba8_to_srgb(&mut px, 3, Intent::RelativeColorimetric), "not RGB");
+    // Not whole rows of whole pixels: nothing is touched.
+    let mut odd = vec![230, 26, 26, 255, 9];
+    assert!(!wide.rgba8_to_srgb(&mut odd, 1, Intent::RelativeColorimetric));
+    assert!(!wide.rgba8_to_srgb(&mut odd, usize::MAX, Intent::RelativeColorimetric));
+    assert_eq!(odd, vec![230, 26, 26, 255, 9]);
 }
 
 #[test]

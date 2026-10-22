@@ -928,10 +928,21 @@ impl Walker<'_, '_> {
                         s.fill = d.get::<bool>(b"op").or(stroke).unwrap_or(s.fill);
                         s.nonzero = d.get::<u8>(b"OPM").map_or(s.nonzero, |m| m != 0);
                         // As the reader takes it: `TR2` before `TR`; a name (Identity, Default)
-                        // resets it, a function or four of them set one.
+                        // resets it, a function or four of them set one, anything else leaves it.
                         if let Some(tr) = d.get::<Object<'_>>(b"TR2").or_else(|| d.get::<Object<'_>>(b"TR")) {
-                            s.transfer = !matches!(tr, Object::Name(_));
-                            self.out.transfer |= s.transfer;
+                            let function = |o: &Object<'_>| craft_pdf::interpret::Function::new(o).is_some();
+                            let set = match &tr {
+                                Object::Name(_) => Some(false),
+                                Object::Array(a) => {
+                                    let mut it = a.iter::<Object<'_>>();
+                                    (0..4).all(|_| it.next().is_some_and(|f| function(&f))).then_some(true)
+                                }
+                                o => function(o).then_some(true),
+                            };
+                            if let Some(on) = set {
+                                s.transfer = on;
+                                self.out.transfer |= on;
+                            }
                         }
                     }
                 }

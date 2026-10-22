@@ -655,8 +655,14 @@ fn colours_under_a_transfer_function_are_the_readers_srgb() {
     let f = first_extra(1);
     let identity = "<< /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >>";
     let page = PdfPage {
-        resources: format!("/ColorSpace << /CS0 [/ICCBased {f} 0 R] >> /ExtGState << /T << /TR {identity} >> /I << /TR /Identity >> >>"),
-        ..PdfPage::new(200.0, 50.0, "/CS0 cs 0.2 0.6 0.4 scn q /T gs 0 0 10 10 re f Q 12 0 10 10 re f q /T gs /I gs 24 0 10 10 re f Q\n")
+        resources: format!(
+            "/ColorSpace << /CS0 [/ICCBased {f} 0 R] >> /ExtGState << /T << /TR {identity} >> /I << /TR /Identity >> /X << /TR [] >> >>"
+        ),
+        ..PdfPage::new(
+            200.0,
+            50.0,
+            "/CS0 cs 0.2 0.6 0.4 scn q /T gs 0 0 10 10 re f Q 12 0 10 10 re f q /T gs /I gs 24 0 10 10 re f Q /X gs 36 0 10 10 re f\n",
+        )
     };
     let bytes = pdf_with(&[page], &[&icc_stream(PROPHOTO_RGB, false)], None);
     let got = fills_in(&bytes, Some(PROPHOTO_RGB));
@@ -665,4 +671,6 @@ fn colours_under_a_transfer_function_are_the_readers_srgb() {
     // Not under one (after `Q`, or reset by /Identity): in the working space's own profile.
     assert_eq!(solid(&got[1]).0, Color::rgb(0.2, 0.6, 0.4));
     assert_eq!(solid(&got[2]).0, Color::rgb(0.2, 0.6, 0.4));
+    // One the reader can't read (`[]`) sets nothing, there as here.
+    assert_eq!(solid(&got[3]).0, Color::rgb(0.2, 0.6, 0.4));
 }
