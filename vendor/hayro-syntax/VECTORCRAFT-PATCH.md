@@ -35,10 +35,34 @@ What changes (each marked `VectorCraft patch` in the source):
 Nothing else moves: object streams, cross-reference streams (also when encrypted or found by
 repair), fonts, profiles, functions, shadings, images and `Page::page_stream` decode with
 the ordinary 256 MiB limit. VectorCraft's own screen (`crates/pdf/src/streams.rs`) also
-refuses, before the reader runs, any stream past 256 MiB except one used as content that
-expands at most 32 times, up to the same 512 MiB.
+refuses, before drawing, a stream past 256 MiB except one used as content that expands at
+most 32 times, up to the same 512 MiB. Exclusively private page-piece streams, which are
+never decoded for drawing, are exempt as described below.
 
 The workspace patches both copies in with `[patch.crates-io]`; hayro-jbig2 and krilla still
 come from the same craft-libs revision. Drop the copies and point the patch back at craft-libs
 when upstream decodes content with a limit of its own (or lets a caller raise the ordinary
 one), then rerun the `streams` tests and a large-content import.
+
+## Private application data audit (PDF.PRIVATE)
+
+ISO 32000-1 §14.5 defines `PieceInfo` on the catalog, pages and form XObjects as
+application data. No vendor change is needed: hayro-syntax's PDF/page construction and
+`XRef::objects` parse object dictionaries and stored stream spans, without applying their
+filters. Only object and cross-reference streams are decoded to read the file itself;
+those retain their existing pre-read checks and limits. hayro-interpret reads page contents,
+resources, forms, patterns, glyphs, masks and annotation appearances by their drawing keys;
+it never reads `PieceInfo` (the syntax crate only defines that key).
+
+VectorCraft's app-side preflight and colour discovery share a container walk that excludes
+piece-only arrays, dictionaries and streams before stream screening, calculator-procedure
+decoding, tint-function construction or ICC-profile discovery. Only an unshared catalog or
+page reached through the page tree can grant an exemption; a form's `PieceInfo` cannot.
+A piece dictionary reused through an inherited page attribute retains normal screening,
+including when stored in an object stream. Every incoming reference is counted,
+including through shared ancestors and cycles. Any outside reference revokes the exemption
+and propagates that revocation. Explicit Illustrator editing-data extraction remains a
+separate app-side bounded path (`pages::illustrator_data`, 256 MiB total); this exemption
+does not increase its limit or any hayro decode limit.
+
+Reference: https://developer.adobe.com/document-services/docs/assets/35e4369068f86065372c18787171a17e/PDF_ISO_32000-1.pdf

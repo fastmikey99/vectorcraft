@@ -492,8 +492,8 @@ impl<'p> Colors<'p> {
         }
         let mut found: Vec<Vec<u8>> = vec![];
         let mut ok = true;
-        for o in self.pdf.objects() {
-            icc_rgb_profiles(o, 0, &mut found, &mut ok);
+        for o in crate::pages::scanned_objects(self.pdf, MAX_DEPTH) {
+            icc_rgb_profiles(o, &mut found, &mut ok);
             if !ok {
                 break;
             }
@@ -548,31 +548,13 @@ impl<'p> Colors<'p> {
         }
         self.scanned = true;
         let pdf = self.pdf;
-        for o in pdf.objects() {
-            self.visit(o, 0);
-        }
-    }
-
-    fn visit(&mut self, o: Object<'_>, depth: u32) {
-        if depth > MAX_DEPTH || self.spaces.len() >= MAX_SPACES {
-            return;
-        }
-        match o {
-            Object::Array(a) => {
+        for o in crate::pages::scanned_objects(pdf, MAX_DEPTH) {
+            if self.spaces.len() >= MAX_SPACES {
+                break;
+            }
+            if let Object::Array(a) = o {
                 self.ink_space(&a);
-                for item in items(&a).filter_map(direct) {
-                    self.visit(item, depth + 1);
-                }
             }
-            Object::Dict(d) => {
-                for v in values(&d) {
-                    if let Some(v) = direct(v) {
-                        self.visit(v, depth + 1);
-                    }
-                }
-            }
-            Object::Stream(s) => self.visit(Object::Dict(s.dict().clone()), depth + 1),
-            _ => {}
         }
     }
 
@@ -779,41 +761,25 @@ pub(crate) fn icc_rgb(profile: &Stream<'_>) -> IccRgb {
 /// Collect the profiles of the 3-component `ICCBased` spaces in `o` (distinct, decoded) into
 /// `found`; `ok` turns false at one that can't be told apart: a Lab profile, one that doesn't
 /// decode, or past [`MAX_ICC_PROFILES`] or [`MAX_ICC_TOTAL`].
-fn icc_rgb_profiles(o: Object<'_>, depth: u32, found: &mut Vec<Vec<u8>>, ok: &mut bool) {
-    if depth > MAX_DEPTH || !*ok {
+fn icc_rgb_profiles(o: Object<'_>, found: &mut Vec<Vec<u8>>, ok: &mut bool) {
+    if !*ok {
         return;
     }
-    match o {
-        Object::Array(a) => {
-            let mut it = a.flex_iter();
-            if it.next::<Name<'_>>().is_some_and(|n| n.as_str() == "ICCBased") {
-                if let Some(profile) = it.next::<Stream<'_>>() {
-                    match icc_rgb(&profile) {
-                        IccRgb::NotRgb => {}
-                        IccRgb::Rgb(bytes) => {
-                            if !found.iter().any(|f| f[..] == bytes[..]) {
-                                found.push(bytes);
-                                *ok = found.len() <= MAX_ICC_PROFILES && found.iter().map(Vec::len).sum::<usize>() <= MAX_ICC_TOTAL;
-                            }
-                        }
-                        IccRgb::Unreadable => *ok = false,
-                    }
-                }
-                return;
-            }
-            for item in items(&a).filter_map(direct) {
-                icc_rgb_profiles(item, depth + 1, found, ok);
-            }
-        }
-        Object::Dict(d) => {
-            for v in values(&d) {
-                if let Some(v) = direct(v) {
-                    icc_rgb_profiles(v, depth + 1, found, ok);
+    let Object::Array(a) = o else { return };
+    let mut it = a.flex_iter();
+    if it.next::<Name<'_>>().is_some_and(|n| n.as_str() == "ICCBased")
+        && let Some(profile) = it.next::<Stream<'_>>()
+    {
+        match icc_rgb(&profile) {
+            IccRgb::NotRgb => {}
+            IccRgb::Rgb(bytes) => {
+                if !found.iter().any(|f| f[..] == bytes[..]) {
+                    found.push(bytes);
+                    *ok = found.len() <= MAX_ICC_PROFILES && found.iter().map(Vec::len).sum::<usize>() <= MAX_ICC_TOTAL;
                 }
             }
+            IccRgb::Unreadable => *ok = false,
         }
-        Object::Stream(s) => icc_rgb_profiles(Object::Dict(s.dict().clone()), depth + 1, found, ok),
-        _ => {}
     }
 }
 
