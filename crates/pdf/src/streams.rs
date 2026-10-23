@@ -425,7 +425,9 @@ mod tests {
         assert_eq!(budget(&form, 10 << 20, true), 320 << 20);
         // Anything else stays at the cap, however little its dictionary says: an Indexed colour
         // table (only Length and Filter), a mesh shading, a font.
-        for other in ["<< /Filter /FlateDecode >>", "<< /ShadingType 4 /BitsPerCoordinate 16 /Filter /FlateDecode >>", "<< /Length1 5 /Filter /FlateDecode >>"] {
+        for other in
+            ["<< /Filter /FlateDecode >>", "<< /ShadingType 4 /BitsPerCoordinate 16 /Filter /FlateDecode >>", "<< /Length1 5 /Filter /FlateDecode >>"]
+        {
             assert_eq!(budget(&dict(other), 100 << 20, false), MAX_DECODED, "{other}");
         }
         // A form's dictionary alone doesn't make it content: where the file uses it does.
@@ -519,6 +521,97 @@ mod tests {
     }
 
     #[test]
+    fn piece_info_streams_are_exempt_only_when_every_reference_is_private() {
+        let bomb = zeros_past_the_cap();
+        let head = [b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(), b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()];
+        let make = |piece: &str, content: &str, resources: &str, extra: &str| {
+            write_pdf(
+                &[
+                    head.to_vec(),
+                    vec![
+                        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents {content} /Resources << {resources} >> {piece} >>")
+                            .into_bytes(),
+                        stream_object("", b"0 0 10 10 re f"),
+                        stream_object("/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Filter /FlateDecode", &bomb),
+                        extra.as_bytes().to_vec(),
+                    ],
+                ]
+                .concat(),
+            )
+        };
+        // Synthetic data, generated here from the public PDF specification. Neither application
+        // name nor the private entry's name matters. Include arrays, cycles and repeated refs.
+        for piece in [
+            "/PieceInfo << /AdobePhotoshop << /Private << /StandardImageFileData 5 0 R >> >> >>", // brand-ok: PDF application key
+            "/PieceInfo << /Illustrator << /Private << /AIPrivateData1 5 0 R >> >> >>",
+            "/PieceInfo << /OtherApp << /Private [5 0 R 5 0 R] >> >>",
+            "/PieceInfo 6 0 R",
+            "/PieceInfo << /OtherApp << /OtherData 5 0 R >> >>",
+        ] {
+            let extra = if piece == "/PieceInfo 6 0 R" { "<< /OtherApp << /Private [5 0 R 6 0 R] >> >>" } else { "null" };
+            let pdf = make(piece, "4 0 R", "", extra);
+            assert!(crate::info(&pdf, None).is_ok(), "{piece}");
+            assert_eq!(drawn(&pdf).ok(), Some(1), "{piece}");
+        }
+        let piece = "/PieceInfo << /OtherApp << /Private << /Data 5 0 R >> >> >>";
+        // Unreferenced streams retain the existing screen too.
+        assert!(crate::info(&make("", "4 0 R", "", "null"), None).is_err());
+        let ordinary = vectorcraft_testkit::pdf::pdf(&[vectorcraft_testkit::pdf::PdfPage::new(100.0, 100.0, "0 0 10 10 re f")], None);
+        assert_eq!(drawn(&ordinary).ok(), Some(1));
+        assert_eq!(crate::info(&ordinary, None).unwrap(), crate::info(&make(piece, "4 0 R", "", "null"), None).unwrap());
+        // Direct sharing as contents, a form, a tiling pattern, annotation appearance or colour
+        // table; and sharing the entire private ancestor as the resources dictionary.
+        for (content, res, piece, extra) in [
+            ("5 0 R", "", piece, "null"),
+            ("4 0 R", "/XObject << /F 5 0 R >>", piece, "null"),
+            ("4 0 R", "/Pattern << /P 5 0 R >>", piece, "null"),
+            ("4 0 R", "/ColorSpace << /C [/Indexed /DeviceRGB 255 5 0 R] >>", piece, "null"),
+            ("4 0 R", "", "/Annots [<< /AP << /N 5 0 R >> >>] /PieceInfo << /App << /Private 5 0 R >> >>", "null"),
+            ("4 0 R", "/XObject 6 0 R", "/PieceInfo << /App << /Private 6 0 R >> >>", "<< /F 5 0 R >>"),
+            // Even an unrendered outside reference revokes the grant, as for content grants.
+            ("4 0 R", "", piece, "<< /Unrelated 5 0 R >>"),
+            ("4 0 R", "", "/PieceInfo 6 0 R /Other 6 0 R", "<< /App << /Private [5 0 R 6 0 R] >> >>"),
+            // An XObject named PieceInfo is still drawn, not a page-piece dictionary.
+            ("4 0 R", "/XObject << /PieceInfo 5 0 R >>", "", "null"),
+        ] {
+            let err = crate::info(&make(piece, content, res, extra), None).unwrap_err().to_string();
+            assert!(err.contains("would decode to more than 256 MB"), "{content} {res} {piece}: {err}");
+        }
+    }
+
+    #[test]
+    fn private_piece_info_grants_follow_use_and_never_hide_reader_roots() {
+        let pdf = |catalog: &str, piece: &str, res: &str, form: &str| {
+            write_pdf(&[
+                format!("<< /Type /Catalog /Pages 2 0 R {catalog} >>").into_bytes(),
+                b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+                format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << {res} >> {piece} >>").into_bytes(),
+                stream_object("", b"0 0 10 10 re f"),
+                // The calculator and predictor would fail if either preflight or interpretation
+                // decoded this stream. PieceInfo alone must not cause either decoder to run.
+                stream_object("/FunctionType 4 /Filter /FlateDecode /DecodeParms << /Predictor 12 /Columns 0 >>", b"not zlib"),
+                stream_object(&format!("/Type /XObject /Subtype /Form /BBox [0 0 100 100] {form}"), b""),
+            ])
+        };
+        let piece = "/PieceInfo << /App << /Private 5 0 R >> >>";
+        for file in [
+            pdf(piece, "", "", ""),
+            pdf("", "", "/XObject << /F 6 0 R >>", piece),
+            // The form itself is private, and also independently grants its PieceInfo data.
+            pdf("", "/PieceInfo << /App << /Private 6 0 R >> >>", "", piece),
+        ] {
+            assert_eq!(drawn(&file).ok(), Some(1));
+        }
+        for file in [
+            pdf("/Metadata 5 0 R", "/PieceInfo << /App << /Private 1 0 R >> >>", "", ""),
+            pdf("", "/PieceInfo << /App << /Private 3 0 R >> >>", "/XObject << /F 5 0 R >>", ""),
+            pdf(piece, "", "/XObject << /F 5 0 R >>", ""),
+        ] {
+            assert!(crate::info(&file, None).is_err());
+        }
+    }
+
+    #[test]
     fn content_past_the_cap_at_an_ordinary_ratio_imports_whole() {
         let data = content_300();
         // As a form (DF394805's case) and as a page's own contents: the square after the
@@ -547,10 +640,12 @@ mod tests {
         ]);
         let err = crate::info(&pdf, None).err().map(|e| e.to_string()).unwrap_or_default();
         assert!(err.contains("would decode to more than 256 MB"), "{err}");
-        let shading = dict("<< /ShadingType 4 /ColorSpace /DeviceRGB /BitsPerCoordinate 16 /BitsPerComponent 8 /BitsPerFlag 8 /Filter /FlateDecode >>");
+        let shading =
+            dict("<< /ShadingType 4 /ColorSpace /DeviceRGB /BitsPerCoordinate 16 /BitsPerComponent 8 /BitsPerFlag 8 /Filter /FlateDecode >>");
         assert!(matches!(decode(data, &shading, true, false), Err(TooBig)));
         // An object stream or a cross-reference stream: read before the file opens.
-        let stream = |dict: &str| [format!("1 0 obj\n<< {dict} /Length {} >>\nstream\n", data.len()).as_bytes(), data, b"\nendstream\nendobj\n"].concat();
+        let stream =
+            |dict: &str| [format!("1 0 obj\n<< {dict} /Length {} >>\nstream\n", data.len()).as_bytes(), data, b"\nendstream\nendobj\n"].concat();
         assert!(unsafe_file_streams(&stream("/Type /ObjStm /N 1 /First 4 /Filter /FlateDecode")));
         assert!(unsafe_file_streams(&stream("/Type /XRef /W [1 2 1] /Filter /FlateDecode")));
     }
@@ -563,10 +658,22 @@ mod tests {
         let indexed = "/ColorSpace << /C0 [/Indexed /DeviceRGB 255 5 0 R] >>";
         // An Indexed table that an unrelated dictionary names as its `Contents`.
         let unrelated = write_pdf(
-            &[head.to_vec(), vec![page(indexed), stream_object("", b"/C0 cs 0 sc 0 0 10 10 re f"), stream_object("/Filter /FlateDecode", data), b"<< /Contents 5 0 R >>".to_vec()]].concat(),
+            &[
+                head.to_vec(),
+                vec![
+                    page(indexed),
+                    stream_object("", b"/C0 cs 0 sc 0 0 10 10 re f"),
+                    stream_object("/Filter /FlateDecode", data),
+                    b"<< /Contents 5 0 R >>".to_vec(),
+                ],
+            ]
+            .concat(),
         );
         // A page's contents that are also the Indexed table it draws with.
-        let shared = write_pdf(&[head.to_vec(), vec![page("/ColorSpace << /C0 [/Indexed /DeviceRGB 255 4 0 R] >>"), stream_object("/Filter /FlateDecode", data)]].concat());
+        let shared = write_pdf(
+            &[head.to_vec(), vec![page("/ColorSpace << /C0 [/Indexed /DeviceRGB 255 4 0 R] >>"), stream_object("/Filter /FlateDecode", data)]]
+                .concat(),
+        );
         // The same page's contents, used only as contents: read whole (the control).
         let alone = write_pdf(&[head.to_vec(), vec![page(""), stream_object("/Filter /FlateDecode", data)]].concat());
         for (what, pdf) in [("unrelated Contents", &unrelated), ("shared with a colour table", &shared)] {
@@ -579,7 +686,9 @@ mod tests {
     #[test]
     fn forms_inside_forms_share_the_page_budget() {
         let data = content_300();
-        let form = |res: &str| stream_object(&format!("/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << {res} >> /Filter /FlateDecode"), data);
+        let form = |res: &str| {
+            stream_object(&format!("/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << {res} >> /Filter /FlateDecode"), data)
+        };
         let pdf = |forms: Vec<Vec<u8>>| {
             write_pdf(
                 &[

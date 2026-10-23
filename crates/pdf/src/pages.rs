@@ -128,16 +128,23 @@ const UNREADABLE_NOTE: &str = "an array in it is damaged and can't be read";
 
 /// Why `pdf` is refused, if it is: a stream the reader would fail on ([`STREAM_NOTE`]), or
 /// functions, color spaces or calculator procedures nested too deep ([`NESTED_NOTE`]). Every
-/// object is looked at, and every array, dictionary and stream written inside one, wherever it
-/// is used from: the interpreter builds functions and color spaces from resources, shadings,
-/// images, patterns, masks and graphics states alike.
+/// object is looked at, and every array, dictionary and stream written inside one. Only streams
+/// reached exclusively through `PieceInfo` are exempt: the interpreter never decodes them.
+/// Shared streams keep their checks, including when a private dictionary is itself shared.
 fn hostile(pdf: &Pdf) -> Option<&'static str> {
     let xref = pdf.xref();
-    let content = content_streams(pdf);
+    let refs = references(pdf.objects().into_iter());
+    let private = private_objects(pdf, &refs);
+    let content = content_streams(pdf, &refs);
     let mut known = HashMap::new();
     // The objects of the file, then what each holds directly (64 deep at most: the reader's cap).
     let mut pending: Vec<Object<'_>> = pdf.objects().into_iter().collect();
     while let Some(o) = pending.pop() {
+        if matches!(&o, Object::Stream(s) if private.contains(&s.obj_id())
+            && !s.dict().get::<Name<'_>>(b"Type").is_some_and(|t| matches!(t.as_ref(), b"ObjStm" | b"XRef")))
+        {
+            continue;
+        }
         // A stream's own checks come first: a calculator function is decoded below.
         if matches!(&o, Object::Stream(s) if crate::streams::unsafe_stream(s, content.contains(&s.obj_id()))) {
             return Some(STREAM_NOTE);
@@ -165,14 +172,30 @@ fn hostile(pdf: &Pdf) -> Option<&'static str> {
 /// annotations. A stream the file also refers to from anywhere else (an Indexed colour table, a
 /// function, an unrelated dictionary's `Contents`) is not content here: it gets the ordinary
 /// limit ([`crate::streams`]).
-fn content_streams(pdf: &Pdf) -> HashSet<ObjectIdentifier> {
-    let mut uses = Uses { xref: pdf.xref(), seen: HashSet::new(), inherited: HashSet::new(), roles: HashMap::new(), content: HashMap::new(), path: vec![], depth: 0 };
+fn content_streams(pdf: &Pdf, refs: &HashMap<ObjectIdentifier, usize>) -> HashSet<ObjectIdentifier> {
+    let mut uses = Uses {
+        xref: pdf.xref(),
+        seen: HashSet::new(),
+        inherited: HashSet::new(),
+        roles: HashMap::new(),
+        content: HashMap::new(),
+        path: vec![],
+        depth: 0,
+    };
     for page in pdf.pages().iter() {
         uses.page(page.raw());
     }
-    // Every reference the file makes, from every object and what each holds directly.
-    let mut refs: HashMap<ObjectIdentifier, usize> = HashMap::new();
-    let mut pending: Vec<Object<'_>> = pdf.objects().into_iter().collect();
+    // Content only, and reached only through objects the file uses for nothing else: an object
+    // also referred to from anywhere else (`/XObject 7 0 R /Shading 7 0 R`) passes no content on.
+    let only_here = |id: &ObjectIdentifier| uses.roles.get(id) == refs.get(id);
+    uses.content.iter().filter(|(id, within)| only_here(id) && within.iter().all(only_here)).map(|(id, _)| *id).collect()
+}
+
+/// Count every reference in these objects and their direct children, without following it.
+/// Both content grants and private-data exemptions must account for every incoming reference.
+fn references<'a>(objects: impl Iterator<Item = Object<'a>>) -> HashMap<ObjectIdentifier, usize> {
+    let mut refs = HashMap::new();
+    let mut pending: Vec<_> = objects.collect();
     while let Some(o) = pending.pop() {
         let held: Vec<MaybeRef<Object<'_>>> = match &o {
             Object::Array(a) => items(a).collect(),
@@ -185,10 +208,83 @@ fn content_streams(pdf: &Pdf) -> HashSet<ObjectIdentifier> {
             }
         }
     }
-    // Content only, and reached only through objects the file uses for nothing else: an object
-    // also referred to from anywhere else (`/XObject 7 0 R /Shading 7 0 R`) passes no content on.
-    let only_here = |id: &ObjectIdentifier| uses.roles.get(id) == refs.get(id);
-    uses.content.iter().filter(|(id, within)| only_here(id) && within.iter().all(only_here)).map(|(id, _)| *id).collect()
+    refs
+}
+
+/// Objects reached only through page-piece dictionaries (ISO 32000-1 §14.5): on pages,
+/// the catalog and form XObjects. Every application's `Private` data, and all other entries
+/// under `PieceInfo`, are unused for drawing. No application names or stream types grant this.
+/// https://developer.adobe.com/document-services/docs/assets/35e4369068f86065372c18787171a17e/PDF_ISO_32000-1.pdf
+fn private_objects(pdf: &Pdf, refs: &HashMap<ObjectIdentifier, usize>) -> HashSet<ObjectIdentifier> {
+    let xref = pdf.xref();
+    let mut roots: Vec<Dict<'_>> = pdf.pages().iter().map(|p| p.raw().clone()).collect();
+    roots.extend(xref.get::<Dict<'_>>(xref.root_id()));
+    roots.extend(pdf.objects().into_iter().filter_map(|o| match o {
+        Object::Stream(s) if form(s.dict()) => Some(s.dict().clone()),
+        _ => None,
+    }));
+    // The reader reaches the catalog and pages independently of references in private data.
+    let public: HashSet<_> = std::iter::once(xref.root_id()).chain(pdf.pages().iter().filter_map(|p| p.raw().obj_id())).collect();
+    let mut granted = HashMap::<ObjectIdentifier, usize>::new();
+    let mut seeds = HashMap::new();
+    for root in roots {
+        if root.obj_id().is_some_and(|id| seeds.contains_key(&id)) {
+            continue;
+        }
+        let refs = match root.get_raw::<Object<'_>>(b"PieceInfo") {
+            Some(MaybeRef::Ref(r)) => HashMap::from([(r.into(), 1)]),
+            Some(MaybeRef::NotRef(o)) => references(std::iter::once(o)),
+            None => HashMap::new(),
+        };
+        for (id, n) in &refs {
+            *granted.entry(*id).or_default() += n;
+        }
+        if let Some(id) = root.obj_id() {
+            seeds.insert(id, refs);
+        }
+    }
+    // First grant the whole reachable graph, counting each edge once, including cycles and
+    // repeated references. Then revoke any object with an outside reference, and propagate
+    // that revocation to its descendants. This is linear even for a shared or cyclic graph.
+    let mut pending: Vec<_> = granted.keys().copied().collect();
+    let mut edges = HashMap::new();
+    while let Some(id) = pending.pop() {
+        if edges.contains_key(&id) {
+            continue;
+        }
+        let mut children = references(xref.get::<Object<'_>>(id).into_iter());
+        // A form with its own PieceInfo may itself be private or shared. Its PieceInfo
+        // edges are already granted independently of that form, and must count only once.
+        for (child, n) in seeds.get(&id).into_iter().flatten() {
+            if let Some(count) = children.get_mut(child) {
+                *count = count.saturating_sub(*n);
+            }
+        }
+        children.retain(|_, n| *n > 0);
+        for (child, n) in &children {
+            *granted.entry(*child).or_default() += n;
+            if !edges.contains_key(child) {
+                pending.push(*child);
+            }
+        }
+        edges.insert(id, children);
+    }
+    let mut private: HashSet<_> = edges.keys().copied().collect();
+    pending.extend(private.iter().filter(|id| public.contains(id) || granted.get(id) != refs.get(id)).copied());
+    while let Some(id) = pending.pop() {
+        if !private.remove(&id) {
+            continue;
+        }
+        for (child, n) in edges.get(&id).into_iter().flatten() {
+            if let Some(count) = granted.get_mut(child) {
+                *count = count.saturating_sub(*n);
+                if Some(&*count) != refs.get(child) {
+                    pending.push(*child);
+                }
+            }
+        }
+    }
+    private
 }
 
 /// How deep [`content_streams`] follows content inside content (forms in forms, glyphs in

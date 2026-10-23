@@ -207,6 +207,35 @@ fn the_native_affinity_sample_reaches_every_reader_path() {
 proptest! {
     #![proptest_config(config())]
 
+    /// Private page-piece data is not drawing input. Malformed decode parameters must remain
+    /// harmless there, but still refuse the file when the stream is also used as content.
+    #[test]
+    fn pdf_private_data_shared_references_keep_screening(
+        bytes in prop::collection::vec(any::<u8>(), 0..256),
+        shared in any::<bool>(),
+        indirect in any::<bool>(),
+        cycle in any::<bool>(),
+    ) {
+        let private = if indirect { "6 0 R" } else { "<< /App << /Private [5 0 R 5 0 R] >> >>" };
+        let contents = if shared { 5 } else { 4 };
+        let stream = [format!("<< /Length {} /Filter /FlateDecode /DecodeParms << /Predictor 12 /Columns 0 >> >>\nstream\n", bytes.len()).as_bytes(), &bytes, b"\nendstream"].concat();
+        let pdf = pdf_of(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents {contents} 0 R /PieceInfo {private} >>").into_bytes(),
+            b"<< /Length 14 >>\nstream\n0 0 10 10 re f\nendstream".to_vec(),
+            stream,
+            if indirect { format!("<< /App << /Private [5 0 R {}] >> >>", if cycle { "6 0 R" } else { "null" }).into_bytes() } else { b"null".to_vec() },
+        ]);
+        let info = vectorcraft_pdf::info(&pdf, None);
+        prop_assert_eq!(info.is_err(), shared);
+        if !shared {
+            let doc = vectorcraft_pdf::import(&pdf);
+            prop_assert!(doc.is_ok());
+            survive("private page-piece data", || doc.ok())?;
+        }
+    }
+
     #[test]
     fn affinity_native_documents_with_mutated_streams_render_and_export(
         cut in 0usize..4096,
