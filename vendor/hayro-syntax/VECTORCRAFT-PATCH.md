@@ -54,8 +54,12 @@ those retain their existing pre-read checks and limits. hayro-interpret reads pa
 resources, forms, patterns, glyphs, masks and annotation appearances by their drawing keys;
 it never reads `PieceInfo` (the syntax crate only defines that key).
 
-VectorCraft's app-side preflight now exempts exclusively private streams before either
-stream screening or calculator-procedure decoding. Every incoming reference is counted,
+VectorCraft's app-side preflight and colour discovery share a container walk that excludes
+piece-only arrays, dictionaries and streams before stream screening, calculator-procedure
+decoding, tint-function construction or ICC-profile discovery. Only an unshared catalog or
+page reached through the page tree can grant an exemption; a form's `PieceInfo` cannot.
+A piece dictionary reused through an inherited page attribute retains normal screening,
+including when stored in an object stream. Every incoming reference is counted,
 including through shared ancestors and cycles. Any outside reference revokes the exemption
 and propagates that revocation. Explicit Illustrator editing-data extraction remains a
 separate app-side bounded path (`pages::illustrator_data`, 256 MiB total); this exemption

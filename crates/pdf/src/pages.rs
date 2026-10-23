@@ -128,23 +128,17 @@ const UNREADABLE_NOTE: &str = "an array in it is damaged and can't be read";
 
 /// Why `pdf` is refused, if it is: a stream the reader would fail on ([`STREAM_NOTE`]), or
 /// functions, color spaces or calculator procedures nested too deep ([`NESTED_NOTE`]). Every
-/// object is looked at, and every array, dictionary and stream written inside one. Only streams
-/// reached exclusively through `PieceInfo` are exempt: the interpreter never decodes them.
+/// object is looked at, and every array, dictionary and stream written inside one. Objects
+/// reached exclusively through an unshared catalog or page-tree leaf's `PieceInfo` are exempt:
+/// drawing never decodes them, including during colour discovery.
 /// Shared streams keep their checks, including when a private dictionary is itself shared.
 fn hostile(pdf: &Pdf) -> Option<&'static str> {
     let xref = pdf.xref();
     let refs = references(pdf.objects().into_iter());
-    let private = private_objects(pdf, &refs);
+    let objects = scanned_objects_with_refs(pdf, &refs, u32::MAX);
     let content = content_streams(pdf, &refs);
     let mut known = HashMap::new();
-    // The objects of the file, then what each holds directly (64 deep at most: the reader's cap).
-    let mut pending: Vec<Object<'_>> = pdf.objects().into_iter().collect();
-    while let Some(o) = pending.pop() {
-        if matches!(&o, Object::Stream(s) if private.contains(&s.obj_id())
-            && !s.dict().get::<Name<'_>>(b"Type").is_some_and(|t| matches!(t.as_ref(), b"ObjStm" | b"XRef")))
-        {
-            continue;
-        }
+    for o in objects {
         // A stream's own checks come first: a calculator function is decoded below.
         if matches!(&o, Object::Stream(s) if crate::streams::unsafe_stream(s, content.contains(&s.obj_id()))) {
             return Some(STREAM_NOTE);
@@ -152,12 +146,10 @@ fn hostile(pdf: &Pdf) -> Option<&'static str> {
         if procedures_too_deep(&o) || built_on(MaybeRef::NotRef(o.clone()), xref, &mut known, MAX_LINKS).is_none() {
             return Some(NESTED_NOTE);
         }
-        match &o {
-            // An array with an item that can't be read can't be looked at whole, and the
-            // interpreter would still read its leading items: the file is refused.
-            Object::Array(a) if !readable(a) => return Some(UNREADABLE_NOTE),
-            Object::Array(a) => pending.extend(items(a).filter_map(direct)),
-            _ => pending.extend(dict_or_stream(&o).into_iter().flat_map(|(d, _)| values(d)).filter_map(direct)),
+        // An array with an item that can't be read can't be looked at whole, and the
+        // interpreter would still read its leading items: the file is refused.
+        if matches!(&o, Object::Array(a) if !readable(a)) {
+            return Some(UNREADABLE_NOTE);
         }
     }
     None
@@ -211,36 +203,64 @@ fn references<'a>(objects: impl Iterator<Item = Object<'a>>) -> HashMap<ObjectId
     refs
 }
 
-/// Objects reached only through page-piece dictionaries (ISO 32000-1 §14.5): on pages,
-/// the catalog and form XObjects. Every application's `Private` data, and all other entries
-/// under `PieceInfo`, are unused for drawing. No application names or stream types grant this.
+/// Objects reached only through an unshared catalog or page's `PieceInfo` (ISO 32000-1
+/// §14.5). A form or a reader root also used elsewhere cannot grant an exemption.
 /// https://developer.adobe.com/document-services/docs/assets/35e4369068f86065372c18787171a17e/PDF_ISO_32000-1.pdf
-fn private_objects(pdf: &Pdf, refs: &HashMap<ObjectIdentifier, usize>) -> HashSet<ObjectIdentifier> {
+fn private_objects(pdf: &Pdf, refs: &HashMap<ObjectIdentifier, usize>) -> HashSet<(usize, usize)> {
     let xref = pdf.xref();
-    let mut roots: Vec<Dict<'_>> = pdf.pages().iter().map(|p| p.raw().clone()).collect();
-    roots.extend(xref.get::<Dict<'_>>(xref.root_id()));
-    roots.extend(pdf.objects().into_iter().filter_map(|o| match o {
-        Object::Stream(s) if form(s.dict()) => Some(s.dict().clone()),
-        _ => None,
-    }));
-    // The reader reaches the catalog and pages independently of references in private data.
-    let public: HashSet<_> = std::iter::once(xref.root_id()).chain(pdf.pages().iter().filter_map(|p| p.raw().obj_id())).collect();
-    let mut granted = HashMap::<ObjectIdentifier, usize>::new();
-    let mut seeds = HashMap::new();
-    for root in roots {
-        if root.obj_id().is_some_and(|id| seeds.contains_key(&id)) {
+    let catalog = xref.get::<Dict<'_>>(xref.root_id());
+    let mut roots = vec![];
+    if refs.get(&xref.root_id()).copied().unwrap_or(0) == 0 {
+        roots.extend(catalog.clone());
+    }
+    // Confirm membership through the real page tree, rather than the reader's repair fallback.
+    // Each leaf must have exactly its one Kids reference; resources or any other use revoke it.
+    let pages: HashSet<_> = pdf.pages().iter().filter_map(|p| p.raw().obj_id()).collect();
+    let mut pending: Vec<_> = catalog
+        .and_then(|d| d.get::<Dict<'_>>(b"Pages"))
+        .filter(|d| d.get::<Name<'_>>(b"Type").is_some_and(|t| t.as_ref() == b"Pages"))
+        .into_iter()
+        .collect();
+    let mut seen = HashSet::new();
+    let mut work = 1usize;
+    while let Some(node) = pending.pop() {
+        if node.obj_id().is_some_and(|id| !seen.insert(id)) {
             continue;
         }
-        let refs = match root.get_raw::<Object<'_>>(b"PieceInfo") {
+        if node.get::<Name<'_>>(b"Type").is_some_and(|t| t.as_ref() == b"Pages") {
+            if let Some(kids) = node.get::<Array<'_>>(b"Kids") {
+                for kid in items(&kids) {
+                    work += 1;
+                    if work > MAX_PAGE_TREE {
+                        // An incomplete ownership walk grants nothing.
+                        return HashSet::new();
+                    }
+                    if let MaybeRef::Ref(r) = kid {
+                        pending.extend(xref.get::<Dict<'_>>(r.into()));
+                    }
+                }
+            }
+        } else if node.get::<Name<'_>>(b"Type").is_some_and(|t| t.as_ref() == b"Page")
+            && node.obj_id().is_some_and(|id| pages.contains(&id) && refs.get(&id) == Some(&1))
+        {
+            roots.push(node);
+        }
+    }
+    let public: HashSet<_> = std::iter::once(xref.root_id()).chain(pages).collect();
+    let mut granted = HashMap::<ObjectIdentifier, usize>::new();
+    let mut skipped = HashSet::new();
+    for root in roots {
+        let Some(piece) = root.get::<Dict<'_>>(b"PieceInfo") else { continue };
+        let children = match root.get_raw::<Object<'_>>(b"PieceInfo") {
             Some(MaybeRef::Ref(r)) => HashMap::from([(r.into(), 1)]),
-            Some(MaybeRef::NotRef(o)) => references(std::iter::once(o)),
+            Some(MaybeRef::NotRef(o)) => {
+                skipped.insert(identity(piece.data()));
+                references(std::iter::once(o))
+            }
             None => HashMap::new(),
         };
-        for (id, n) in &refs {
-            *granted.entry(*id).or_default() += n;
-        }
-        if let Some(id) = root.obj_id() {
-            seeds.insert(id, refs);
+        for (id, n) in children {
+            *granted.entry(id).or_default() += n;
         }
     }
     // First grant the whole reachable graph, counting each edge once, including cycles and
@@ -252,15 +272,7 @@ fn private_objects(pdf: &Pdf, refs: &HashMap<ObjectIdentifier, usize>) -> HashSe
         if edges.contains_key(&id) {
             continue;
         }
-        let mut children = references(xref.get::<Object<'_>>(id).into_iter());
-        // A form with its own PieceInfo may itself be private or shared. Its PieceInfo
-        // edges are already granted independently of that form, and must count only once.
-        for (child, n) in seeds.get(&id).into_iter().flatten() {
-            if let Some(count) = children.get_mut(child) {
-                *count = count.saturating_sub(*n);
-            }
-        }
-        children.retain(|_, n| *n > 0);
+        let children = references(xref.get::<Object<'_>>(id).into_iter());
         for (child, n) in &children {
             *granted.entry(*child).or_default() += n;
             if !edges.contains_key(child) {
@@ -284,7 +296,66 @@ fn private_objects(pdf: &Pdf, refs: &HashMap<ObjectIdentifier, usize>) -> HashSe
             }
         }
     }
-    private
+    for id in private {
+        if let Some(o) = xref.get::<Object<'_>>(id)
+            && let Some(data) = object_data(&o)
+            // Reader structural streams always retain their checks.
+            && !matches!(&o, Object::Stream(s) if s.dict().get::<Name<'_>>(b"Type")
+                .is_some_and(|t| matches!(t.as_ref(), b"ObjStm" | b"XRef")))
+        {
+            skipped.insert(identity(data));
+        }
+    }
+    skipped
+}
+
+// Identify the actual parsed container, including arrays and dictionaries inside object streams.
+// Equal bytes in a different object do not establish ownership. The PDF outlives the walk.
+fn identity(data: &[u8]) -> (usize, usize) {
+    (data.as_ptr() as usize, data.len())
+}
+
+fn object_data<'a>(o: &Object<'a>) -> Option<&'a [u8]> {
+    match o {
+        Object::Array(a) => Some(a.data()),
+        _ => dict_or_stream(o).map(|(d, _)| d.data()),
+    }
+}
+
+/// All containers that retain normal screening, with their direct children. Both preflight and
+/// colour discovery use this walk so private tint functions and profiles are never decoded.
+pub(crate) fn scanned_objects(pdf: &Pdf, max_depth: u32) -> impl Iterator<Item = Object<'_>> {
+    let refs = references(pdf.objects().into_iter());
+    scanned_objects_with_refs(pdf, &refs, max_depth)
+}
+
+fn scanned_objects_with_refs<'a>(
+    pdf: &'a Pdf,
+    refs: &HashMap<ObjectIdentifier, usize>,
+    max_depth: u32,
+) -> impl Iterator<Item = Object<'a>> + use<'a> {
+    let skipped = private_objects(pdf, refs);
+    let mut pending: Vec<_> = pdf.objects().into_iter().map(|o| (o, 0u32)).collect();
+    pending.reverse();
+    std::iter::from_fn(move || {
+        while let Some((o, depth)) = pending.pop() {
+            if depth > max_depth {
+                continue;
+            }
+            if object_data(&o).is_some_and(|data| skipped.contains(&identity(data))) {
+                continue;
+            }
+            let children: Vec<_> = match &o {
+                Object::Array(a) => items(a).filter_map(direct).collect(),
+                _ => dict_or_stream(&o).into_iter().flat_map(|(d, _)| values(d)).filter_map(direct).collect(),
+            };
+            // Colour discovery historically counts a stream and its dictionary separately.
+            let child_depth = depth.saturating_add(if matches!(o, Object::Stream(_)) { 2 } else { 1 });
+            pending.extend(children.into_iter().rev().map(|child| (child, child_depth)));
+            return Some(o);
+        }
+        None
+    })
 }
 
 /// How deep [`content_streams`] follows content inside content (forms in forms, glyphs in

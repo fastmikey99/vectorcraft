@@ -215,21 +215,27 @@ proptest! {
         shared in any::<bool>(),
         indirect in any::<bool>(),
         cycle in any::<bool>(),
+        shared_owner in any::<bool>(),
+        inherited in any::<bool>(),
+        tint in any::<bool>(),
     ) {
-        let private = if indirect { "6 0 R" } else { "<< /App << /Private [5 0 R 5 0 R] >> >>" };
+        let data = if tint { "[/Separation /Hidden /DeviceRGB 5 0 R]" } else { "[5 0 R 5 0 R]" };
+        let direct_piece = format!("<< /App << /Private {data} >> >>");
+        let private = if indirect { "6 0 R" } else { &direct_piece };
         let contents = if shared { 5 } else { 4 };
         let stream = [format!("<< /Length {} /Filter /FlateDecode /DecodeParms << /Predictor 12 /Columns 0 >> >>\nstream\n", bytes.len()).as_bytes(), &bytes, b"\nendstream"].concat();
         let pdf = pdf_of(&[
             b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents {contents} 0 R /PieceInfo {private} >>").into_bytes(),
+            format!("<< /Type /Pages /Kids [3 0 R] /Count 1 {} >>", if indirect && inherited { "/Resources 6 0 R" } else { "" }).into_bytes(),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents {contents} 0 R /PieceInfo {private} {} >>", if shared_owner { "/Resources << /XObject << /X 3 0 R >> >>" } else { "" }).into_bytes(),
             b"<< /Length 14 >>\nstream\n0 0 10 10 re f\nendstream".to_vec(),
             stream,
-            if indirect { format!("<< /App << /Private [5 0 R {}] >> >>", if cycle { "6 0 R" } else { "null" }).into_bytes() } else { b"null".to_vec() },
+            if indirect { format!("<< /App << /Private [{data} {}] >> >>", if cycle { "6 0 R" } else { "null" }).into_bytes() } else { b"null".to_vec() },
         ]);
         let info = vectorcraft_pdf::info(&pdf, None);
-        prop_assert_eq!(info.is_err(), shared);
-        if !shared {
+        let refused = shared || shared_owner || (indirect && inherited);
+        prop_assert_eq!(info.is_err(), refused);
+        if !refused {
             let doc = vectorcraft_pdf::import(&pdf);
             prop_assert!(doc.is_ok());
             survive("private page-piece data", || doc.ok())?;

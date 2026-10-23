@@ -596,18 +596,118 @@ mod tests {
         let piece = "/PieceInfo << /App << /Private 5 0 R >> >>";
         for file in [
             pdf(piece, "", "", ""),
-            pdf("", "", "/XObject << /F 6 0 R >>", piece),
-            // The form itself is private, and also independently grants its PieceInfo data.
+            // The form itself is private, so its entire object graph is private too.
             pdf("", "/PieceInfo << /App << /Private 6 0 R >> >>", "", piece),
         ] {
             assert_eq!(drawn(&file).ok(), Some(1));
         }
         for file in [
+            // A form's PieceInfo never independently grants a decoding exemption.
+            pdf("", "", "/XObject << /F 6 0 R >>", piece),
+            // Nor may a catalog or page used again in resources grant its PieceInfo data.
+            pdf(piece, "", "/XObject << /X 1 0 R >>", ""),
+            pdf("", piece, "/XObject << /X 3 0 R >>", ""),
             pdf("/Metadata 5 0 R", "/PieceInfo << /App << /Private 1 0 R >> >>", "", ""),
             pdf("", "/PieceInfo << /App << /Private 3 0 R >> >>", "/XObject << /F 5 0 R >>", ""),
             pdf(piece, "", "/XObject << /F 5 0 R >>", ""),
         ] {
             assert!(crate::info(&file, None).is_err());
+        }
+    }
+
+    /// A real xref-stream entry, not a repair-scanner fixture: object 6 lives inside object 7.
+    fn compress_piece_dictionary(mut pdf: Vec<u8>, piece: &[u8]) -> Vec<u8> {
+        let start = pdf.windows(b"startxref\n".len()).rposition(|w| w == b"startxref\n").unwrap() + b"startxref\n".len();
+        let prev: usize = String::from_utf8_lossy(&pdf[start..]).lines().next().unwrap().parse().unwrap();
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, &[b"6 0 ".as_slice(), piece].concat()).unwrap();
+        let object_stream = encoder.finish().unwrap();
+        let offset7 = pdf.len();
+        pdf.extend(b"7 0 obj\n");
+        pdf.extend(stream_object("/Type /ObjStm /N 1 /First 4 /Filter /FlateDecode", &object_stream));
+        pdf.extend(b"\nendobj\n");
+        let offset8 = pdf.len();
+        let mut entries = vec![2];
+        entries.extend(7u32.to_be_bytes());
+        entries.extend(0u16.to_be_bytes());
+        entries.push(1);
+        entries.extend((offset7 as u32).to_be_bytes());
+        entries.extend(0u16.to_be_bytes());
+        entries.push(1);
+        entries.extend((offset8 as u32).to_be_bytes());
+        entries.extend(0u16.to_be_bytes());
+        pdf.extend(b"8 0 obj\n");
+        pdf.extend(stream_object(&format!("/Type /XRef /Size 9 /Root 1 0 R /Prev {prev} /W [1 4 2] /Index [6 3]"), &entries));
+        pdf.extend(format!("\nendobj\nstartxref\n{offset8}\n%%EOF\n").as_bytes());
+        pdf
+    }
+
+    #[test]
+    fn piece_only_tint_functions_are_skipped_by_preflight_and_colour_discovery() {
+        use crate::import_scan::Rgb;
+        use craft_pdf::syntax::object::ObjectIdentifier;
+
+        let bomb = zeros_past_the_cap();
+        // Include direct and indirect containers (arrays have no public object-id accessor),
+        // plus a dictionary stored in an object stream. All inputs are original synthetic PDFs.
+        for (piece, extra, compressed) in [
+            ("<< /App << /Private [/Separation /Hidden /DeviceRGB 5 0 R] >> >>", "null", false),
+            ("6 0 R", "<< /App << /Private [/Separation /Hidden /DeviceRGB 5 0 R] >> >>", false),
+            ("<< /App << /Private 6 0 R >> >>", "[/Separation /Hidden /DeviceRGB 5 0 R]", false),
+            ("6 0 R", "<< /App << /Private [/Separation /Hidden /DeviceRGB 5 0 R] >> >>", true),
+        ] {
+            let mut file = write_pdf(&[
+                b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+                b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+                format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /Resources << /ColorSpace << /C [/Separation /Visible /DeviceRGB << /FunctionType 2 /Domain [0 1] /C0 [1 1 1] /C1 [1 0 0] /N 1 >>] >> >> /PieceInfo {piece} >>").into_bytes(),
+                stream_object("", b"/C cs 1 sc 0 0 10 10 re f"),
+                stream_object("/FunctionType 4 /Domain [0 1] /Range [0 1 0 1 0 1] /Filter /FlateDecode", &bomb),
+                if compressed { b"null".to_vec() } else { extra.as_bytes().to_vec() },
+            ]);
+            if compressed {
+                file = compress_piece_dictionary(file, extra.as_bytes());
+            }
+            assert!(crate::info(&file, None).is_ok(), "{piece}, compressed={compressed}");
+            assert_eq!(drawn(&file).ok(), Some(1));
+            let pdf = crate::pages::open(&file, None).unwrap();
+            if compressed {
+                assert!(pdf.xref().get::<Dict<'_>>(ObjectIdentifier::new(6, 0)).is_some());
+            }
+            // Exercise colour discovery directly as well as through the visible spot paint.
+            let mut colors = crate::import_color::Colors::new(&pdf, vec![]);
+            colors.space_of("Separation", 1, None, Rgb::NotIcc);
+            assert!(!crate::pages::scanned_objects(&pdf, 64).any(|o| match o {
+                Object::Stream(s) => s.obj_id() == ObjectIdentifier::new(5, 0),
+                Object::Array(a) => a.data().windows(b"/Hidden".len()).any(|w| w == b"/Hidden"),
+                _ => false,
+            }));
+        }
+    }
+
+    #[test]
+    fn piece_dictionary_shared_through_inherited_resources_keeps_its_screen() {
+        let piece = b"<< /XObject << /F 5 0 R >> /App << /Private 5 0 R >> >>";
+        for inherited in [false, true] {
+            for compressed in [false, true] {
+                let mut file = write_pdf(&[
+                    b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+                    format!("<< /Type /Pages /Kids [3 0 R] /Count 1 {} >>", if inherited { "/Resources 6 0 R" } else { "" }).into_bytes(),
+                    format!(
+                        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R /PieceInfo 6 0 R {} >>",
+                        if inherited { "" } else { "/Resources 6 0 R" }
+                    )
+                    .into_bytes(),
+                    stream_object("", b"0 0 10 10 re f"),
+                    stream_object("/Filter /FlateDecode /DecodeParms << /Predictor 12 /Columns 0 >>", b"not zlib"),
+                    if compressed { b"null".to_vec() } else { piece.to_vec() },
+                ]);
+                if compressed {
+                    file = compress_piece_dictionary(file, piece);
+                }
+                let err = crate::info(&file, None).unwrap_err().to_string();
+                assert!(err.contains("decode parameters"), "inherited={inherited}, compressed={compressed}: {err}");
+                assert!(drawn(&file).is_err());
+            }
         }
     }
 
