@@ -296,6 +296,32 @@ impl IccProfile {
         Some((lin[0] * y(&hub.red_colorant) + lin[1] * y(&hub.green_colorant) + lin[2] * y(&hub.blue_colorant)).clamp(0.0, 0.5))
     }
 
+    /// A conversion of interleaved RGB values of this RGB profile (0..1, any length that is a
+    /// whole number of colours) into sRGB with `intent`, in place, at full precision: how an image
+    /// carrying its own profile becomes the sRGB pixels a document's images are. It returns
+    /// `false`, the values untouched, for a length that isn't whole colours or a failed transform.
+    /// `None` when this isn't an RGB profile or no transform can be built.
+    pub fn rgb_rows_to_srgb(&self, intent: Intent) -> Option<impl Fn(&mut [f32]) -> bool + use<>> {
+        if self.kind != ProfileKind::Rgb {
+            return None;
+        }
+        let xf = self.to_xf(intent)?;
+        Some(move |rgb: &mut [f32]| {
+            if !rgb.len().is_multiple_of(3) {
+                return false;
+            }
+            let src: Vec<f32> = rgb.iter().map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }).collect();
+            if xf.transform(&src, rgb).is_err() {
+                rgb.copy_from_slice(&src);
+                return false;
+            }
+            for v in rgb.iter_mut() {
+                *v = if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+            }
+            true
+        })
+    }
+
     /// Whether transforms can be built for this profile (checked at registration).
     pub fn usable(&self) -> bool {
         self.to_xf(Intent::RelativeColorimetric).is_some() && self.inverse_xf(Intent::RelativeColorimetric).is_some()
@@ -407,9 +433,14 @@ fn labelled(mut p: ColorProfile, name: &str) -> ColorProfile {
 /// Grid points per input channel of the CMYK → Lab table and of the Lab → CMYK table.
 const A2B_GRID: usize = 9;
 const B2A_GRID: usize = 17;
+/// Grid points per Lab channel of the gamut table.
+const GAMUT_GRID: usize = 9;
 
 /// A CMYK output profile sampled from a conversion: `to_lab` (CMYK → media-relative Lab) in a
 /// 9⁴ table, `from_lab` (Lab → CMYK, gamut-mapped) in a 17³ table, Lab PCS (ICC v4 encoding).
+/// It carries every tag ICC.1 requires of an output profile: the tables for all three intents
+/// and the gamut tag (Windows rejects a CMYK profile without them, so Photos couldn't show a CMYK
+/// TIFF that embedded one, #2707).
 pub(super) fn cmyk_profile(name: &str, to_lab: impl Fn([f32; 4]) -> lab::Lab, from_lab: impl Fn(lab::Lab) -> [f32; 4]) -> ColorProfile {
     let unit = |i: usize, n: usize| i as f32 / (n - 1) as f32;
     let q = |v: f32| (v.clamp(0.0, 1.0) * 65535.0).round() as u16;
@@ -424,6 +455,13 @@ pub(super) fn cmyk_profile(name: &str, to_lab: impl Fn([f32; 4]) -> lab::Lab, fr
         let [l, a, b] = [2, 1, 0].map(|d| unit(i / B2A_GRID.pow(d) % B2A_GRID, B2A_GRID));
         b2a.extend(from_lab(lab::Lab::new(l * 100.0, a * 255.0 - 128.0, b * 255.0 - 128.0)).map(q));
     }
+    // Gamut: 0 where a colour separates and comes back within a ΔE of 3, else out of gamut.
+    let mut gamut = Vec::with_capacity(GAMUT_GRID.pow(3));
+    for i in 0..GAMUT_GRID.pow(3) {
+        let [l, a, b] = [2, 1, 0].map(|d| unit(i / GAMUT_GRID.pow(d) % GAMUT_GRID, GAMUT_GRID));
+        let want = lab::Lab::new(l * 100.0, a * 255.0 - 128.0, b * 255.0 - 128.0);
+        gamut.push(if lab::delta_e2000(want, to_lab(from_lab(want))) <= 3.0 { 0 } else { u16::MAX });
+    }
     let identity = |n: usize| vec![ToneReprCurve::Parametric(vec![1.0]); n];
     let table = |inputs: usize, outputs: usize, grid: usize, clut: Vec<u16>| {
         let mut grid_points = [0u8; 16];
@@ -433,8 +471,9 @@ pub(super) fn cmyk_profile(name: &str, to_lab: impl Fn([f32; 4]) -> lab::Lab, fr
             num_output_channels: outputs as u8,
             grid_points,
             clut: Some(LutStore::Store16(clut)),
-            // A curves sit on the device side, B curves on the PCS side.
-            a_curves: identity(4),
+            // A curves sit on the device side (the gamut tag's is its one output), B curves on the
+            // PCS side.
+            a_curves: identity(inputs + outputs - 3),
             b_curves: identity(3),
             m_curves: vec![],
             matrix: Matrix3d::IDENTITY,
@@ -443,6 +482,7 @@ pub(super) fn cmyk_profile(name: &str, to_lab: impl Fn([f32; 4]) -> lab::Lab, fr
     };
     let a2b = table(4, 3, A2B_GRID, a2b);
     let b2a = table(3, 4, B2A_GRID, b2a);
+    let gamut = table(3, 1, GAMUT_GRID, gamut);
     let mut p = ColorProfile::default();
     p.profile_class = ProfileClass::OutputDevice;
     p.color_space = DataColorSpace::Cmyk;
@@ -451,9 +491,12 @@ pub(super) fn cmyk_profile(name: &str, to_lab: impl Fn([f32; 4]) -> lab::Lab, fr
     p.white_point = moxcms::WHITE_POINT_D50.to_xyzd();
     p.media_white_point = Some(p.white_point);
     p.lut_a_to_b_perceptual = Some(a2b.clone());
+    p.lut_a_to_b_saturation = Some(a2b.clone());
     p.lut_a_to_b_colorimetric = Some(a2b);
     p.lut_b_to_a_perceptual = Some(b2a.clone());
+    p.lut_b_to_a_saturation = Some(b2a.clone());
     p.lut_b_to_a_colorimetric = Some(b2a);
+    p.gamut = Some(gamut);
     labelled(p, name)
 }
 

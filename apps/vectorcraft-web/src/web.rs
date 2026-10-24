@@ -19,7 +19,7 @@ use wasm_bindgen::JsCast as _;
 use crate::locks::WebLocks;
 use crate::pencil::SharedPointers;
 
-type Inbox = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+pub(crate) type Inbox = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
 /// Where the pointer was over the canvas during the last file drag (CSS px from its top-left) and
 /// whether Shift was held: where dropped files land.
@@ -140,10 +140,17 @@ async fn run(host: Host, canvas: web_sys::HtmlCanvasElement, moving: Option<Movi
                         // The old services asked the old context for frames.
                         app.services = services;
                         app.status("The graphics were lost and have been restarted");
+                        crate::api::connect(None, host.inbox.clone(), ctx.clone());
                         app
                     }
                     None => {
-                        let mut app = VectorcraftApp::new(Session::new(), services);
+                        // `window.vectorcraft`: the page's control channel (crate::api).
+                        let (control_tx, control_rx) = std::sync::mpsc::channel();
+                        crate::api::connect(Some(control_tx), host.inbox.clone(), ctx.clone());
+                        if let Err(e) = crate::api::install() {
+                            log::error!("vectorcraft-web: couldn't install window.vectorcraft: {}", js_err(e));
+                        }
+                        let mut app = VectorcraftApp::new(Session::new(), services).with_control(control_rx);
                         // Embedded, the page hands over the preferences of the person signed in.
                         let saved =
                             if host.bridge.is_some() { None } else { local_storage().ok().and_then(|s| s.get_item(PREFS_KEY).ok().flatten()) };
@@ -419,17 +426,6 @@ fn restore_prefs(app: &mut VectorcraftApp, saved: Option<String>) {
 }
 
 impl WebShell {
-    /// Apply parent-owned preferences before processing this frame's input.
-    fn restore_host_prefs(&mut self) {
-        if let (Some(bridge), Some(app)) = (&self.host.bridge, &mut self.app)
-            && let Some(text) = bridge.take_prefs()
-        {
-            restore_prefs(app, Some(text.clone()));
-            // What the page holds already: not handed back unless it changes.
-            self.prefs.saved = crate::prefs::json(app).or(Some(text));
-        }
-    }
-
     /// Snapshot only after UI commands (including Preferences OK) have committed.
     fn save_prefs(&mut self) {
         let Some(app) = &mut self.app else { return };
@@ -473,7 +469,6 @@ impl eframe::App for WebShell {
         if let Some(why) = self.loss.take() {
             self.restart(&why);
         }
-        self.restore_host_prefs();
         let Some(app) = &mut self.app else { return };
         let pasted = self.host.pasted.borrow_mut().flavour.take();
         if let Some((f, held)) = pasted {
@@ -505,6 +500,7 @@ impl eframe::App for WebShell {
             }
         }
         app.logic(ctx);
+        crate::api::poll_replies();
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
@@ -520,9 +516,11 @@ impl eframe::App for WebShell {
             if let Some(bridge) = &self.host.bridge {
                 bridge.run_exports(app);
                 bridge.report_dirty(app);
+                bridge.report_selection(app);
             }
         }
         self.save_prefs();
+        crate::api::poll_replies();
     }
 }
 
@@ -668,6 +666,9 @@ impl RecoveryStore for BrowserStore {
 
 /// Trigger a browser download of `bytes` named after the last component of `path`.
 fn download(path: &str, bytes: &[u8]) -> Result<(), String> {
+    if crate::api::capture(path, bytes) {
+        return Ok(());
+    }
     let js = |e: wasm_bindgen::JsValue| format!("{e:?}");
     let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "vectorcraft".into());
     let window = web_sys::window().ok_or("no window")?;

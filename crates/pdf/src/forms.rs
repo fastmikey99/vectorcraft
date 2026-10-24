@@ -26,6 +26,7 @@ use crate::{PdfError, PdfSettings, Standard};
 pub(crate) enum Mark {
     /// The art of layer `i` of [`pdf_layers`].
     Layer(usize),
+    Sep(usize),
     /// A fill or stroke that overprints.
     Overprint(bool),
 }
@@ -58,11 +59,13 @@ pub(crate) fn pdf_layers(doc: &Document) -> Vec<PdfLayer<'_>> {
 const LAYER_X: i32 = -32000;
 /// The x coordinate of an overprint mark's first point.
 const OVERPRINT_X: i32 = -32001;
+const SEP_X: i32 = -32002;
 
 impl Mark {
     fn at(self) -> (f32, f32) {
         match self {
             // Exact in `f32` up to 2^24 layers.
+            Self::Sep(i) => (SEP_X as f32, i as f32),
             Self::Layer(i) => (LAYER_X as f32, i as f32),
             Self::Overprint(zero) => (OVERPRINT_X as f32, if zero { 1.0 } else { 0.0 }),
         }
@@ -147,6 +150,7 @@ impl Object<'_> {
         };
         let (Some(b"q"), Some(x), Some(y), Some(b"m")) = (word(), word().and_then(int), word().and_then(int), word()) else { return None };
         match x {
+            _ if x == i64::from(SEP_X) => usize::try_from(y).ok().map(Mark::Sep),
             _ if x == i64::from(LAYER_X) => usize::try_from(y).ok().map(Mark::Layer),
             _ if x == i64::from(OVERPRINT_X) && matches!(y, 0 | 1) => Some(Mark::Overprint(y == 1)),
             _ => None,
@@ -232,13 +236,32 @@ fn mark_layers(content: &[u8], forms: &HashMap<&[u8], usize>) -> Option<(Vec<u8>
 /// with `overprint`, the overprinting forms get a graphics state that overprints (`/OP`, `/op`,
 /// `/OPM 1`; `/OPM 0` in PDF/A, which allows no other with ICC-based CMYK colours).
 pub(crate) fn finish(pdf: Vec<u8>, doc: &Document, set: &PdfSettings, layers: bool, overprint: bool) -> Result<Vec<u8>, PdfError> {
-    if !layers && !overprint {
+    let mut separation = Vec::new();
+    doc.walk(|n| {
+        if let Some(mark) = &n.extras().sep_mark {
+            separation.push(mark.clone());
+        }
+    });
+    if !layers && !overprint && separation.is_empty() {
         return Ok(pdf);
     }
     let xref = Xref::read(&pdf).ok_or_else(|| bad("the written PDF has no cross-reference table"))?;
     let objects = objects(&pdf, &xref);
     let marks: HashMap<u32, Mark> = objects.iter().filter_map(|(n, o)| Some((*n, o.mark(&pdf)?))).collect();
     let mut patch = Patch::new(&xref);
+    for (n, mark) in &marks {
+        if let Mark::Sep(i) = mark {
+            let mark = separation.get(*i).ok_or_else(|| bad("missing separation mark"))?;
+            let tag = crate::sep_marks::tag(mark)?;
+            let o = objects.get(n).ok_or_else(|| bad("missing separation form"))?;
+            let content = o.data(&pdf, u64::MAX).ok_or_else(|| bad("unreadable separation form"))?;
+            let mut new = format!("/{tag} BMC\n").into_bytes();
+            new.extend_from_slice(&content);
+            new.extend_from_slice(b"\nEMC");
+            o.rewrite(&mut patch, &new)?;
+            unbox_to(&pdf, o, &mut patch, b"[-1000000000 -1000000000 1000000000 1000000000]")?;
+        }
+    }
     if overprint {
         let mut states = HashMap::new();
         for (n, mark) in marks.iter().filter(|(_, m)| matches!(m, Mark::Overprint(_))) {
@@ -293,9 +316,15 @@ fn write_layers(
         let name = l.name.clone().unwrap_or_else(|| format!("Layer {}", siblings.len()));
         let printable = matches!(l.kind, NodeKind::Layer { printable: true, .. });
         let on = |b: bool| if b { "ON" } else { "OFF" };
+        let processing = if l.extras().processing_white { "/GTS_Metadata<</GTS_ProcStepsGroup/White>>" } else { "" };
         let g = patch.add_object(
-            format!("<</Type/OCG/Name{}/Usage<</View<</ViewState/{}>>/Print<</PrintState/{}>>>>>>", text_string(&name), on(l.visible), on(printable))
-                .into_bytes(),
+            format!(
+                "<</Type/OCG{processing}/Name{}/Usage<</View<</ViewState/{}>>/Print<</PrintState/{}>>>>>>",
+                text_string(&name),
+                on(l.visible),
+                on(printable)
+            )
+            .into_bytes(),
         );
         groups.insert(i, g);
         all.push(g);
@@ -360,13 +389,17 @@ const UNBOXED: &[u8] = b"[-32767 -32767 32767 32767]";
 
 /// Give the layer's form `o` the [`UNBOXED`] box.
 fn unbox(pdf: &[u8], o: &Object<'_>, patch: &mut Patch) -> Result<(), PdfError> {
+    unbox_to(pdf, o, patch, UNBOXED)
+}
+
+fn unbox_to(pdf: &[u8], o: &Object<'_>, patch: &mut Patch, bounds: &[u8]) -> Result<(), PdfError> {
     let Obj::Dict { start, end, .. } = o.dict else { return Err(bad("a layer's form has no dictionary")) };
     let dict = pdf.get(start..end).ok_or_else(|| bad("a layer's form can't be read"))?;
     // The writer writes the box as an array of numbers.
     let at = dict.windows(5).position(|w| w == b"/BBox").ok_or_else(|| bad("a layer's form has no box"))? + 5;
     let open = at + dict.get(at..).and_then(|d| d.iter().position(|&c| c == b'[')).ok_or_else(|| bad("a layer's form box isn't an array"))?;
     let close = open + dict.get(open..).and_then(|d| d.iter().position(|&c| c == b']')).ok_or_else(|| bad("a layer's form box isn't an array"))? + 1;
-    patch.replace(start + open, start + close, UNBOXED.to_vec());
+    patch.replace(start + open, start + close, bounds.to_vec());
     Ok(())
 }
 

@@ -181,6 +181,7 @@ pub(crate) fn merge(base: &mut Value, over: &Value) {
 pub(crate) fn pdf_error(cmd: &str, e: PdfError) -> EngineError {
     match e {
         PdfError::BadSetting(_) | PdfError::Unsupported(_) => bad(cmd, e.to_string()),
+        PdfError::Cancelled => EngineError::Cancelled,
         e => EngineError::Other(e.to_string()),
     }
 }
@@ -246,11 +247,15 @@ pub fn expand_preset<'a>(s: &Session, cmd: &str, p: &'a Value) -> Result<Cow<'a,
     super::eps::with_flattener(s, cmd, expanded)
 }
 
-/// The full export options for `doc`: settings plus the artboards `p` picks (default all).
+/// The full export options for `doc`: settings plus the artboards `p` picks (default all), created
+/// at `doc`'s File Info creation date (the time of writing when it has none) and modified at the
+/// time of writing. On the web, which has no clock, the creation date is the modification date too,
+/// and a document without one gets neither.
 pub fn options(cmd: &str, doc: &Document, p: &Value) -> Result<PdfOptions> {
     let pick = if p.is_object() { ArtboardPick::deserialize(p).map_err(|e| bad(cmd, format!("PDF options: {e}")))? } else { ArtboardPick::default() };
     let artboards = pick.resolve(doc.artboards.len()).map_err(|e| bad(cmd, e))?;
-    Ok(PdfOptions { settings: settings(cmd, p)?, artboards, ..Default::default() })
+    let now = vectorcraft_doc::metadata::output_time();
+    Ok(PdfOptions { settings: settings(cmd, p)?, artboards, created: doc.metadata.created.or(now), modified: now, ..Default::default() })
 }
 
 /// Why a PDF of some artboards carries no editing data.
@@ -265,7 +270,19 @@ pub fn encode(cmd: &str, doc: &Document, p: &Value) -> Result<(Vec<u8>, Vec<Stri
     let (full, mut warnings) = crate::cmd::place::document::full_documents(doc);
     let (bytes, drawn_warnings) = encode_carrying(cmd, &full, p, || Ok(vectorcraft_format::save(doc, false)))?;
     warnings.extend(drawn_warnings);
+    warnings.extend(overflow_warning(cmd, &full, p)?);
     Ok((bytes, warnings))
+}
+
+/// The warning about the type that the pages of a PDF of `doc` with the options in `p` draw and
+/// whose text doesn't fit (see [`crate::cmd::fonts::export_overflow_warning`]): on the pages
+/// chosen, leaving out the layers that don't print unless the PDF writes them.
+fn overflow_warning(cmd: &str, doc: &Document, p: &Value) -> Result<Option<String>> {
+    let opts = options(cmd, doc, p)?;
+    let areas = vectorcraft_pdf::page_areas(doc, &opts).map_err(|e| pdf_error(cmd, e))?;
+    let set = &opts.settings;
+    let printed = if set.include_non_printing || set.create_layers { None } else { without_non_printing(&doc.layers) };
+    Ok(crate::cmd::fonts::export_overflow_warning(doc, printed.as_deref().unwrap_or(&doc.layers), Some(&areas)))
 }
 
 /// [`encode`] the pages of `doc`, carrying `native()` as the editing data (a `.ai` file: the
@@ -285,7 +302,11 @@ pub(super) fn encode_carrying(cmd: &str, doc: &Document, p: &Value, native: impl
         }
     }
     let set = &opts.settings;
+    if set.pdf13() {
+        vectorcraft_doc::cancel::progress(0, 0, "Flattening transparency");
+    }
     let flat = flatten_for(cmd, doc, set, p)?;
+    vectorcraft_doc::cancel::check()?;
     if flat.is_some() {
         let kind = if set.standard.flattens() { set.standard.label() } else { set.compatibility.label() };
         warnings.push(format!("transparency is flattened into opaque art and images ({kind} files have none): see the flattener preset"));

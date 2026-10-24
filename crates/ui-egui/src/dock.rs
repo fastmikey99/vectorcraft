@@ -16,6 +16,55 @@ const ICON_COL: f32 = 38.0;
 const HEADER: f32 = 14.0;
 /// The tabbed group's width until the dock has been laid out (its default size).
 const DOCK_WIDTH: f32 = 300.0;
+pub(crate) const LEGACY_DOCK_PANEL: &str = "dock";
+pub(crate) const SHARED_DOCK_PANEL: &str = "shared-panel-dock";
+const LEGACY_DOCK_MIN: f32 = 230.0;
+const LEGACY_DOCK_MAX: f32 = 520.0;
+const SHARED_DOCK_MIN: f32 = 220.0;
+const SHARED_DOCK_MAX: f32 = 720.0;
+
+pub(crate) fn clamp_legacy_dock_width(width: f32) -> f32 {
+    width.clamp(LEGACY_DOCK_MIN, LEGACY_DOCK_MAX)
+}
+
+pub(crate) fn clamp_shared_dock_width(width: f32) -> f32 {
+    width.clamp(SHARED_DOCK_MIN, SHARED_DOCK_MAX)
+}
+
+fn seed_dock_panel_width(ctx: &egui::Context, panel: &str, width: f32) {
+    let screen = ctx.content_rect();
+    let w = width.max(1.0);
+    let outer_rect = egui::Rect::from_min_size(egui::pos2(screen.right() - w, screen.top()), egui::vec2(w, screen.height()));
+    let state = egui::containers::panel::PanelState { outer_rect };
+    ctx.data_mut(|data| data.insert_persisted(egui::Id::new(panel), state));
+}
+
+pub(crate) fn apply_pending_dock_width(app: &mut VectorcraftApp, ctx: &egui::Context, panel: &str, clamp: fn(f32) -> f32) {
+    if !app.ui.dock_width_pending {
+        return;
+    }
+    if let Some(width) = app.ui.dock_width.filter(|w| w.is_finite() && *w > 0.0) {
+        seed_dock_panel_width(ctx, panel, clamp(width));
+    }
+    app.ui.dock_width_pending = false;
+}
+
+pub(crate) fn note_dock_width(app: &mut VectorcraftApp, ctx: &egui::Context, panel: &str) {
+    if let Some(state) = egui::containers::panel::PanelState::load(ctx, egui::Id::new(panel)) {
+        let width = state.size().x;
+        if width.is_finite() && width > 0.0 {
+            app.ui.dock_width = Some(width);
+        }
+    }
+}
+
+pub(crate) fn legacy_dock_default_width(ui: &crate::state::UiState) -> f32 {
+    ui.dock_width.filter(|w| w.is_finite()).map(clamp_legacy_dock_width).unwrap_or(DOCK_WIDTH)
+}
+
+pub(crate) fn shared_dock_default_width(ui: &crate::state::UiState) -> f32 {
+    ui.dock_width.filter(|w| w.is_finite()).map(clamp_shared_dock_width).unwrap_or(310.0)
+}
 /// Top of a popped-out panel.
 const FLYOUT_TOP: f32 = 110.0;
 
@@ -81,14 +130,15 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
     if crate::panel_docking::show(app, ui) {
         return;
     }
+    apply_pending_dock_width(app, ui.ctx(), LEGACY_DOCK_PANEL, clamp_legacy_dock_width);
     let t = Tokens::get(ui.ctx());
     let shown = floating::shown_tab(&app.ui);
     // Main tabbed group, unless it is collapsed to icons or all its panels float.
     let group = shown.filter(|_| !app.ui.dock_collapsed).map(|active| {
-        egui::Panel::right("dock")
+        egui::Panel::right(LEGACY_DOCK_PANEL)
             .resizable(true)
-            .default_size(DOCK_WIDTH)
-            .size_range(230.0..=520.0)
+            .default_size(legacy_dock_default_width(&app.ui))
+            .size_range(LEGACY_DOCK_MIN..=LEGACY_DOCK_MAX)
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 crate::theme::card(ui, &t, egui::Margin { left: 0, right: 6, top: 6, bottom: 6 }, |ui| {
@@ -114,6 +164,7 @@ pub fn show(app: &mut VectorcraftApp, ui: &mut Ui) {
             .response
             .rect
     });
+    note_dock_width(app, ui.ctx(), LEGACY_DOCK_PANEL);
     // Collapsed icon-panel strip, left of the expanded panel group (like Illustrator's dock). A
     // collapsed group's panels head it, under the « that expands them again. Floating panels leave
     // it.
@@ -305,12 +356,20 @@ pub(crate) fn panel_tabs(
 /// A panel popped out next to the icon column: an icon panel, or one of the tabbed group's panels
 /// while the dock is collapsed. Dragging its title floats it.
 pub fn floating_panel(app: &mut VectorcraftApp, ctx: &egui::Context) {
-    let Some((id, label)) = app.ui.open_panel.as_deref().and_then(|p| crate::state::all_panels().find(|(q, _)| *q == p)) else { return };
+    let open = app.ui.open_panel.as_deref();
+    let Some(id) =
+        open.and_then(|p| crate::state::all_panels().map(|(q, _)| q).find(|q| *q == p).or_else(|| crate::panels::library_panel::intern(p)))
+    else {
+        return;
+    };
     let tab = DockTab::from_id(id);
     // Expanded, the group shows its panels in the dock itself; a floating panel shows in its group.
     if tab.is_some() && !app.ui.dock_collapsed || floating::group_of(&app.ui, id).is_some() {
         return;
     }
+    // A library panel (in a collapsed dock) is titled by its library's name.
+    let label = crate::panels::library_panel::tab_label(app, id)
+        .unwrap_or_else(|| crate::state::all_panels().find(|(q, _)| *q == id).map_or(id, |(_, label)| tl!(label)).to_string());
     let t = Tokens::get(ctx);
     let screen = ctx.content_rect();
     // Pinned by its right edge, 6 points left of the icon column wherever the dock's width (or its
@@ -338,12 +397,10 @@ pub fn floating_panel(app: &mut VectorcraftApp, ctx: &egui::Context) {
             ui.set_width(width);
             let (strip, _) = ui.allocate_exact_size(vec2(width, 26.0), Sense::hover());
             ui.painter().rect_filled(strip, CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 }, t.panel_darker);
-            let title = Rect::from_min_size(
-                strip.min,
-                vec2(ui.painter().layout_no_wrap(tl!(label).to_string(), theme::semibold(12.0), t.text).size().x + 24.0, 26.0),
-            );
+            let title =
+                Rect::from_min_size(strip.min, vec2(ui.painter().layout_no_wrap(label.clone(), theme::semibold(12.0), t.text).size().x + 24.0, 26.0));
             ui.painter().rect_filled(title, CornerRadius { nw: 4, ne: 0, sw: 0, se: 0 }, t.panel);
-            ui.painter().text(title.left_center() + vec2(12.0, 0.0), egui::Align2::LEFT_CENTER, tl!(label), theme::semibold(12.0), t.text);
+            ui.painter().text(title.left_center() + vec2(12.0, 0.0), egui::Align2::LEFT_CENTER, &label, theme::semibold(12.0), t.text);
             let close = Rect::from_center_size(strip.right_center() - vec2(13.0, 0.0), vec2(14.0, 14.0));
             let cr = ui.interact(close, ui.id().with("close-panel"), Sense::click());
             icons::paint(ui, "chevrons-right", close, if cr.hovered() { t.text } else { t.text_dim });

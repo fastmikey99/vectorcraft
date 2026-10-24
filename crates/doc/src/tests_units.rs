@@ -99,6 +99,13 @@ fn units_are_named_by_label_key_or_suffix() {
 }
 
 #[test]
+fn a_shared_suffix_names_the_plain_unit() {
+    assert_eq!(Unit::named(Unit::Feet.suffix()), Some(Unit::Feet));
+    assert_eq!(Unit::named("FT"), Some(Unit::Feet));
+    assert_eq!(Unit::named(Unit::FeetInches.label()), Some(Unit::FeetInches));
+}
+
+#[test]
 fn readouts_show_two_decimals() {
     assert_eq!(Unit::Points.readout(15.0), "15.00 pt");
     assert_eq!(Unit::Millimeters.readout(72.0), "25.40 mm");
@@ -128,4 +135,42 @@ fn mixed_mul_div() {
     assert_eq!(crate::parse_number("100*3/4"), Some(75.0));
     assert_eq!(Unit::Points.parse("10*2/5"), Some(4.0));
     assert_eq!(Unit::Points.parse("10*2/5 px"), Some(Unit::Pixels.to_pt(4.0)));
+}
+
+#[test]
+fn inch_rulers_halve_and_double() {
+    // At 100% an inch is 72 px: labels every inch, ticks every sixteenth (4.5 px apart).
+    assert_eq!((Unit::Inches.ruler_step(1.0), Unit::Inches.ruler_tick_step(1.0)), (1.0, 0.0625));
+    // Zoomed out, labels at 2, 4, 8 … in, ticks coarsening by halves.
+    assert_eq!((Unit::Inches.ruler_step(0.5), Unit::Inches.ruler_tick_step(0.5)), (2.0, 0.125));
+    assert_eq!((Unit::Inches.ruler_step(0.25), Unit::Inches.ruler_tick_step(0.25)), (4.0, 0.25));
+    assert_eq!((Unit::Inches.ruler_step(0.1), Unit::Inches.ruler_tick_step(0.1)), (8.0, 1.0));
+    assert_eq!((Unit::Inches.ruler_step(0.01), Unit::Inches.ruler_tick_step(0.01)), (128.0, 8.0));
+    // Zoomed in, labels at halves, quarters and eighths, ticks never finer than a sixteenth.
+    assert_eq!((Unit::Inches.ruler_step(2.0), Unit::Inches.ruler_tick_step(2.0)), (0.5, 0.0625));
+    assert_eq!((Unit::Inches.ruler_step(64.0), Unit::Inches.ruler_tick_step(64.0)), (0.125, 0.0625));
+    for zoom in [0.0001, 0.003, 0.02, 0.1, 0.33, 1.0, 1.5, 3.0, 8.0, 64.0, 256.0] {
+        let (step, tick) = (Unit::Inches.ruler_step(zoom), Unit::Inches.ruler_tick_step(zoom));
+        let parts = step / tick;
+        assert!(parts >= 1.0 && parts.fract() == 0.0 && (parts as u64).is_power_of_two(), "{zoom}: {step} / {tick}");
+        assert!(tick >= 1.0 / 16.0, "{zoom}: {tick}");
+    }
+}
+
+#[test]
+fn other_rulers_keep_their_decimal_steps() {
+    for (u, zoom, step) in [(Unit::Millimeters, 1.0, 25.0), (Unit::Points, 1.0, 50.0), (Unit::Centimeters, 1.0, 2.0), (Unit::Millimeters, 8.0, 5.0)] {
+        assert_eq!((u.ruler_step(zoom), u.ruler_tick_step(zoom)), (step, step / 10.0), "{u:?} at {zoom}");
+    }
+}
+
+#[test]
+fn a_ruler_snap_lands_on_a_drawn_tick() {
+    // Inches at 100%: the nearest sixteenth.
+    assert_eq!(Unit::Inches.snap_to_ruler_tick(40.0, 1.0), 40.5);
+    assert_eq!(Unit::Inches.snap_to_ruler_tick(73.0, 0.5), 72.0, "eighths at 50%: 9 pt apart");
+    // Millimetres keep their tenths of the label step: 2.5 mm at 100%.
+    let mm = 72.0 / 25.4;
+    assert!((Unit::Millimeters.snap_to_ruler_tick(10.0 * mm, 1.0) - 10.0 * mm).abs() < 1e-9);
+    assert!((Unit::Millimeters.snap_to_ruler_tick(10.9 * mm, 1.0) - 10.0 * mm).abs() < 1e-9);
 }

@@ -152,7 +152,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Fit to Artwork Bounds",
             ["Object", "Artboards"],
             None,
-            "{index?: n | indices?: [n…] (0-based; the app passes the selected artboards: the Artboard tool's, else the active one; default: the first)} each artboard fits the art on it that shows (with its strokes and effects; hidden objects and layers, guides and template layers don't count), in one undo step: an object counts for every artboard its bounds overlap, and a group or clipping layer counts as one object; an artboard with no art stays as it is, and the command fails when no artboard it names has art",
+            "{index?: n | indices?: [n…] (0-based; the app passes the selected artboards: the Artboard tool's, else the active one; default: the first), document?: bool (default false; true: each fits ALL the art the document prints, on any artboard or none, as a print-preparation script needs)} each artboard fits the art on it that shows (with its strokes and effects; hidden objects and layers, guides and template layers don't count), in one undo step: an object counts for every artboard its bounds overlap, and a group or clipping layer counts as one object; an artboard with no art stays as it is, and the command fails when no artboard it names has art",
             has_doc,
             artboard_fit_art
         ),
@@ -286,7 +286,7 @@ pub(crate) fn make_layer(d: &mut Document, name: Option<&str>) -> Node {
 }
 
 /// A layer colour: a preset index (0–26), `#rrggbb` or a preset's name (any case).
-fn layer_color_param(v: &Value) -> std::result::Result<LayerColor, String> {
+pub(super) fn layer_color_param(v: &Value) -> std::result::Result<LayerColor, String> {
     match v {
         Value::Number(n) => match n.as_u64() {
             Some(i) if (i as usize) < LAYER_COLORS.len() => Ok(LayerColor::Preset(i as u8)),
@@ -810,7 +810,8 @@ fn artboard_new(s: &mut Session, p: &Value) -> Result<Value> {
     let r = rect_from(p, def);
     let idx = s.edit("New Artboard", |d, _| {
         let id = d.next_artboard_id();
-        let name = str_param(p, "name").map(str::to_string).unwrap_or_else(|| format!("Artboard {}", d.artboards.len() + 1));
+        let given = str_param(p, "name").map(str::trim).filter(|n| !n.is_empty());
+        let name = given.map_or_else(|| format!("Artboard {}", d.artboards.len() + 1), str::to_string);
         d.artboards.push(Artboard { id, name, rect: r, show_center_mark: false, show_cross_hairs: false });
         Ok(d.artboards.len() - 1)
     })?;
@@ -834,7 +835,7 @@ fn artboard_delete(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn artboard_set(s: &mut Session, p: &Value) -> Result<Value> {
-    let i = p.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let i = super::panelcmds::artboard_index(&s.doc()?.doc, p, "artboard.setProps")?;
     let was = s.doc()?.doc.artboards.get(i).map(|a| a.rect).ok_or_else(|| EngineError::Other("no such artboard".into()))?;
     let now = rect_from(p, was);
     let resized = (now.width() - was.width()).abs() > 1e-6 || (now.height() - was.height()).abs() > 1e-6;
@@ -864,8 +865,9 @@ fn artboard_set(s: &mut Session, p: &Value) -> Result<Value> {
     s.edit("Artboard Options", |d, _| {
         let a = d.artboards.get_mut(i).ok_or_else(|| EngineError::Other("no such artboard".into()))?;
         a.rect = now;
-        if let Some(n) = str_param(p, "name") {
-            a.name = n.to_string();
+        if let Some(n) = str_param(p, "name").map(str::trim) {
+            // A blank name gives the artboard its default name, Artboard N for the Nth artboard.
+            a.name = if n.is_empty() { format!("Artboard {}", i + 1) } else { n.to_string() };
         }
         let id = a.id;
         if let Some(xf) = transform {
@@ -906,10 +908,16 @@ fn artboard_fit_art(s: &mut Session, p: &Value) -> Result<Value> {
     let d = &s.doc()?.doc;
     let indices =
         if p.get("index").is_none() && p.get("indices").is_none() { vec![0] } else { super::panelcmds::artboard_indices(d, p, "artboard.fitToArt")? };
+    // `document`: all the art the document prints, wherever it lies; else the art on the artboard.
+    let document = match p.get("document") {
+        None | Some(Value::Null) => false,
+        Some(v) => v.as_bool().ok_or_else(|| bad("artboard.fitToArt", "document must be true or false"))?,
+    };
     let mut fits = vec![];
     for i in indices {
         let was = d.artboards.get(i).map(|a| a.rect).ok_or_else(|| EngineError::Other("no such artboard".into()))?;
-        if let Some(b) = vectorcraft_render::encode::art_bounds_on(d, was) {
+        let art = if document { vectorcraft_render::encode::art_bounds(d) } else { vectorcraft_render::encode::art_bounds_on(d, was) };
+        if let Some(b) = art {
             // At least 1 pt a side, as `rect_from` makes Artboard Options' sizes.
             fits.push((i, was, Rect::new(b.x0, b.y0, b.x0 + b.width().max(1.0), b.y0 + b.height().max(1.0))));
         }
@@ -933,8 +941,8 @@ fn artboard_fit_art(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn artboard_fit_sel(s: &mut Session, p: &Value) -> Result<Value> {
-    let i = p.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
     let st = s.doc()?;
+    let i = if p.get("index").is_none() { 0 } else { super::panelcmds::artboard_index(&st.doc, p, "artboard.fitToSelection")? };
     let b = st.doc.bounds_of(&st.selection.objects, true).ok_or_else(|| EngineError::Other("no selection bounds".into()))?;
     s.execute("artboard.setProps", &json!({"index": i, "x": b.x0, "y": b.y0, "width": b.width(), "height": b.height()}))
 }

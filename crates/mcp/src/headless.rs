@@ -260,6 +260,8 @@ impl Headless {
             ..Default::default()
         };
         let img = self.renderer.render_region_with(&doc, r, scale, &opts);
+        // A cancelled render stops drawing: the picture is not whole and is not written.
+        vectorcraft_engine::cancel::check().map_err(|e| e.to_string())?;
         let png = img.to_png()?;
         let mut out = json!({"width": img.width, "height": img.height});
         match s(p, "path") {

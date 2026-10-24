@@ -270,6 +270,7 @@ pub(super) fn encode(doc: &Document, p: &Value) -> Result<Encoded> {
     if pages.is_empty() {
         return Err(bad(C, "the document has no artboard"));
     }
+    let regions: Vec<Rect> = pages.iter().map(|(_, region, _)| *region).collect();
     let transparent = doc.layers.iter().any(|l| l.shows_transparency());
     let flat = flatten_document(doc, &set.flatten)?;
     let drawn = flat.as_ref().unwrap_or(doc);
@@ -277,7 +278,7 @@ pub(super) fn encode(doc: &Document, p: &Value) -> Result<Encoded> {
     if transparent && flat.is_some() {
         enc.warnings.push("transparency is flattened into opaque art and images (EPS has none): see the flattener preset".into());
     }
-    let created = vectorcraft_doc::metadata::now_unix();
+    let created = vectorcraft_doc::metadata::output_time();
     let mut renderer = vectorcraft_render::Renderer::new();
     for (board, region, origin) in pages {
         let rect = vectorcraft_eps::preview_rect(region, origin);
@@ -302,6 +303,7 @@ pub(super) fn encode(doc: &Document, p: &Value) -> Result<Encoded> {
             }
         }
     }
+    enc.warnings.extend(crate::cmd::fonts::export_overflow_warning(doc, &doc.layers, Some(&regions)));
     Ok(enc)
 }
 

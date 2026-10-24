@@ -1,6 +1,6 @@
 //! Offset Path and Outline Stroke.
 
-use kurbo::{BezPath, PathEl, Stroke, StrokeOpts};
+use kurbo::{BezPath, PathEl, Shape, Stroke, StrokeOpts};
 use vectorcraft_geom::{FillRule, PathData, SubPath};
 
 pub use kurbo::{Cap, Join};
@@ -14,7 +14,19 @@ const STROKE_TOL: f64 = 1e-3;
 
 fn stroke_bez(bp: &BezPath, width: f64, cap: Cap, join: Join, miter_limit: f64) -> BezPath {
     let style = Stroke::new(width).with_join(join).with_caps(cap).with_miter_limit(miter_limit.max(1.0));
-    close_all(&kurbo::stroke(bp.iter(), &style, &StrokeOpts::default(), STROKE_TOL))
+    let outline = kurbo::stroke(bp.iter(), &style, &StrokeOpts::default(), STROKE_TOL);
+    if outline.is_finite() || !bp.is_finite() {
+        return close_all(&outline);
+    }
+    // A cubic with its last control point at its endpoint has a zero derivative at
+    // t=1. Kurbo's offset cusp search can round its root to that endpoint, normalize
+    // the zero derivative and emit NaNs. Reversing the parameterization moves that
+    // endpoint to t=0, where the derivative evaluation avoids cancellation. This
+    // preserves every source curve exactly (including holes and open paths); caps
+    // are symmetric. Only retry a failed stroke, leaving successful results intact.
+    // If the reversed stroke also fails, retain its nonfinite coordinates so the
+    // fallible arrangement rejects it, rather than dropping any source geometry.
+    close_all(&kurbo::stroke(bp.reverse_subpaths().iter(), &style, &StrokeOpts::default(), STROKE_TOL))
 }
 
 /// kurbo's stroker may leave the outline of an open path without a final `ClosePath`.
@@ -55,6 +67,9 @@ pub fn stroke_region(outlines: &[BezPath]) -> PathData {
     let tidy = Tidy::free(DEFAULT_PRECISION);
     let parts: Vec<BezPath> = outlines.iter().map(close_all).filter(|o| !o.elements().is_empty()).collect();
     if let [one] = &parts[..] {
+        if let Some(path) = disjoint_stroke_regions(one, &tidy) {
+            return path;
+        }
         return normalize_bez(one, FillRule::NonZero).map(|c| all_contours_to_path(&c, &tidy)).unwrap_or_default();
     }
     // Each outline is normalised on its own first: a hollow arrowhead may wind against the line
@@ -71,6 +86,87 @@ pub fn stroke_region(outlines: &[BezPath]) -> PathData {
         return PathData::default();
     }
     normalize_bez(&all, FillRule::NonZero).map(|c| all_contours_to_path(&c, &tidy)).unwrap_or_default()
+}
+
+/// Stroke outlines of disconnected glyphs need no common arrangement. Partition by
+/// conservative curve bounds, including cleanup tolerance; nested rings and touching
+/// outlines stay together. The bounded sweep is optional: dense/huge inputs use the
+/// existing global operation. No contour is approximated or discarded here.
+fn disjoint_stroke_regions(path: &BezPath, tidy: &Tidy) -> Option<PathData> {
+    use std::collections::BTreeMap;
+    let count = path.iter().filter(|el| matches!(el, PathEl::MoveTo(_))).count();
+    if !(32..=100_000).contains(&count) {
+        return None;
+    }
+    let mut pieces = Vec::with_capacity(count);
+    let mut piece = BezPath::new();
+    for el in path.iter() {
+        if matches!(el, PathEl::MoveTo(_)) && !piece.elements().is_empty() {
+            pieces.push(std::mem::take(&mut piece));
+        }
+        piece.push(el);
+    }
+    if !piece.elements().is_empty() {
+        pieces.push(piece);
+    }
+    if pieces.len() < 32 || pieces.len() > 100_000 {
+        return None;
+    }
+    let bounds: Vec<_> = pieces.iter().map(|p| p.bounding_box().inflate(2. * DEFAULT_PRECISION, 2. * DEFAULT_PRECISION)).collect();
+    let mut order: Vec<_> = (0..pieces.len()).collect();
+    order.sort_by(|a, b| bounds.get(*a).zip(bounds.get(*b)).map_or(std::cmp::Ordering::Equal, |(a, b)| a.x0.total_cmp(&b.x0)));
+    let mut parents: Vec<_> = (0..pieces.len()).collect();
+    let mut sizes = vec![1usize; pieces.len()];
+    fn root(parents: &[usize], mut i: usize) -> usize {
+        while let Some(&parent) = parents.get(i) {
+            if parent == i {
+                break;
+            }
+            i = parent;
+        }
+        i
+    }
+    let mut active: Vec<usize> = Vec::new();
+    let mut checks = 0usize;
+    for i in order {
+        let b = *bounds.get(i)?;
+        if !b.is_finite() {
+            return None;
+        }
+        active.retain(|j| bounds.get(*j).is_some_and(|a| a.x1 >= b.x0));
+        for &j in &active {
+            checks += 1;
+            if checks > 100_000_000 {
+                return None;
+            }
+            let a = bounds.get(j)?;
+            if a.y0 <= b.y1 && b.y0 <= a.y1 {
+                let (mut r, mut t) = (root(&parents, i), root(&parents, j));
+                if r != t {
+                    if sizes.get(r)? < sizes.get(t)? {
+                        std::mem::swap(&mut r, &mut t);
+                    }
+                    let combined = sizes.get(r)?.checked_add(*sizes.get(t)?)?;
+                    *parents.get_mut(t)? = r;
+                    *sizes.get_mut(r)? = combined;
+                }
+            }
+        }
+        active.push(i);
+    }
+    let mut groups: BTreeMap<usize, BezPath> = BTreeMap::new();
+    for (i, piece) in pieces.into_iter().enumerate() {
+        groups.entry(root(&parents, i)).or_default().extend(piece.iter());
+    }
+    if groups.len() == 1 {
+        return None;
+    }
+    let mut result = PathData::default();
+    for group in groups.into_values() {
+        let contours = normalize_bez(&group, FillRule::NonZero).ok()?;
+        result.subpaths.extend(all_contours_to_path(&contours, tidy).subpaths);
+    }
+    Some(result)
 }
 
 /// Object → Path → Offset Path. Positive `delta` grows the filled area, negative insets it.
@@ -106,7 +202,7 @@ pub fn try_offset_path(path: &PathData, delta: f64, join: Join, miter_limit: f64
     // winding, leaving faces uncovered that are really within `d` of the path. Every face of the
     // true offset is bounded by arrangement edges, so a contour is spurious iff a point deep inside
     // it lies closer than `d`: holes when growing, islands when insetting.
-    let src = path.to_bezpath();
+    let src = NearIndex::new(&path.to_bezpath());
     let drop_outer = delta < 0.0;
     // The deep point is looked for in the face a contour bounds: the contour with the contours
     // directly inside it (an outline with its holes, a hole with its islands). Looked for in the
@@ -133,7 +229,7 @@ pub fn try_offset_path(path: &PathData, delta: f64, join: Join, miter_limit: f64
     // closer, but a point picked near the face's edge is only just either: so a face is spurious
     // only when none of several points spread through it is `d` away (the widest spans first;
     // the first point that is settles it, so a good face usually costs one distance).
-    let near = |p: kurbo::Point| dist_to(&src, p) < d * (1.0 - 1e-4) - 1e-6;
+    let near = |p: kurbo::Point| src.within(p, d * (1.0 - 1e-4) - 1e-6);
     let spurious: Vec<bool> = all
         .iter()
         .enumerate()
@@ -210,9 +306,66 @@ fn deep_points(bp: &BezPath) -> Vec<kurbo::Point> {
     spans.into_iter().take(8).map(|(_, p)| p).collect()
 }
 
-fn dist_to(bp: &BezPath, p: kurbo::Point) -> f64 {
-    use kurbo::ParamCurveNearest;
-    bp.segments().map(|s| s.nearest(p, 1e-6).distance_sq).fold(f64::INFINITY, f64::min).sqrt()
+/// Offset cleanup only needs to know whether *any* source segment is within the threshold.
+/// A balanced tree of control-point hulls prunes distant curves, retaining the same nearest
+/// calculation and strict comparison as the former full scan. Hulls (not sampled curves)
+/// conservatively contain every segment, including loops and extrema between anchors.
+struct NearIndex {
+    bounds: kurbo::Rect,
+    kind: NearKind,
+}
+enum NearKind {
+    Leaf(Vec<kurbo::PathSeg>),
+    Branch(Box<NearIndex>, Box<NearIndex>),
+}
+impl NearIndex {
+    fn new(path: &BezPath) -> Self {
+        let segments = path
+            .segments()
+            .map(|s| {
+                let bounds = match s {
+                    kurbo::PathSeg::Line(s) => kurbo::Rect::from_points(s.p0, s.p1),
+                    kurbo::PathSeg::Quad(s) => kurbo::Rect::from_points(s.p0, s.p2).union_pt(s.p1),
+                    kurbo::PathSeg::Cubic(s) => kurbo::Rect::from_points(s.p0, s.p3).union_pt(s.p1).union_pt(s.p2),
+                };
+                (bounds, s)
+            })
+            .collect::<Vec<_>>();
+        Self::build(segments)
+    }
+    fn build(mut segments: Vec<(kurbo::Rect, kurbo::PathSeg)>) -> Self {
+        let bounds = segments.iter().map(|s| s.0).reduce(|a, b| a.union(b)).unwrap_or(kurbo::Rect::ZERO);
+        let kind = if segments.len() <= 8 {
+            NearKind::Leaf(segments.into_iter().map(|s| s.1).collect())
+        } else {
+            let x = bounds.width() >= bounds.height();
+            let center = |r: kurbo::Rect| if x { r.x0 * 0.5 + r.x1 * 0.5 } else { r.y0 * 0.5 + r.y1 * 0.5 };
+            let mid = segments.len() / 2;
+            segments.select_nth_unstable_by(mid, |a, b| center(a.0).total_cmp(&center(b.0)));
+            let right = segments.split_off(mid);
+            NearKind::Branch(Box::new(Self::build(segments)), Box::new(Self::build(right)))
+        };
+        Self { bounds, kind }
+    }
+    fn within(&self, p: kurbo::Point, distance: f64) -> bool {
+        if distance <= 0.0 {
+            return false;
+        }
+        // Round the pruning window outwards; a near-threshold curve must still get the exact
+        // distance test below, even when subtracting the window radius loses a few ulps.
+        let pad = 1e-9 + f64::EPSILON * 16.0 * p.x.abs().max(p.y.abs()).max(distance);
+        let r = self.bounds.inflate(distance + pad, distance + pad);
+        if p.x < r.x0 || p.x > r.x1 || p.y < r.y0 || p.y > r.y1 {
+            return false;
+        }
+        match &self.kind {
+            NearKind::Leaf(segments) => {
+                use kurbo::ParamCurveNearest;
+                segments.iter().any(|s| s.nearest(p, 1e-6).distance_sq.sqrt() < distance)
+            }
+            NearKind::Branch(left, right) => left.within(p, distance) || right.within(p, distance),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -220,6 +373,72 @@ mod tests {
     use kurbo::Shape;
 
     use super::*;
+
+    #[test]
+    fn stationary_cubic_endpoint_does_not_make_offset_nonfinite() {
+        // Synthetic rounded tip: the final handle coincides with the endpoint.
+        // The offset's cusp is close enough to t=1 for kurbo's root search to
+        // reach the zero derivative there. No customer geometry is used.
+        let mut bp = BezPath::new();
+        bp.move_to((0., 0.));
+        bp.curve_to((0.032, 0.), (0.04, 0.008), (0.04, 0.008));
+        bp.line_to((2., 2.));
+        bp.line_to((2., 0.));
+        bp.close_path();
+        // Also retain a disconnected component and its hole when retrying.
+        bp.extend(kurbo::Rect::new(5., 0., 9., 4.).to_path(0.01).iter());
+        bp.extend(kurbo::Rect::new(6., 1., 8., 3.).to_path(0.01).reverse_subpaths().iter());
+        let path = PathData::from_bezpath(&bp);
+        let grown = try_offset_path(&path, 0.25, Join::Round, 4.).unwrap();
+        assert!(grown.to_bezpath().is_finite());
+        assert!(grown.to_bezpath().winding((1., 0.5).into()) != 0, "rounded tip's shape was lost");
+        assert!(grown.to_bezpath().winding((5.5, 0.5).into()) != 0, "disconnected shape was lost");
+        assert_eq!(grown.to_bezpath().winding((7., 2.).into()), 0, "hole was filled");
+        let area = crate::area(&grown, FillRule::NonZero);
+        assert!(area > crate::area(&path, FillRule::NonZero));
+        // Reparameterizing the original curve supplies the same valid offset.
+        let reversed = PathData::from_bezpath(&bp.reverse_subpaths());
+        let expected = try_offset_path(&reversed, 0.25, Join::Round, 4.).unwrap();
+        assert!((area - crate::area(&expected, FillRule::NonZero)).abs() < 1e-8);
+    }
+
+    #[test]
+    fn stationary_cubic_endpoint_open_stroke_retains_both_ends() {
+        let mut bp = BezPath::new();
+        bp.move_to((0., 0.));
+        bp.curve_to((0.032, 0.), (0.04, 0.008), (0.04, 0.008));
+        let path = PathData::from_bezpath(&bp);
+        let outline = outline_stroke(&path, 0.5, Cap::Round, Join::Round, 4.);
+        let out = outline.to_bezpath();
+        assert!(out.is_finite());
+        assert!(out.winding((-0.1, 0.).into()) != 0);
+        assert!(out.winding((0.14, 0.008).into()) != 0);
+        let mut invalid = bp;
+        invalid.line_to((f64::NAN, 0.));
+        assert_eq!(try_offset_path(&PathData::from_bezpath(&invalid), 0.25, Join::Round, 4.), Err(crate::PathOpsError::NonFinite));
+    }
+
+    #[test]
+    fn indexed_offset_distance_matches_full_scan_at_thresholds_and_curve_extrema() {
+        use kurbo::ParamCurveNearest;
+        let mut bp = BezPath::new();
+        for i in 0..100 {
+            let x = f64::from(i) * 20.;
+            bp.move_to((x, 0.));
+            bp.line_to((x + 8., 3.));
+            bp.quad_to((x - 10., 40.), (x + 12., 7.));
+            bp.curve_to((x - 30., -40.), (x + 60., 50.), (x, 0.));
+            bp.close_path();
+        }
+        let index = NearIndex::new(&bp);
+        for i in 0..160 {
+            let p = kurbo::Point::new(f64::from(i) * 13.1 - 40., f64::from(i % 17) * 3. - 20.);
+            let distance = bp.segments().map(|s| s.nearest(p, 1e-6).distance_sq).fold(f64::INFINITY, f64::min).sqrt();
+            for threshold in [0., 0.01, 1., 30., distance, distance - 1e-10, distance + 1e-10] {
+                assert_eq!(index.within(p, threshold), distance < threshold, "{p:?}, {distance}, {threshold}");
+            }
+        }
+    }
 
     #[test]
     fn stroke_region_unites_outlines_whatever_their_winding() {
@@ -256,5 +475,42 @@ mod tests {
         let (before, after) = (crate::area(&path, FillRule::NonZero), crate::area(&out, FillRule::NonZero));
         assert_eq!(out.subpaths.len(), 1);
         assert!(after > before, "{before} → {after}");
+    }
+}
+
+#[cfg(test)]
+mod disjoint_tests {
+    use super::*;
+    use vectorcraft_geom::{Rect, shapes};
+
+    #[test]
+    fn separated_stroke_islands_keep_holes_touching_edges_and_curve_geometry() {
+        let mut path = PathData::default();
+        for i in 0..40 {
+            let x = f64::from(i % 8) * 20.;
+            let y = f64::from(i / 8) * 20.;
+            path.subpaths.extend(shapes::rectangle(Rect::new(x, y, x + 10., y + 10.)).subpaths);
+            path.subpaths.extend(shapes::ellipse(Rect::new(x + 3., y + 3., x + 7., y + 7.)).subpaths);
+        }
+        // This stroke touches one island and overlaps another. They must remain in
+        // the same arrangement, despite all the other islands being independent.
+        path.subpaths.extend(shapes::rectangle(Rect::new(10., 2., 21., 8.)).subpaths);
+        let raw = stroke_bez(&path.to_bezpath(), 2., Cap::Butt, Join::Round, 4.);
+        let tidy = Tidy::free(DEFAULT_PRECISION);
+        let global = all_contours_to_path(&normalize_bez(&raw, FillRule::NonZero).unwrap(), &tidy);
+        let partitioned = disjoint_stroke_regions(&raw, &tidy).unwrap();
+        let difference =
+            crate::try_boolean(&global, FillRule::NonZero, &partitioned, FillRule::NonZero, crate::BoolOp::Xor, DEFAULT_PRECISION).unwrap();
+        assert!(crate::area(&difference, FillRule::NonZero) < 1e-6);
+        assert_eq!(global.subpaths.len(), partitioned.subpaths.len());
+    }
+
+    #[test]
+    fn dense_stroke_bounds_keep_the_global_operation() {
+        let mut path = BezPath::new();
+        for _ in 0..40 {
+            path.extend(Rect::new(0., 0., 10., 10.).to_path(0.01).iter());
+        }
+        assert!(disjoint_stroke_regions(&path, &Tidy::free(DEFAULT_PRECISION)).is_none());
     }
 }

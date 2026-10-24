@@ -17,32 +17,48 @@ use vectorcraft_geom::PathData;
 use crate::import::{closed_subpaths, round3};
 use crate::import_color::{Colors, Native};
 use crate::import_mask::{contains, is_rectangle, luminance};
+use crate::import_scan::Rgb;
 
 /// The most mesh patches (or triangles) imported per shading: past it, the shading is a flat
 /// colour.
 const MAX_PATCHES: usize = 4096;
 
 /// An axial or radial shading as a gradient paint, with whether it extends past its start and
-/// its end. `inks`: the colorant names of its space, from the page's walk ([`Colors::solid`]).
-pub(crate) fn shading_gradient(sp: &ShadingPattern, colors: &mut Colors<'_>, inks: Option<&[String]>) -> Option<(GradientPaint, [bool; 2])> {
+/// its end. `inks` and `rgb`: the colorant names and the RGB space of its space, from the page's
+/// walk ([`Colors::solid`]).
+pub(crate) fn shading_gradient(
+    sp: &ShadingPattern,
+    colors: &mut Colors<'_>,
+    inks: Option<&[String]>,
+    rgb: Rgb<'_>,
+) -> Option<(GradientPaint, [bool; 2])> {
     let ShadingType::RadialAxial { coords, domain, function, axial, extend } = sp.shading.shading_type.as_ref() else {
         return None;
     };
     let m = sp.matrix;
     let cs = &sp.shading.color_space;
     let at = |t: f32| function.eval(&smallvec::smallvec![domain[0] + (domain[1] - domain[0]) * t]);
-    let space = colors.shading_space(cs, at(0.0)?.len(), inks);
+    let space = colors.shading_space(cs, at(0.0)?.len(), inks, rgb);
     // RGB to decide which samples are stops; the stops keep the shading's model.
     let sample = |t: f32| -> Option<Color> {
         let [r, g, b, _] = cs.to_rgba(&at(t)?, 1.0, false).components();
         Some(Color::rgb(round3(r), round3(g), round3(b)))
     };
+    // RGB converted into the working space is judged in the numbers the stops keep: a ramp
+    // straight in its own space isn't in the working space's.
+    let converts = colors.converts_rgb();
     // Sample densely, then drop samples that linear interpolation reproduces.
     const N: usize = 64;
     let mut pts: Vec<(f32, [f32; 3])> = Vec::with_capacity(N + 1);
     for i in 0..=N {
         let t = i as f32 / N as f32;
-        pts.push((t, sample(t)?.to_rgb()));
+        let shown = sample(t)?;
+        let kept = match converts.then(|| at(t).and_then(|v| colors.native(space, &v)).map(|n| n.color)) {
+            Some(Some(Color::Rgb { r, g, b })) => [r, g, b],
+            Some(None) => numbers(colors.srgb_in_working(numbers(shown))),
+            _ => shown.to_rgb(),
+        };
+        pts.push((t, kept));
     }
     // Every sample dropped since the last stop is checked against the line to the next one, not
     // just its neighbours: a gentle curve (an exponential's N) looks straight between neighbours.
@@ -61,11 +77,13 @@ pub(crate) fn shading_gradient(sp: &ShadingPattern, colors: &mut Colors<'_>, ink
     keep.push(N);
     let ts: Vec<f32> = keep.iter().filter_map(|&k| pts.get(k)).map(|p| p.0).collect();
     let mut stop_at = |t: f32, offset: f32| -> GradientStop {
-        let rgb = sample(t).unwrap_or(Color::BLACK);
         match at(t).and_then(|v| colors.native(space, &v)) {
             Some(Native { color, link: Some((name, tint)) }) => GradientStop { swatch: Some(name), tint, ..GradientStop::new(offset, color) },
             Some(Native { color, link: None }) => GradientStop::new(offset, color),
-            None => GradientStop::new(offset, rgb),
+            None => {
+                let [r, g, b, _] = at(t).map_or([0.0, 0.0, 0.0, 1.0], |v| cs.to_rgba(&v, 1.0, false).components());
+                GradientStop::new(offset, colors.srgb_in_working([round3(r), round3(g), round3(b)]))
+            }
         }
     };
     let c = |x: f32, y: f32| m * Point::new(x as f64, y as f64);
@@ -88,6 +106,14 @@ pub(crate) fn shading_gradient(sp: &ShadingPattern, colors: &mut Colors<'_>, ink
     let mut g = GradientPaint::new(Gradient { kind, stops });
     g.geom = Some(geom);
     Some((g, *extend))
+}
+
+/// An RGB colour's numbers (another colour's display sRGB).
+fn numbers(c: Color) -> [f32; 3] {
+    match c {
+        Color::Rgb { r, g, b } => [r, g, b],
+        other => other.to_rgb(),
+    }
 }
 
 /// Where an axial or radial shading that doesn't extend at both ends paints, as a clip path in
@@ -145,23 +171,33 @@ pub(crate) fn extend_clip(sp: &ShadingPattern, bounds: Rect) -> Option<BezPath> 
 }
 
 /// The colour of shading components `v` (the input of the shading's function, when it has one).
-/// `inks` as for [`shading_gradient`].
-fn mesh_color(v: &[f32], function: Option<&ShadingFunction>, sp: &ShadingPattern, colors: &mut Colors<'_>, inks: Option<&[String]>) -> Color {
+/// `inks` and `rgb` as for [`shading_gradient`].
+fn mesh_color(
+    v: &[f32],
+    function: Option<&ShadingFunction>,
+    sp: &ShadingPattern,
+    colors: &mut Colors<'_>,
+    inks: Option<&[String]>,
+    rgb: Rgb<'_>,
+) -> Color {
     let comps = match function {
         Some(f) => f.eval(&v.iter().copied().collect()).map(|c| c.to_vec()).unwrap_or_default(),
         None => v.to_vec(),
     };
-    let space = colors.shading_space(&sp.shading.color_space, comps.len(), inks);
-    colors.native(space, &comps).map(|n| n.color).unwrap_or_else(|| {
-        let [r, g, b, _] = sp.shading.color_space.to_rgba(&comps, 1.0, false).components();
-        Color::rgb(round3(r), round3(g), round3(b))
-    })
+    let space = colors.shading_space(&sp.shading.color_space, comps.len(), inks, rgb);
+    match colors.native(space, &comps) {
+        Some(n) => n.color,
+        None => {
+            let [r, g, b, _] = sp.shading.color_space.to_rgba(&comps, 1.0, false).components();
+            colors.srgb_in_working([round3(r), round3(g), round3(b)])
+        }
+    }
 }
 
 /// A patch mesh or triangle mesh shading as gradient meshes in document space (one per patch;
 /// a triangle is a patch with two corners together). `None`: not a mesh, or too big. `inks` as
-/// for [`shading_gradient`].
-pub(crate) fn mesh_shading(sp: &ShadingPattern, colors: &mut Colors<'_>, inks: Option<&[String]>) -> Option<Vec<GradientMesh>> {
+/// for [`shading_gradient`] (`rgb` too).
+pub(crate) fn mesh_shading(sp: &ShadingPattern, colors: &mut Colors<'_>, inks: Option<&[String]>, rgb: Rgb<'_>) -> Option<Vec<GradientMesh>> {
     let m = sp.matrix;
     let mut out = vec![];
     match sp.shading.shading_type.as_ref() {
@@ -170,7 +206,8 @@ pub(crate) fn mesh_shading(sp: &ShadingPattern, colors: &mut Colors<'_>, inks: O
                 return None;
             }
             for p in patches {
-                let colors = [0, 1, 2, 3].map(|i| mesh_color(p.colors.get(i).map_or(&[][..], |c| c.as_slice()), function.as_ref(), sp, colors, inks));
+                let colors =
+                    [0, 1, 2, 3].map(|i| mesh_color(p.colors.get(i).map_or(&[][..], |c| c.as_slice()), function.as_ref(), sp, colors, inks, rgb));
                 out.extend(GradientMesh::coons(&p.control_points.map(|q| m * q), colors));
             }
         }
@@ -180,7 +217,8 @@ pub(crate) fn mesh_shading(sp: &ShadingPattern, colors: &mut Colors<'_>, inks: O
                 return None;
             }
             for p in patches {
-                let colors = [0, 1, 2, 3].map(|i| mesh_color(p.colors.get(i).map_or(&[][..], |c| c.as_slice()), function.as_ref(), sp, colors, inks));
+                let colors =
+                    [0, 1, 2, 3].map(|i| mesh_color(p.colors.get(i).map_or(&[][..], |c| c.as_slice()), function.as_ref(), sp, colors, inks, rgb));
                 out.extend(p.control_points.map(|q| m * q).first_chunk::<12>().and_then(|cp| GradientMesh::coons(cp, colors)));
             }
         }
@@ -189,7 +227,7 @@ pub(crate) fn mesh_shading(sp: &ShadingPattern, colors: &mut Colors<'_>, inks: O
                 return None;
             }
             for t in triangles {
-                let v = [&t.p0, &t.p1, &t.p2].map(|v| (m * v.point, mesh_color(v.colors.as_slice(), function.as_ref(), sp, colors, inks)));
+                let v = [&t.p0, &t.p1, &t.p2].map(|v| (m * v.point, mesh_color(v.colors.as_slice(), function.as_ref(), sp, colors, inks, rgb)));
                 out.extend(GradientMesh::triangle(v));
             }
         }

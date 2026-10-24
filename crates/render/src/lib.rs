@@ -17,7 +17,7 @@ mod ink;
 mod live;
 mod lru;
 mod paint;
-pub use paint::decode_failures;
+pub use paint::{decode_failure_reason, decode_failures};
 mod pattern;
 pub mod placed_document;
 pub mod proof;
@@ -65,6 +65,19 @@ pub fn effect_bounds(symbols: &SymbolBoxes, n: &Node) -> Option<Rect> {
     }
 }
 
+/// Bounds of what `n` draws with its own and its members' geometry effects applied and with the
+/// reach of its own and its members' raster effects, measured as [`Node::visual_bounds_with`]
+/// measures art without effects: what Object › Rasterize makes its image over.
+pub fn drawn_bounds(doc: &Document, n: &Node) -> Option<Rect> {
+    fx::painted_reach(&doc.symbol_boxes(), n)
+}
+
+/// The outline, with `n`'s geometry effects applied, that the canvas clips `n`'s Rasterize with
+/// Create Clipping Mask to. Object › Rasterize's clipping mask follows it.
+pub fn drawn_outline(doc: &Document, n: &Node) -> Option<(BezPath, FillRule)> {
+    fx::drawn_outline(doc, n)
+}
+
 /// Largest raster an export may ask [`Renderer::render_region`] for, per side. The CPU rasteriser
 /// addresses at most `u16::MAX` pixels per side (and panics at that edge).
 pub const MAX_RASTER_SIDE: u32 = 32_768;
@@ -106,6 +119,10 @@ pub struct RenderOptions {
     pub proof: Option<proof::ProofSetup>,
     /// Overprint Preview (see [`proof`] for what overprints).
     pub overprint_preview: bool,
+    /// Separations Preview without its implied Overprint Preview: the visible plates show, but
+    /// overprinting fills and strokes knock out what is under them (the production separations
+    /// panel's Overprint Preview off). `overprint_preview` still turns overprinting on.
+    pub knockout_separations: bool,
     /// Trim View: clip the artwork to the artboards (nothing on the pasteboard is drawn).
     pub trim: bool,
     /// Leave template layers and guides out (exports and thumbnails: they're aids to drawing, not
@@ -124,6 +141,10 @@ pub struct RenderOptions {
     pub mask_view: Option<NodeId>,
     /// Screen view: highlight substituted fonts and glyphs as Document Setup asks.
     pub highlight_substitutions: bool,
+    /// Screen view: Preferences › Type › Highlight Alternate Glyphs. Pink behind glyphs OpenType
+    /// features substituted (ligatures, contextual forms), not Document Setup's missing-glyph
+    /// highlights.
+    pub highlight_alternate_glyphs: bool,
     /// Edge smoothing (raster export option).
     pub anti_alias: AntiAlias,
     /// Screen view: placed documents draw from cached bitmaps made in the background (see
@@ -157,6 +178,12 @@ pub struct RenderOptions {
     /// running the effects again (see `fx`). Off, no raster made that way, or made over one, is
     /// drawn: the effects run again.
     pub interacting: bool,
+    /// Screen views during a tool's drag on the canvas: the renderer draws filtered content within
+    /// `fx::DRAG_PIXEL_BUDGET` pixels, at a lower resolution where it would need more, unless it
+    /// can draw the content from a raster kept from an earlier frame. With [`Renderer::threads`]
+    /// above 0 it does the same for drop shadows, outer glows and inner glows. No raster made that
+    /// way is kept (see `fx`). Off, they render as in a still frame.
+    pub dragging: bool,
     /// Appearance of Black's Rich Black: pure CMYK black (black ink alone at 100%) shows as RGB
     /// black. Off, it shows through the CMYK profile, a dark grey, as other colours do.
     pub rich_black: bool,
@@ -221,6 +248,7 @@ impl Default for RenderOptions {
             dim_templates: true,
             proof: None,
             overprint_preview: false,
+            knockout_separations: false,
             trim: false,
             skip_templates: false,
             hide_templates: false,
@@ -228,6 +256,7 @@ impl Default for RenderOptions {
             guide: ([0x4a, 0xd8, 0xff], false),
             mask_view: None,
             highlight_substitutions: false,
+            highlight_alternate_glyphs: false,
             anti_alias: AntiAlias::Art,
             progressive_placed: false,
             trace_views: false,
@@ -237,6 +266,7 @@ impl Default for RenderOptions {
             supersample: false,
             image_mips: false,
             interacting: false,
+            dragging: false,
             rich_black: false,
         }
     }
@@ -528,8 +558,12 @@ pub struct FrameStats {
     pub drawn: usize,
     pub culled: usize,
     /// The drop shadows, outer glows and filtered contents the frame drew from rasters made before
-    /// their object moved, or made over such rasters ([`RenderOptions::interacting`]).
+    /// their object moved, or made over such rasters ([`RenderOptions::interacting`]), and those it
+    /// drew at a drag's lower resolution ([`Self::previewed`]).
     pub moved: usize,
+    /// The filtered contents, shadows and glows the frame drew at a drag's lower resolution
+    /// ([`RenderOptions::dragging`]). [`Self::moved`] counts them too.
+    pub previewed: usize,
     /// How many threads composed the frame from its two ink planes, in a CMYK document that shows
     /// transparency; 0 for other frames.
     pub ink_threads: usize,
@@ -1185,6 +1219,10 @@ impl Renderer {
         if !force && (!n.visible || f.opts.hidden.contains(&n.id)) {
             return;
         }
+        // A cancelled export stops drawing; whoever asked for the picture drops it (see `cancel`).
+        if vectorcraft_doc::cancel::is_cancelled() {
+            return;
+        }
         if force {
             // Bounds were already checked by draw_arc (or the caller wants it drawn regardless).
         } else if let Some(b) = fx::cull_bounds(f.symbols, n) {
@@ -1248,7 +1286,9 @@ impl Renderer {
     /// In isolation mode, while drawing outside the isolated container and the art dimmed around
     /// it: the isolated container and its layers and groups, from the top layer down to it.
     fn isolation_path(&mut self, f: &Frame) -> Option<(NodeId, Vec<NodeId>)> {
-        let isolated = f.opts.isolated.filter(|_| !self.isolation_settled)?;
+        // Opacity-mask editing isolates the temporary layer for tools; that layer is not painted on
+        // the page (the mask applies on the object), so canvas dimming would wash out everything.
+        let isolated = f.opts.isolated.filter(|_| f.doc.mask_edit.is_none() && !self.isolation_settled)?;
         let doc = std::ptr::from_ref(f.doc) as usize;
         if self.isolation.as_ref().is_none_or(|(stamp, d, id, _)| (*stamp, *d, *id) != (self.stamp, doc, isolated)) {
             self.isolation = Some((self.stamp, doc, isolated, f.doc.ancestry(isolated).unwrap_or_default()));
@@ -1827,12 +1867,12 @@ impl Renderer {
             return;
         }
         let tb = t.xf.transform_rect_bbox(g.bounds);
-        // Overprinting characters multiply per draw, like overprinting fills and strokes
+        // Overprinting characters darken per draw, like overprinting fills and strokes
         // ([`proof`]); the object blend mode is Normal here or applied by an enclosing layer.
         let overprints = proof::overprints(f.opts);
         let overprint = |ctx: &mut RenderContext, on: bool| {
             if overprints {
-                ctx.set_blend_mode(if on { blend_mode(vectorcraft_color::BlendMode::Multiply) } else { BlendMode::default() });
+                ctx.set_blend_mode(if on { blend_mode(vectorcraft_color::BlendMode::Darken) } else { BlendMode::default() });
             }
         };
         // The object's own fills and strokes paint the whole outline: those below the Characters
@@ -1848,8 +1888,13 @@ impl Renderer {
         }
         if f.opts.highlight_substitutions {
             let setup = &f.doc.setup;
-            for (on, path) in [(setup.highlight_substituted_fonts, &g.substituted_fonts), (setup.highlight_substituted_glyphs, &g.substituted_glyphs)]
-            {
+            for (on, path) in [
+                (setup.highlight_substituted_fonts, Some(&g.substituted_fonts)),
+                (setup.highlight_substituted_glyphs, Some(&g.substituted_glyphs)),
+                // Measured only when shown: it lays the text out again.
+                (f.opts.highlight_alternate_glyphs, f.opts.highlight_alternate_glyphs.then(|| g.alternate_glyphs(t))),
+            ] {
+                let Some(path) = path else { continue };
                 if on && !path.elements().is_empty() {
                     ctx.set_transform(xf);
                     ctx.set_fill_rule(peniko::Fill::NonZero);
@@ -1930,12 +1975,14 @@ impl Renderer {
         let mips = f.opts.image_mips;
         let pixels = if outline && !f.doc.setup.outline_images { None } else { self.image_pixmap(f.doc, &im.key, outline, !mips) };
         if let Some((key, pm)) = pixels {
-            let (key, pm) = if outline {
-                (key, pm)
+            let Some((key, pm)) = (if outline {
+                Some((key, pm))
             } else if let Some(proof) = f.opts.proof.as_ref().filter(|p| p.separations.is_some()) {
-                bitmap_proof::image(&key, &pm, f.doc.images.get(&im.key), proof, !mips)
+                bitmap_proof::image(f.doc, &key, &pm, f.doc.images.get(&im.key), proof, !mips)
             } else {
-                ink::ink_image(&key, &pm, f.ink, f.doc.images.get(&im.key), !mips)
+                ink::ink_image(f.doc, &key, &pm, f.ink, f.doc.images.get(&im.key), !mips)
+            }) else {
+                return;
             };
             let pm = if mips { image_mip(&key, pm, f.view * im.xf * Affine::scale_non_uniform(im.width as f64, im.height as f64)) } else { pm };
             let sx = im.width as f64 / pm.width().max(1) as f64;
@@ -2000,7 +2047,7 @@ impl Renderer {
     /// `touch` marks them used there.
     fn image_pixmap(&mut self, doc: &Document, key: &str, grey: bool, touch: bool) -> Option<(images::ImageKey, Arc<Pixmap>)> {
         let (key, colour) = match doc.images.get(key) {
-            Some(blob) => blob_pixmap(blob, touch)?,
+            Some(blob) => blob_pixmap(doc, blob, touch)?,
             None => {
                 let (src, hash, map) = self.adjusts.get(key)?.clone();
                 let (src_key, src) = self.image_pixmap(doc, &src, false, touch)?;
@@ -2050,10 +2097,12 @@ fn lookup(key: &images::ImageKey, touch: bool) -> Option<Arc<Pixmap>> {
 }
 
 /// The decoded pixels of `blob` (a CMYK image's inks shown through the working CMYK profile, again
-/// when the colour settings change), from the shared store, and their key there.
-fn blob_pixmap(blob: &vectorcraft_doc::ImageBlob, touch: bool) -> Option<(images::ImageKey, Arc<Pixmap>)> {
+/// when the colour settings change, its spot channels printed over them in their swatches' colours
+/// in `doc`), from the shared store, and their key there.
+fn blob_pixmap(doc: &Document, blob: &vectorcraft_doc::ImageBlob, touch: bool) -> Option<(images::ImageKey, Arc<Pixmap>)> {
     let id = images::blob_id(blob);
     let lut = id.cmyk.then(ink::display_lut);
+    let colors = ink::spot_colors(doc, &id.spots);
     let key = images::ImageKey {
         content: id.content,
         adjust: None,
@@ -2062,13 +2111,23 @@ fn blob_pixmap(blob: &vectorcraft_doc::ImageBlob, touch: bool) -> Option<(images
         luts: (lut.as_ref().map_or(0, |l| l.1), 0),
         mip: 0,
         separation: 0,
+        spots: ink::spots_key(&colors),
     };
     if let Some(pm) = lookup(&key, touch) {
         return Some((key, pm));
     }
+    // Decode failure is counted for exports, and no process-only image is cached or drawn.
+    let spots = paint::decode_spots(blob)?;
     // Decoded outside the lock: other renderers carry on meanwhile.
     let pm = match lut.and_then(|(lut, _)| ink::cmyk_pixmap(blob, &lut)) {
-        Some(pm) => pm,
+        Some(mut pm) => {
+            if !colors.is_empty()
+                && let Some(spots) = spots
+            {
+                ink::print_spots(&mut pm, &spots, &colors);
+            }
+            pm
+        }
         None => paint::decode_pixmap(&blob.bytes)?,
     };
     let pm = images::store().insert(key.clone(), Arc::new(pm));
@@ -2290,6 +2349,13 @@ struct TextGeom {
     /// font lacks (drawn from a fallback font): Document Setup's substitution highlights.
     substituted_fonts: BezPath,
     substituted_glyphs: BezPath,
+    /// Glyphs OpenType may have substituted (a ligature, or not the face's cmap glyph for their
+    /// character), each with its box: what Preferences › Highlight Alternate Glyphs weighs
+    /// ([`TextGeom::alternate_glyphs`]).
+    alternate_candidates: Vec<AlternateCandidate>,
+    /// The boxes of the candidates that are alternates, measured the first time the preference
+    /// shows them.
+    alternate_glyphs: std::sync::OnceLock<BezPath>,
     /// Inline graphics placed by the layout.
     inlines: Vec<vectorcraft_text::InlineGlyph>,
 }
@@ -2312,13 +2378,70 @@ impl TextGeom {
         std::borrow::Cow::Owned(p)
     }
 
+    /// The boxes of the glyphs of `t` (the text this geometry is of) that optional OpenType features
+    /// chose (Preferences › Highlight Alternate Glyphs): candidates the text's required shaping
+    /// alone doesn't give ([`required_shaping`]). Arabic letters joining, Indic conjuncts and the
+    /// lam-alef ligature are what the script needs, not alternates. Measured once.
+    fn alternate_glyphs(&self, t: &TextObject) -> &BezPath {
+        self.alternate_glyphs.get_or_init(|| {
+            let mut out = BezPath::new();
+            if self.alternate_candidates.is_empty() {
+                return out;
+            }
+            let required = required_shaping(t);
+            for c in &self.alternate_candidates {
+                if !required.get(&(c.byte, c.len)).is_some_and(|glyphs| glyphs.contains(&(c.font_id, c.gid))) {
+                    out.extend(c.cell.iter());
+                }
+            }
+            out
+        })
+    }
+
     /// Approximate heap bytes, for the cache's budget.
     fn bytes(&self) -> usize {
         size_of::<Self>()
             + [&self.all, &self.substituted_fonts, &self.substituted_glyphs].into_iter().map(lru::path_bytes).sum::<usize>()
+            + self.alternate_candidates.iter().map(|c| size_of::<AlternateCandidate>() + lru::path_bytes(&c.cell)).sum::<usize>()
+            + self.alternate_glyphs.get().map_or(0, lru::path_bytes)
             + self.spans.len() * size_of::<(usize, usize, usize)>()
             + self.inlines.len() * size_of::<vectorcraft_text::InlineGlyph>()
     }
+}
+
+/// OpenType-substituted form: a ligature (several source characters → one glyph) or a glyph whose
+/// id is not the face's cmap mapping for its first character (contextual / stylistic alternate).
+pub(crate) fn is_opentype_alternate(nominal_gid: u32, shaped_gid: u32, cluster_chars: usize) -> bool {
+    shaped_gid != 0 && (cluster_chars > 1 || shaped_gid != nominal_gid)
+}
+
+/// A glyph [`is_opentype_alternate`] marks, in its cluster of the text (`byte`, `len`), with its
+/// box.
+#[derive(Debug)]
+struct AlternateCandidate {
+    byte: usize,
+    len: usize,
+    font_id: u32,
+    gid: u32,
+    cell: BezPath,
+}
+
+/// The glyphs `t` is shaped to by required shaping alone, by cluster (`byte`, `len`) → `(font,
+/// glyph)`: laid out again with every optional feature off (standard and contextual ligatures and
+/// alternates, and the features its characters turn on: stylistic sets, swashes, discretionary
+/// ligatures, figure styles…). What is left is what the script needs: `ccmp`, `locl`, `rlig`,
+/// Arabic's `init`, `medi`, `fina` and `isol`, the Indic and other complex scripts' required sets.
+fn required_shaping(t: &TextObject) -> std::collections::HashMap<(usize, usize), Vec<(u32, u32)>> {
+    let mut plain = t.clone();
+    for run in &mut plain.runs {
+        run.style.features = vec!["-liga".into(), "-calt".into()];
+    }
+    let layout = vectorcraft_text::layout(vectorcraft_text::FontDb::global(), &plain);
+    let mut glyphs: std::collections::HashMap<(usize, usize), Vec<(u32, u32)>> = std::collections::HashMap::new();
+    for g in &layout.glyphs {
+        glyphs.entry((g.byte, g.len)).or_default().push((g.font_id, g.gid));
+    }
+    glyphs
 }
 
 fn text_geom(t: &TextObject) -> TextGeom {
@@ -2352,38 +2475,57 @@ fn text_geom_snapped(t: &TextObject, snap: Option<Affine>) -> TextGeom {
         .runs
         .iter()
         .map(|r| match db.resolve(&r.style.font_family, &r.style.font_style) {
-            // The version the type names, when it's installed (see `FontDb::face_version`).
+            // The version the type names, when it's installed (see `FontDb::face_version`), at its
+            // Variable Font settings (see `FontDb::style_face`).
             Some((f, m)) => {
-                let face = db.face_version(&r.style.font_family, &r.style.font_style, r.style.font_version.as_deref()).unwrap_or(f);
+                let face = db.style_face(&r.style).unwrap_or(f);
                 (m == vectorcraft_text::FontMatch::Missing, Some(face.id()))
             }
             None => (true, None),
         })
         .collect();
-    let (mut substituted_fonts, mut substituted_glyphs) = (BezPath::new(), BezPath::new());
+    let (mut substituted_fonts, mut substituted_glyphs, mut alternate_candidates) = (BezPath::new(), BezPath::new(), vec![]);
+    let plain = t.plain_text();
     for g in &layout.glyphs {
         push(&mut all, g.run, &g.outline);
         let Some(&(missing, face)) = faces.get(g.run) else { continue };
-        let target = if missing {
-            &mut substituted_fonts
-        } else if face.is_some_and(|f| f != g.font_id) {
-            &mut substituted_glyphs
-        } else {
-            continue;
-        };
         let Some(line) = layout.lines.get(g.line) else { continue };
         let mut cell = Rect::new(g.origin.x, g.origin.y - line.ascent, g.origin.x + g.advance, g.origin.y + line.descent).to_path(0.1);
         cell.apply_affine(Affine::rotate_about(g.angle, g.origin));
-        target.extend(cell.iter());
+        if missing {
+            substituted_fonts.extend(cell.iter());
+            continue;
+        }
+        if face.is_some_and(|f| f != g.font_id) {
+            substituted_glyphs.extend(cell.iter());
+            continue;
+        }
+        // Same face: OpenType may have swapped the glyph (liga, calt, …).
+        let Some(cluster) = plain.get(g.byte..g.byte.saturating_add(g.len)) else { continue };
+        let cluster_chars = cluster.chars().count();
+        let Some(first) = cluster.chars().next() else { continue };
+        let nominal = db.face_by_id(g.font_id).map(|f| f.glyph_for(first)).unwrap_or(0);
+        if is_opentype_alternate(nominal, g.gid, cluster_chars) {
+            alternate_candidates.push(AlternateCandidate { byte: g.byte, len: g.len, font_id: g.font_id, gid: g.gid, cell });
+        }
     }
     // Underline and strikethrough bars, painted as their run's type is (#847).
     for (run, bar) in vectorcraft_text::decorations(&layout, db, t) {
         push(&mut all, run, &bar);
     }
-    TextGeom { all, spans, bounds: layout.bounds, substituted_fonts, substituted_glyphs, inlines: layout.inlines }
+    TextGeom {
+        all,
+        spans,
+        bounds: layout.bounds,
+        substituted_fonts,
+        substituted_glyphs,
+        alternate_candidates,
+        alternate_glyphs: std::sync::OnceLock::new(),
+        inlines: layout.inlines,
+    }
 }
 
-/// Document Setup's highlight behind substituted fonts and glyphs (screen only).
+/// Document Setup's and Preferences › Highlight Alternate Glyphs pink (screen only).
 const SUBSTITUTED: peniko::Color = peniko::Color::from_rgba8(255, 120, 190, 110);
 /// The pixel size of `region` rendered at `scale` pixels per point (at least 1×1).
 pub fn region_pixels(region: Rect, scale: f64) -> (u32, u32) {
@@ -2439,6 +2581,8 @@ mod tests;
 #[cfg(test)]
 mod tests_adjust;
 #[cfg(test)]
+mod tests_alternate;
+#[cfg(test)]
 mod tests_blend;
 #[cfg(test)]
 mod tests_charstroke;
@@ -2466,6 +2610,8 @@ mod tests_memory;
 mod tests_objectfx;
 #[cfg(test)]
 mod tests_placed_document;
+#[cfg(test)]
+mod tests_rasterize;
 #[cfg(test)]
 mod tests_setup;
 #[cfg(test)]

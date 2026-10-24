@@ -266,6 +266,7 @@ pub fn control_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
                 let first = sel.first().and_then(|id| st.doc.node(*id)).cloned();
                 let anchors = anchor_controls(app);
                 let label = match &first {
+                    _ if app.session.tool_id() == "artboard" => tl!("Artboard"),
                     Some(_) if sel.len() == 1 && anchors != AnchorControls::None => {
                         tl!("Anchor Point")
                     }
@@ -282,6 +283,11 @@ pub fn control_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
                     _ => tl!(crate::panels::appearance::object_label(app)),
                 };
                 ui.label(egui::RichText::new(label).font(theme::semibold(12.0)).color(t.text));
+                // With the Artboard tool in use, the bar shows the active artboard's controls in place
+                // of the object controls.
+                if crate::panels::artboards::control_bar(app, ui) {
+                    return;
+                }
                 if anchors != AnchorControls::None {
                     anchor_buttons(app, ui, anchors);
                 }
@@ -322,8 +328,9 @@ pub fn control_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
                     if ui.link(egui::RichText::new(tl!("Style:")).size(12.0).color(t.text).underline()).clicked() {
                         app.ui.open_panel = Some("graphicStyles".into());
                     }
-                    let resp = widgets::chip_button(ui, 22.0, true, |ui, r| crate::panels::graphic_styles::paint_linked(app, ui, r))
-                        .on_hover_text(tl!("Graphic Style"));
+                    let resp = widgets::chip_button_named(ui, 22.0, true, tl!("Graphic Style"), |ui, r| {
+                        crate::panels::graphic_styles::paint_linked(app, ui, r)
+                    });
                     egui::Popup::menu(&resp).show(|ui| crate::panels::graphic_styles::picker(app, ui));
                     // Recolor Artwork, when the selection has colours to recolour.
                     let colored = app.session.active().is_some_and(|st| crate::canvas::has_colors(&st.doc, &st.selection.objects));
@@ -383,14 +390,14 @@ pub fn control_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
 
 /// A document tab's title: "Name* @ 66.67 % (RGB/Preview)", or while an opacity mask is edited
 /// "Name* @ 66.67 % (<Opacity Mask>/Opacity Mask)".
-fn tab_title(d: &vectorcraft_engine::DocState, zoom: f64, outline: bool) -> String {
+fn tab_title(d: &vectorcraft_engine::DocState, zoom: f64, outline: bool, display_print_size: bool) -> String {
     let mode = if d.doc.mask_edit.is_some() {
         format!("<{0}>/{0}", tl!("Opacity Mask"))
     } else {
         let color = if d.doc.color_mode == vectorcraft_doc::ColorMode::Cmyk { "CMYK" } else { "RGB" };
         format!("{color}/{}", if outline { tl!("Outline") } else { tl!("Preview") })
     };
-    format!("{}{} @ {} ({mode})", d.title(), if d.is_dirty() { "*" } else { "" }, zoom_label(zoom).replace('%', " %"))
+    format!("{}{} @ {} ({mode})", d.title(), if d.is_dirty() { "*" } else { "" }, zoom_label(zoom, display_print_size).replace('%', " %"))
 }
 
 /// Whether a document tab's × comes before its title (macOS) rather than after it (Windows,
@@ -428,7 +435,7 @@ pub fn doc_tabs(app: &mut VectorcraftApp, ui: &mut Ui) {
         .enumerate()
         .map(|(i, d)| {
             let zoom = app.views.get(i).map(|v| v.zoom).unwrap_or(1.0);
-            let title = tab_title(d, zoom, app.ui.view.outline);
+            let title = tab_title(d, zoom, app.ui.view.outline, app.session.prefs.display_print_size);
             let color = if Some(i) == active { t.text_strong } else { t.text_dim };
             (title.clone(), ui.painter().layout_no_wrap(title, theme::semibold(title_size), color))
         })
@@ -651,11 +658,17 @@ pub fn status_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
         .show(ui, |ui| {
             ui.horizontal_centered(|ui| {
                 let zoom = app.view().map(|v| v.zoom).unwrap_or(1.0);
-                egui::ComboBox::from_id_salt("zoom-combo").selected_text(egui::RichText::new(zoom_label(zoom)).size(11.5)).width(76.0).show_ui(
-                    ui,
-                    |ui| {
+                let print = app.session.prefs.display_print_size;
+                let shown = crate::state::zoom_display_percent(zoom, print);
+                egui::ComboBox::from_id_salt("zoom-combo")
+                    .selected_text(egui::RichText::new(zoom_label(zoom, print)).size(11.5))
+                    .width(76.0)
+                    .show_ui(ui, |ui| {
                         for z in ZOOM_STOPS.iter().rev() {
-                            if ui.selectable_label((z / 100.0 - zoom).abs() < 1e-4, zoom_label(z / 100.0)).clicked() {
+                            if ui
+                                .selectable_label((z - shown).abs() < 0.01, zoom_label(crate::state::zoom_from_display_percent(*z, print), print))
+                                .clicked()
+                            {
                                 app.run("view.setZoom", json!({"zoom": z})).ok();
                             }
                         }
@@ -666,8 +679,7 @@ pub fn status_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
                         if ui.selectable_label(false, tl!("Fit All")).clicked() {
                             app.run("view.fitAll", json!({})).ok();
                         }
-                    },
-                );
+                    });
                 let rot = app.view().map(|v| v.rotation).unwrap_or(0.0);
                 egui::ComboBox::from_id_salt("rot-combo").selected_text(egui::RichText::new(format!("{rot:.0}°")).size(11.5)).width(52.0).show_ui(
                     ui,
@@ -686,16 +698,16 @@ pub fn status_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
                 let nab = app.session.active().map(|d| d.doc.artboards.len()).unwrap_or(0);
                 let cur = crate::panels::artboards::selected(app, nab);
                 let mut go = None;
-                for (icon, to) in [("chevrons-left", "first"), ("chevron-left", "previous")] {
-                    if widgets::icon_button_enabled(ui, icon, "", false, cur > 0, 18.0).clicked() {
+                for (icon, to, tip) in [("chevrons-left", "first", tl!("First Artboard")), ("chevron-left", "previous", tl!("Previous Artboard"))] {
+                    if widgets::icon_button_enabled(ui, icon, tip, false, cur > 0, 18.0).clicked() {
                         go = Some(json!(to));
                     }
                 }
                 if let Some(i) = artboard_list(app, ui, cur) {
                     go = Some(json!(i));
                 }
-                for (icon, to) in [("chevron-right", "next"), ("chevrons-right", "last")] {
-                    if widgets::icon_button_enabled(ui, icon, "", false, cur + 1 < nab, 18.0).clicked() {
+                for (icon, to, tip) in [("chevron-right", "next", tl!("Next Artboard")), ("chevrons-right", "last", tl!("Last Artboard"))] {
+                    if widgets::icon_button_enabled(ui, icon, tip, false, cur + 1 < nab, 18.0).clicked() {
                         go = Some(json!(to));
                     }
                 }
@@ -737,7 +749,7 @@ pub fn status_bar(app: &mut VectorcraftApp, ui: &mut Ui) {
                         .background
                         .jobs
                         .iter()
-                        .filter(|j| !j.label.is_empty())
+                        .filter(|j| !j.label.is_empty() && !j.cancelled())
                         .map(|j| j.label.as_str())
                         .chain(app.opening.pending.iter().map(|p| p.label.as_str()))
                         .collect();
@@ -1137,6 +1149,30 @@ mod tests {
         assert!(app.run("view.goToArtboard", json!({"index": "sideways"})).is_err());
     }
 
+    /// storytold/vectorcraft#2719: status-bar 100% matches Actual Size when Display Print Size is on.
+    #[test]
+    fn set_zoom_100_matches_actual_size_with_display_print_size() {
+        let mut app = crate::VectorcraftApp::new(Session::new(), Default::default());
+        app.run("file.new", json!({"width": 200, "height": 100})).unwrap();
+        app.session.execute("prefs.set", &json!({"key": "displayPrintSize", "value": true})).unwrap();
+        app.run("view.setZoom", json!({"zoom": 100})).unwrap();
+        assert!((app.view().unwrap().zoom - 96.0 / 72.0).abs() < 1e-12);
+    }
+
+    /// Screen readers name the artboard navigator's four buttons, the ones that lead nowhere from
+    /// the first artboard disabled.
+    #[test]
+    fn screen_readers_name_the_artboard_navigators_buttons() {
+        use crate::widgets::accessibility_tests::{named, tree};
+        let mut app = crate::VectorcraftApp::new(Session::new(), Default::default());
+        app.run("file.new", json!({"width": 200, "height": 100, "artboards": 3})).unwrap();
+        let tree = tree(|ui| super::status_bar(&mut app, ui));
+        for (label, enabled) in [("First Artboard", false), ("Previous Artboard", false), ("Next Artboard", true), ("Last Artboard", true)] {
+            let n = named(&tree, label);
+            assert_eq!((n.role(), n.is_disabled()), (egui::accesskit::Role::Button, !enabled), "{label}");
+        }
+    }
+
     /// One headless frame of the status bar, with room above it for the artboard list; returns the
     /// texts painted and where they are.
     fn status_texts(app: &mut crate::VectorcraftApp, ctx: &egui::Context, events: Vec<egui::Event>) -> Vec<(String, egui::Rect)> {
@@ -1397,7 +1433,7 @@ mod tests {
         let mut s = Session::new();
         s.execute("file.new", &json!({"width": 100, "height": 100})).unwrap();
         s.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 50, "height": 50})).unwrap();
-        let title = |s: &Session| super::tab_title(s.active().unwrap(), 1.0, false);
+        let title = |s: &Session| super::tab_title(s.active().unwrap(), 1.0, false, false);
         assert!(title(&s).ends_with("(RGB/Preview)"), "{}", title(&s));
         s.execute("transparency.makeOpacityMask", &json!({})).unwrap();
         assert!(title(&s).ends_with("(<Opacity Mask>/Opacity Mask)"), "{}", title(&s));

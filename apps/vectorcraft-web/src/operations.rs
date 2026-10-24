@@ -2,6 +2,71 @@
 use crate::protocol;
 use vectorcraft_ui_egui::VectorcraftApp;
 
+/// A parent operation; the bridge keeps all variants in a single FIFO.
+// Browser variants are exercised through the bridge on wasm; native builds compile tests only.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub enum Operation {
+    Export(protocol::Export),
+    Mark(String, serde_json::Value),
+    Place(protocol::Place),
+    Solidify(protocol::Solidify),
+    Open(vectorcraft_ui_egui::HostOpen),
+    Prefs(String),
+    /// `vectorcraft:colorSettings`: in the queue, so an open sent after it is read in its settings.
+    ColorSettings(protocol::ColorSettings),
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub enum Reply {
+    Export { name: String, bytes: Vec<u8>, bounds: Option<vectorcraft_geom::Rect>, native: bool, mark_saved: bool, preserve_source: bool },
+    Message { kind: &'static str, value: serde_json::Value },
+    None,
+}
+
+/// Execute one queued operation. Shared with native same-frame ordering tests.
+pub fn execute(app: &mut VectorcraftApp, operation: Operation) -> Result<Reply, String> {
+    use serde_json::json;
+    Ok(match operation {
+        Operation::Export(export) => {
+            let (name, bytes, bounds, native) = write_export(app, &export)?;
+            Reply::Export { name, bytes, bounds, native, mark_saved: export.mark_saved, preserve_source: export.preserve_source }
+        }
+        Operation::Mark(command, params) => {
+            app.run(&command, params)?;
+            let result = app.session.execute("sep.mark.list", &json!({})).map_err(|e| e.to_string())?;
+            Reply::Message { kind: "vectorcraft:sep.marks", value: json!({"marks":result["marks"], "units":"pt"}) }
+        }
+        Operation::Place(place) => Reply::Message { kind: "vectorcraft:placed", value: json!({"ids":place_file(app, &place)?}) },
+        Operation::Solidify(request) => {
+            let done = solidify(app, &request)?;
+            Reply::Message {
+                kind: "vectorcraft:solidified",
+                value: json!({"ids":done.ids,"form":done.form,"level":done.level,
+                "softPixels":done.soft,"clearPixels":done.clear,"opaquePixels":done.opaque}),
+            }
+        }
+        Operation::Open(open) => {
+            app.open_from_host(open);
+            Reply::None
+        }
+        Operation::ColorSettings(request) => {
+            let done = apply_color_settings(app, &request)?;
+            let text = |k: &str| done.settings[k].as_str().unwrap_or_default().to_string();
+            let profiles: Vec<&str> = done.settings["profiles"].as_array().into_iter().flatten().filter_map(|p| p["name"].as_str()).collect();
+            Reply::Message {
+                kind: "vectorcraft:colorSettingsApplied",
+                value: json!({"loaded":done.loaded, "rgb":text("rgb"), "cmyk":text("cmyk"), "intent":text("intent"),
+                "bpc":done.settings["bpc"].as_bool().unwrap_or(false), "profiles":profiles}),
+            }
+        }
+        Operation::Prefs(text) => {
+            app.ui = serde_json::from_str::<vectorcraft_ui_egui::UiState>(&text).map_err(|e| e.to_string())?.sanitized();
+            vectorcraft_ui_egui::prefs_dialog::restore(app);
+            Reply::None
+        }
+    })
+}
+
 /// The active document written as `export` asks → its file name and bytes.
 /// → the file's name, its bytes, the selection's bounds (with `selected_only`), and whether the bytes
 /// are a selected image's own pixels.
@@ -59,11 +124,75 @@ pub fn write_export(app: &mut VectorcraftApp, export: &protocol::Export) -> Resu
     Ok((format!("{stem}.{}", export.extension), bytes, bounds, false))
 }
 
+/// An image's printed frame: its pixel width and height through its transform, in points.
+fn frame(im: &vectorcraft_doc::ImageObject) -> (f64, f64) {
+    let [a, b, c, d, _, _] = im.xf.as_coeffs();
+    (a.hypot(b) * f64::from(im.width), c.hypot(d) * f64::from(im.height))
+}
+
+/// The images in `doc` showing the same pixels as image `id` → (those at its printed size, itself
+/// included, in document order; how many at other sizes). Sizes within a hundredth of a point match.
+pub fn copies_of(doc: &vectorcraft_doc::Document, id: vectorcraft_doc::NodeId) -> (Vec<vectorcraft_doc::NodeId>, usize) {
+    let Some(vectorcraft_doc::NodeKind::Image(me)) = doc.node(id).map(|n| &n.kind) else { return (vec![], 0) };
+    let (w, h) = frame(me);
+    let (mut same, mut other) = (vec![], 0);
+    doc.walk(|n| {
+        if let vectorcraft_doc::NodeKind::Image(im) = &n.kind
+            && im.key == me.key
+            && (im.width, im.height) == (me.width, me.height)
+        {
+            let (iw, ih) = frame(im);
+            if (iw - w).abs() < 0.01 && (ih - h).abs() < 0.01 { same.push(n.id) } else { other += 1 }
+        }
+    });
+    (same, other)
+}
+
+/// What is selected in the active document, for `vectorcraft:selection`.
+pub fn selection(app: &VectorcraftApp) -> protocol::Selection {
+    let Some(st) = app.session.active() else { return protocol::Selection::default() };
+    match st.selection.objects.as_slice() {
+        [id] if matches!(st.doc.node(*id).map(|n| &n.kind), Some(vectorcraft_doc::NodeKind::Image(_))) => {
+            let (same, other_sizes) = copies_of(&st.doc, *id);
+            protocol::Selection { image: true, copies: same.len().saturating_sub(1), other_sizes }
+        }
+        _ => protocol::Selection::default(),
+    }
+}
+
 /// Place `place`'s file in place of the one selected object (with nothing selected, at `at`) →
-/// the ids of what was placed. One undo step (`file.place`).
+/// the ids of what was placed. One undo step (`file.place`; with `copies`, `command.batch`).
 pub fn place_file(app: &mut VectorcraftApp, place: &protocol::Place) -> Result<Vec<u64>, String> {
     let st = app.session.active().ok_or("vectorcraft:place: no document is open")?;
     let selected = st.selection.objects.clone();
+    if place.copies {
+        let [id] = selected.as_slice() else { return Err("vectorcraft:place: select the one image whose copies to replace".to_string()) };
+        if !matches!(st.doc.node(*id).map(|n| &n.kind), Some(vectorcraft_doc::NodeKind::Image(_))) {
+            return Err("vectorcraft:place: `copies` replaces an image: select one image".to_string());
+        }
+        let (ids, _) = copies_of(&st.doc, *id);
+        let data = vectorcraft_format::base64_encode(&place.bytes);
+        let commands: Vec<serde_json::Value> = ids
+            .iter()
+            .flat_map(|id| {
+                [
+                    serde_json::json!({ "command": "select.set", "params": { "ids": [id.0] } }),
+                    serde_json::json!({ "command": "file.place", "params": { "name": place.name, "dataBase64": data, "replace": true, "crop": "crop", "fitReplaced": true } }),
+                ]
+            })
+            .collect();
+        let r = app.run("command.batch", serde_json::json!({ "label": "Place", "commands": commands }))?;
+        let placed: Vec<u64> = r
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            // Every other result is a place's (the select.set steps between answer with ids too).
+            .map(|results| {
+                results.iter().skip(1).step_by(2).filter_map(|r| r.get("ids")?.as_array()).flatten().filter_map(serde_json::Value::as_u64).collect()
+            })
+            .unwrap_or_default();
+        app.run("select.set", serde_json::json!({ "ids": placed }))?;
+        return Ok(placed);
+    }
     let replace = match selected.as_slice() {
         [] => false,
         [_] => true,
@@ -93,6 +222,98 @@ pub fn place_file(app: &mut VectorcraftApp, place: &protocol::Place) -> Result<V
     Ok(r.get("ids").and_then(serde_json::Value::as_array).map(|ids| ids.iter().filter_map(serde_json::Value::as_u64).collect()).unwrap_or_default())
 }
 
+/// What a `vectorcraft:solidify` did (`vectorcraft:solidified`): the images changed (none when no
+/// pixel was soft), where their transparency is stored (`alpha` or `mask`), the level, and the
+/// pixels counted (soft before; clear and opaque after).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Solidified {
+    pub ids: Vec<u64>,
+    pub form: String,
+    pub level: u64,
+    pub soft: u64,
+    pub clear: u64,
+    pub opaque: u64,
+}
+
+/// Remove the soft pixels of the one selected image (`object.image.solidifyAlpha`): one undo step,
+/// with `copies` also for its copies at the same printed size.
+pub fn solidify(app: &mut VectorcraftApp, request: &protocol::Solidify) -> Result<Solidified, String> {
+    let st = app.session.active().ok_or("vectorcraft:solidify: no document is open")?;
+    let id = match st.selection.objects.as_slice() {
+        [id] if matches!(st.doc.node(*id).map(|n| &n.kind), Some(vectorcraft_doc::NodeKind::Image(_))) => *id,
+        _ => return Err("vectorcraft:solidify: select one image".to_string()),
+    };
+    let r = app.run("object.image.solidifyAlpha", serde_json::json!({ "id": id.0, "level": request.level, "copies": request.copies }))?;
+    let n = |k: &str| r.get(k).and_then(serde_json::Value::as_u64).ok_or_else(|| format!("vectorcraft:solidify: the answer has no `{k}`"));
+    Ok(Solidified {
+        ids: r.get("ids").and_then(serde_json::Value::as_array).map(|a| a.iter().filter_map(serde_json::Value::as_u64).collect()).unwrap_or_default(),
+        form: r.get("form").and_then(serde_json::Value::as_str).unwrap_or("alpha").to_string(),
+        level: n("level")?,
+        soft: n("softPixels")?,
+        clear: n("clearPixels")?,
+        opaque: n("opaquePixels")?,
+    })
+}
+
+/// What a `vectorcraft:colorSettings` did: the profiles it registered (their names) and the
+/// colour settings now in effect (`edit.colorSettings`'s answer).
+#[derive(Debug)]
+pub struct ColorSettingsApplied {
+    pub loaded: Vec<String>,
+    pub settings: serde_json::Value,
+}
+
+/// Register `request`'s profiles and set its working spaces, intent and compensation, as Edit ›
+/// Color Settings does: process-wide, for this document and the next ones the page opens. Not an
+/// edit: no undo step, and an unmodified document stays unmodified. Nothing is registered or set
+/// when any profile can't be registered or a named space isn't available: the profiles and the
+/// spaces are checked first (a profile registered again under a working space's name would take
+/// effect at once).
+pub fn apply_color_settings(app: &mut VectorcraftApp, request: &protocol::ColorSettings) -> Result<ColorSettingsApplied, String> {
+    use vectorcraft_color::cms::{self, ProfileKind};
+    const C: &str = "vectorcraft:colorSettings";
+    let mut checked = vec![];
+    for (i, (name, bytes)) in request.profiles.iter().enumerate() {
+        checked.push(cms::check_icc(bytes, name.clone()).map_err(|e| format!("{C}: profiles[{i}]: {e}"))?);
+    }
+    for (key, name, kind) in [("rgb", &request.rgb, ProfileKind::Rgb), ("cmyk", &request.cmyk, ProfileKind::Cmyk)] {
+        let Some(name) = name else { continue };
+        let name = cms::canonical_name(name);
+        let known = checked.iter().rev().find(|p| p.name == name).or(cms::profile(name).as_ref()).map(|p| p.kind);
+        match known {
+            Some(k) if k == kind => {}
+            Some(_) => return Err(format!("{C}: edit.colorSettings: {name} is not a{} profile", if key == "rgb" { "n RGB" } else { " CMYK" })),
+            None => return Err(format!("{C}: edit.colorSettings: unknown {key} profile `{name}`")),
+        }
+    }
+    let mut loaded = vec![];
+    for (i, (name, bytes)) in request.profiles.iter().enumerate() {
+        let info = cms::register_icc(bytes, name.clone()).map_err(|e| format!("{C}: profiles[{i}]: {e}"))?;
+        loaded.push(info.name);
+    }
+    // A working space registered again (`register_icc` makes it take the new profile) draws anew,
+    // although the settings' names don't change.
+    let active = vectorcraft_color::cms::active_settings();
+    if loaded.iter().any(|n| *n == active.rgb || *n == active.cmyk)
+        && let Some(st) = app.session.active_mut()
+    {
+        st.revision += 1;
+    }
+    let settings = app.session.execute("edit.colorSettings", &request.params()).map_err(|e| format!("vectorcraft:colorSettings: {e}"))?;
+    Ok(ColorSettingsApplied { loaded, settings })
+}
+
+/// Summarize what was actually saved (also used for File > Save downloads and selection exports).
+pub fn saved_marks(name: &str, bytes: &[u8]) -> Result<serde_json::Value, String> {
+    if !name.to_ascii_lowercase().ends_with(".pdf") {
+        return Ok(serde_json::json!([]));
+    }
+    let loaded = vectorcraft_engine::cmd::fileio::load(name, bytes).map_err(|e| e.to_string())?;
+    let mut session = vectorcraft_engine::Session::new();
+    session.add_document(loaded.doc, None);
+    Ok(session.execute("sep.mark.list", &serde_json::json!({})).map_err(|e| e.to_string())?["marks"].clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,6 +337,27 @@ mod tests {
         let mut session = Session::new();
         session.add_document(doc, None);
         VectorcraftApp::new(session, Default::default())
+    }
+
+    #[test]
+    fn host_marks_export_summary_and_production_reopen() {
+        let mut app = app();
+        app.run("select.all", json!({})).unwrap();
+        let (cmd, params) = protocol::mark_command("vectorcraft:sep.mark.set", Some(json!({"type":"noTrap"}))).unwrap();
+        app.run(cmd, params).unwrap();
+        let (name, bytes, _, _) = write_export(&mut app, &request()).unwrap();
+        let summary = saved_marks(&name, &bytes).unwrap();
+        assert_eq!(summary.as_array().unwrap().len(), 1);
+        assert_eq!(summary[0]["mark"], json!({"type":"noTrap"}));
+        assert!(summary[0]["bounds"]["width"].as_f64().unwrap() > 0.);
+        app.run("document.open", json!({"name":"reopen.pdf","dataBase64":vectorcraft_format::base64_encode(&bytes),"printProduction":true})).unwrap();
+        assert_eq!(app.run("sep.mark.list", json!({})).unwrap()["marks"].as_array().unwrap().len(), 1);
+        let (cmd, params) = protocol::mark_command("vectorcraft:sep.mark.clear", None).unwrap();
+        app.run("select.all", json!({})).unwrap();
+        app.run(cmd, params).unwrap();
+        assert_eq!(app.run("sep.mark.list", json!({})).unwrap()["marks"], json!([]));
+        app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(app.run("sep.mark.list", json!({})).unwrap()["marks"].as_array().unwrap().len(), 1);
     }
 
     fn request() -> protocol::Export {
@@ -177,5 +419,164 @@ mod tests {
         assert_eq!(ids.len(), 1);
         app.run("edit.undo", json!({})).unwrap();
         assert_eq!(app.session.active().unwrap().doc, before);
+    }
+
+    const PNG_A: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 6, 0, 0, 0, 114, 182, 13, 36, 0, 0, 0, 17, 73, 68,
+        65, 84, 120, 156, 99, 56, 33, 39, 215, 0, 194, 12, 48, 6, 0, 56, 82, 6, 17, 216, 232, 162, 145, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+    const PNG_B: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 6, 0, 0, 0, 114, 182, 13, 36, 0, 0, 0, 17, 73, 68,
+        65, 84, 120, 156, 99, 144, 147, 59, 241, 31, 132, 25, 96, 12, 0, 65, 228, 8, 13, 149, 140, 250, 4, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96,
+        130,
+    ];
+
+    /// Image A placed at `rect` with nothing selected → its id.
+    fn put(app: &mut VectorcraftApp, rect: [f64; 4]) -> u64 {
+        app.run("select.set", json!({"ids": []})).unwrap();
+        place_file(app, &protocol::place(Some("a.png".into()), Some(PNG_A.to_vec()), Some(rect.to_vec())).unwrap()).unwrap()[0]
+    }
+
+    #[test]
+    fn selection_counts_copies_of_one_image_by_printed_size_and_copies_replace_them_in_one_undo_step() {
+        let mut app = app();
+        assert_eq!(selection(&app), protocol::Selection::default());
+        let (a, b) = (put(&mut app, [0.0, 0.0, 20.0, 20.0]), put(&mut app, [40.0, 0.0, 20.0, 20.0]));
+        let _bigger = put(&mut app, [0.0, 40.0, 40.0, 40.0]);
+        app.run("select.set", json!({"ids": [a]})).unwrap();
+        assert_eq!(selection(&app), protocol::Selection { image: true, copies: 1, other_sizes: 1 });
+        // A path is not an image; two images are not one.
+        app.run("select.set", json!({"ids": [a, b]})).unwrap();
+        assert_eq!(selection(&app), protocol::Selection::default());
+        app.run("select.set", json!({"ids": [a]})).unwrap();
+        let before = app.session.active().unwrap().doc.clone();
+        let undo = app.session.active().unwrap().history.undo.len();
+        let place = protocol::place_copies(Some("b.png".into()), Some(PNG_B.to_vec()), None, Some(true)).unwrap();
+        let placed = place_file(&mut app, &place).unwrap();
+        assert_eq!(placed.len(), 2, "the selected image and its one same-size copy");
+        let st = app.session.active().unwrap();
+        assert_eq!(st.history.undo.len(), undo + 1, "one undo step");
+        assert_eq!(st.selection.objects.len(), 2, "what was placed is selected");
+        // The bigger copy was left alone, and is now the only image showing A.
+        let mut keys = vec![];
+        st.doc.walk(|n| {
+            if let vectorcraft_doc::NodeKind::Image(im) = &n.kind {
+                keys.push(im.key.clone())
+            }
+        });
+        assert_eq!(keys.len(), 3);
+        app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(app.session.active().unwrap().doc, before);
+        assert!(protocol::place_copies(Some("b.png".into()), Some(PNG_B.to_vec()), Some(vec![0.0, 0.0, 1.0, 1.0]), Some(true)).is_err());
+    }
+
+    /// A 4 × 1 RGBA PNG: clear, soft below and at the default level, opaque.
+    fn soft_png() -> Vec<u8> {
+        let img = image::RgbaImage::from_raw(4, 1, vec![9, 8, 7, 0, 1, 2, 3, 127, 4, 5, 6, 128, 7, 7, 7, 255]).unwrap();
+        let mut out = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+        out
+    }
+
+    #[test]
+    fn solidify_takes_the_selected_image_and_its_copies_in_one_undo_step() {
+        let mut app = app();
+        let png = soft_png();
+        let put = |app: &mut VectorcraftApp, rect: [f64; 4]| {
+            app.run("select.set", json!({"ids": []})).unwrap();
+            place_file(app, &protocol::place(Some("s.png".into()), Some(png.clone()), Some(rect.to_vec())).unwrap()).unwrap()[0]
+        };
+        let (a, b) = (put(&mut app, [0.0, 0.0, 40.0, 10.0]), put(&mut app, [0.0, 20.0, 40.0, 10.0]));
+        let one = protocol::solidify(None, None).unwrap();
+        // Nothing selected, several objects selected: refused.
+        app.run("select.set", json!({"ids": []})).unwrap();
+        assert!(solidify(&mut app, &one).unwrap_err().contains("select one image"));
+        app.run("select.all", json!({})).unwrap();
+        assert!(solidify(&mut app, &one).unwrap_err().contains("select one image"));
+        app.run("select.set", json!({"ids": [a]})).unwrap();
+        let before = app.session.active().unwrap().doc.clone();
+        let undo = app.session.active().unwrap().history.undo.len();
+        let done = solidify(&mut app, &one).unwrap();
+        assert_eq!(done, Solidified { ids: vec![a], form: "alpha".into(), level: 128, soft: 2, clear: 2, opaque: 2 });
+        assert_eq!(app.session.active().unwrap().history.undo.len(), undo + 1);
+        app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(app.session.active().unwrap().doc, before);
+        let all = protocol::solidify(Some(Some(200.0)), Some(Some(true))).unwrap();
+        let done = solidify(&mut app, &all).unwrap();
+        assert_eq!((done.ids, done.clear, done.opaque), (vec![a, b], 3, 1));
+        assert_eq!(app.session.active().unwrap().history.undo.len(), undo + 1, "copies too in one undo step");
+    }
+
+    #[test]
+    fn color_settings_load_profiles_under_their_names_without_editing_the_document() {
+        use vectorcraft_color::cms;
+        let mut app = app();
+        let undo = app.session.active().unwrap().history.undo.len();
+        assert!(!app.session.active().unwrap().is_dirty());
+        let before = cms::active_settings();
+        let rgb = cms::icc_bytes(cms::WIDE_GAMUT_RGB).unwrap().to_vec();
+        let request = protocol::color_settings(
+            Some(Some(vec![(Some(Some("Embed Test RGB".into())), Some(rgb))])),
+            Some(Some("Embed Test RGB".into())),
+            None,
+            Some(Some("perceptual".into())),
+            None,
+        )
+        .unwrap();
+        let done = apply_color_settings(&mut app, &request);
+        let now = cms::active_settings();
+        // Through the bridge's queue, as the parent's message runs: the same, and its answer.
+        let queued = execute(&mut app, Operation::ColorSettings(request.clone()));
+        // A request refused at its second profile changes nothing, not even the working space its
+        // first one would have registered again.
+        let shown = cms::active().rgb_to_srgb([0.2, 0.6, 0.4]);
+        let prophoto = cms::icc_bytes(cms::PROPHOTO_RGB).unwrap().to_vec();
+        let half = protocol::color_settings(
+            Some(Some(vec![(Some(Some("Embed Test RGB".into())), Some(prophoto)), (None, Some(b"junk".to_vec()))])),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let refused = apply_color_settings(&mut app, &half);
+        let still = cms::active().rgb_to_srgb([0.2, 0.6, 0.4]);
+        cms::set_active(&before).unwrap(); // process-wide: put back before asserting
+        assert!(refused.unwrap_err().contains("profiles[1]"));
+        assert_eq!(still, shown, "the working space kept its profile");
+        let done = done.unwrap();
+        let Ok(Reply::Message { kind, value }) = queued else { panic!("no answer") };
+        assert_eq!(
+            (kind, &value["rgb"], &value["loaded"][0], &value["intent"]),
+            ("vectorcraft:colorSettingsApplied", &json!("Embed Test RGB"), &json!("Embed Test RGB"), &json!("perceptual"))
+        );
+        assert!(value["profiles"].as_array().unwrap().iter().any(|p| p == "Embed Test RGB"));
+        assert_eq!(done.loaded, vec!["Embed Test RGB".to_string()]);
+        assert_eq!((now.rgb.as_str(), now.intent), ("Embed Test RGB", cms::Intent::Perceptual));
+        assert_eq!(done.settings["rgb"], "Embed Test RGB");
+        assert!(done.settings["profiles"].as_array().unwrap().iter().any(|p| p["name"] == "Embed Test RGB" && p["kind"] == "rgb"));
+        let st = app.session.active().unwrap();
+        assert!(!st.is_dirty(), "colour settings aren't an edit");
+        assert_eq!(st.history.undo.len(), undo, "no undo step");
+        // A profile that isn't one, or a space that isn't there, is refused and sets nothing.
+        let bad = protocol::color_settings(Some(Some(vec![(None, Some(b"junk".to_vec()))])), None, None, None, Some(Some(false))).unwrap();
+        assert!(apply_color_settings(&mut app, &bad).unwrap_err().contains("profiles[0]"));
+        let missing = protocol::color_settings(None, Some(Some("No Such RGB".into())), None, None, None).unwrap();
+        assert!(apply_color_settings(&mut app, &missing).is_err());
+        assert_eq!(cms::active_settings(), before);
+    }
+
+    #[test]
+    fn one_frame_queue_exports_after_the_preceding_image_mutation() {
+        let mut app = app();
+        let id = put(&mut app, [0., 0., 20., 20.]);
+        app.run("select.set", json!({"ids":[id]})).unwrap();
+        let export = protocol::export(Some("png".into()), None, Some(true), None, Some(true)).unwrap();
+        let queue = vec![Operation::Solidify(protocol::solidify(None, None).unwrap()), Operation::Export(export)];
+        let replies: Vec<_> = queue.into_iter().map(|op| execute(&mut app, op).unwrap()).collect();
+        let Reply::Export { bytes, .. } = &replies[1] else { panic!("missing export") };
+        let decoded = image::load_from_memory(bytes).unwrap().to_rgba8();
+        assert!(decoded.pixels().all(|p| p.0[3] == 0 || p.0[3] == 255));
+        assert_ne!(bytes.as_slice(), PNG_A);
     }
 }

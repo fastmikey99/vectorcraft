@@ -92,3 +92,8 @@ Assets already bundled through Hayro's default features retain their licences:
   non-visual character-mapping data; see licenses/pdf-backend/hayro-cmap/LICENSE.txt.
   Adobe and contributor names do not endorse or promote this product.
 Per-file hashes and sources are recorded in ASSETS.md.
+
+linesweeper 0.5.0 (Joe Neeman), MIT OR Apache-2.0, vendored from
+https://crates.io/crates/linesweeper/0.5.0 in vendor/linesweeper.
+Local change: fallible topology work guard for geometry budgets and cancellation.
+Licence texts: vendor/linesweeper/LICENSE-MIT and LICENSE-APACHE.

@@ -41,6 +41,7 @@
 //!   opens an encrypted file.
 #![forbid(unsafe_code)]
 
+mod devicen;
 mod editing;
 mod encrypt;
 mod export;
@@ -74,9 +75,13 @@ pub use editing::{EDITING_FILE, Editing, LEGACY_EDITING_FILE, editing, editing_w
 pub use encrypt::Encryption;
 pub use export::{export, export_with_report, page_areas};
 pub use file_info::{FileInfo, file_info};
-pub use import::{OFF_ARTBOARD_NOTE, PAST_PAGE_NOTE, import, import_with_report};
+pub use import::{
+    OFF_ARTBOARD_NOTE, OUTLINED_TEXT_NOTE, PAST_PAGE_NOTE, UNMATCHED_GLYPHS_NOTE, UNNAMED_CHARACTERS_NOTE, holds_outlines, import,
+    import_with_report, is_glyph_outlines, is_outlines_note,
+};
 pub use pages::{PageInfo, PdfInfo, has_illustrator_data, illustrator_data, info, is_postscript};
 pub use post::{THUMBNAIL_SIZE, Thumbnail};
+pub use preserve::{preparation_output, set_preparation_boxes};
 pub use presets::*;
 pub use print::*;
 pub use settings::*;
@@ -93,6 +98,8 @@ pub struct PdfOptions {
     pub title: Option<String>,
     /// Creation date as Unix seconds (UTC); `None` = now (native) / omitted (wasm). PDF/A needs a date.
     pub created: Option<i64>,
+    /// Modification date as Unix seconds (UTC); `None` = the creation date.
+    pub modified: Option<i64>,
     /// The native document (`.vectorcraft` bytes) Preserve Editing embeds.
     pub native: Option<Vec<u8>>,
     /// The pages drawn small, in page order: what Embed Page Thumbnails embeds (the writer
@@ -130,6 +137,12 @@ pub struct ImportOptions {
     /// The file is an editor's own document (`.ai`): RGB in its `ICCBased` spaces keeps its numbers
     /// (see `Colors::uncalibrated_rgb`). Off for PDFs, whose profiles stand.
     pub uncalibrated_rgb: bool,
+    /// The RGB working space when it isn't sRGB (`cms::working_rgb`; `None` = sRGB): RGB colours
+    /// in a profile are converted into it (with its intent; those already in it keep their
+    /// numbers), and so is the sRGB the reader gives for other spaces. Without it, the numbers are
+    /// sRGB, and a working space other than sRGB read them as its own: an sRGB file came out
+    /// more saturated in Adobe RGB, and an Adobe RGB file more so each time it was re-read.
+    pub working_rgb: Option<vectorcraft_color::cms::WorkingRgb>,
     /// Refuse artwork exceeding safe nesting limits instead of discarding clips or masks.
     /// Print-production callers must enable this before offering an editable separation.
     pub reject_depth_loss: bool,
@@ -146,6 +159,7 @@ impl Default for ImportOptions {
             text_as: TextAs::default(),
             layers: true,
             uncalibrated_rgb: false,
+            working_rgb: None,
             reject_depth_loss: false,
         }
     }
@@ -210,6 +224,9 @@ pub enum PdfError {
     Unsupported(String),
     #[error("PDF writer error: {0}")]
     Write(String),
+    /// The caller asked for the export to stop ([`vectorcraft_doc::cancel`]).
+    #[error("cancelled")]
+    Cancelled,
     #[error("cannot read PDF: {0}")]
     Parse(String),
     #[error("the PDF has no pages")]
@@ -252,6 +269,8 @@ mod tests_cmykimages;
 mod tests_compression;
 #[cfg(test)]
 mod tests_dashalign;
+#[cfg(test)]
+mod tests_devicen_images;
 #[cfg(test)]
 mod tests_editing;
 #[cfg(test)]
@@ -310,3 +329,27 @@ mod tests_reader_streaming;
 
 #[cfg(test)]
 mod tests_reader_compat;
+
+mod sep_marks;
+
+/// Production diagnostic classification. Unknown diagnostics fail closed: a new importer
+/// warning must be reviewed before a separation builder can publish its result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagnosticClass {
+    /// The public printed page is unchanged (editing structure may differ).
+    PrintPreserving,
+    /// Printed content is lost, approximated, or its fidelity is not established.
+    FidelityLoss,
+}
+
+pub fn classify_diagnostic(message: &str) -> DiagnosticClass {
+    if crate::import::is_outlines_note(message)
+        || message == PAST_PAGE_NOTE
+        || message == OFF_ARTBOARD_NOTE
+        || message == crate::preserve::IRRELEVANT_BLEND_SPACE
+    {
+        DiagnosticClass::PrintPreserving
+    } else {
+        DiagnosticClass::FidelityLoss
+    }
+}

@@ -236,6 +236,31 @@ pub fn profiles() -> Vec<ProfileInfo> {
 /// Register an ICC profile from bytes (named by its description unless `name` is given).
 /// Re-registering a name replaces the old profile.
 pub fn register_icc(bytes: &[u8], name: Option<String>) -> Result<ProfileInfo, CmsError> {
+    let (p, info) = registrable(bytes, name)?;
+    let mut u = USER.write().unwrap_or_else(|e| e.into_inner());
+    u.retain(|x| x.name != info.name);
+    u.push(Arc::new(p));
+    drop(u);
+    clear_proof_cache();
+    PROFILES_GENERATION.fetch_add(1, Ordering::Relaxed);
+    // The active settings hold the profiles they were built with: a working space registered
+    // again under its name takes the new one.
+    let st = active_settings();
+    if canonical_name(&st.rgb) == info.name || canonical_name(&st.cmyk) == info.name {
+        // The names are the same and registered, so this can't fail; if it did, the settings
+        // would keep the profile they had.
+        let _ = set_active(&st);
+    }
+    Ok(info)
+}
+
+/// What [`register_icc`] would register from `bytes` (named `name`), without registering it: the
+/// profile it refuses is refused here.
+pub fn check_icc(bytes: &[u8], name: Option<String>) -> Result<ProfileInfo, CmsError> {
+    registrable(bytes, name).map(|(_, info)| info)
+}
+
+fn registrable(bytes: &[u8], name: Option<String>) -> Result<(IccProfile, ProfileInfo), CmsError> {
     let p = IccProfile::from_bytes(name, bytes)?;
     if p.kind == ProfileKind::Gray {
         return Err(CmsError::Unsupported("grayscale profiles can't be working spaces yet".into()));
@@ -247,19 +272,37 @@ pub fn register_icc(bytes: &[u8], name: Option<String>) -> Result<ProfileInfo, C
     if !p.usable() {
         return Err(CmsError::Unsupported(format!("{}: no usable transform to/from sRGB", p.name)));
     }
+    // A working space registered again takes the new profile at once: it must be of its kind.
+    let st = active_settings();
+    let slot = [(&st.rgb, ProfileKind::Rgb, "RGB"), (&st.cmyk, ProfileKind::Cmyk, "CMYK")].into_iter().find(|(n, ..)| canonical_name(n) == p.name);
+    if let Some((_, kind, label)) = slot
+        && kind != p.kind
+    {
+        return Err(CmsError::Unsupported(format!("{} is the {label} working space: a profile of another kind can't take its name", p.name)));
+    }
     let info = ProfileInfo { name: p.name.clone(), kind: p.kind, builtin: false };
-    let mut u = USER.write().unwrap_or_else(|e| e.into_inner());
-    u.retain(|x| x.name != info.name);
-    u.push(Arc::new(p));
-    drop(u);
-    clear_proof_cache();
-    PROFILES_GENERATION.fetch_add(1, Ordering::Relaxed);
-    Ok(info)
+    Ok((p, info))
 }
 
-/// A number that changes whenever [`register_icc`] registers a profile: conversions through a
-/// profile looked up by name, such as those of a [`ProofTarget::Cmyk`] proof, give the same colors
-/// as long as the number stays the same.
+/// Forget a profile [`register_icc`] registered (by its name); `false` when there is none of that
+/// name (the built-in profiles can't be removed). Settings that name it no longer resolve, so a
+/// caller checks [`active_settings`] first.
+pub fn unregister_icc(name: &str) -> bool {
+    let mut u = USER.write().unwrap_or_else(|e| e.into_inner());
+    let before = u.len();
+    u.retain(|x| x.name != name);
+    let removed = u.len() != before;
+    drop(u);
+    if removed {
+        clear_proof_cache();
+        PROFILES_GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+    removed
+}
+
+/// A number that changes whenever [`register_icc`] registers a profile or [`unregister_icc`]
+/// removes one: conversions through a profile looked up by name, such as those of a
+/// [`ProofTarget::Cmyk`] proof, give the same colors as long as the number stays the same.
 pub fn profiles_generation() -> u64 {
     PROFILES_GENERATION.load(Ordering::Relaxed)
 }
@@ -289,6 +332,116 @@ pub fn icc_bytes(name: &str) -> Result<Arc<[u8]>, CmsError> {
     .into();
     CACHE.lock().unwrap_or_else(|e| e.into_inner()).push((name.to_string(), bytes.clone()));
     Ok(bytes)
+}
+
+/// The RGB working space as an import converts colours into it: its ICC profile, with the colour
+/// settings' intent and black-point compensation ([`working_rgb`]; compensation as
+/// [`IccProfile::to_rgb_of`] makes it, which leaves RGB sources alone).
+#[derive(Clone, Debug)]
+pub struct WorkingRgb {
+    pub icc: Arc<[u8]>,
+    pub intent: Intent,
+    pub bpc: bool,
+}
+
+/// The RGB working space, unless it is sRGB: what a PDF import converts `ICCBased` RGB colours
+/// (and the sRGB colours the interpreter gives for other spaces) into, so they land in the working
+/// space instead of keeping sRGB numbers there; colours already in it keep their numbers
+/// ([`RgbTransform`]). `None` for sRGB (the import's own conversion target) or a working space
+/// that can't be written as a profile.
+pub fn working_rgb() -> Option<WorkingRgb> {
+    let st = active_settings();
+    if canonical_name(&st.rgb) == SRGB {
+        return None;
+    }
+    Some(WorkingRgb { icc: icc_bytes(&st.rgb).ok()?, intent: st.intent, bpc: st.bpc })
+}
+
+/// Whether RGB profiles `a` and `b` (ICC files) describe the same colours with rendering intent
+/// `intent` (the one the conversion they stand in for would use: a profile's tables can differ by
+/// intent): the same bytes, or their colours come out the same (within half an 8-bit step) in a
+/// wide reference space (ProPhoto RGB), relative colorimetric and with `intent`, on a grid through
+/// the whole cube and at every 8-bit value along each channel and the
+/// greys (where tone curves could part between the grid's points). Anything that isn't a readable
+/// RGB profile is not the same.
+pub fn same_rgb_profile(a: &[u8], b: &[u8], intent: Intent) -> bool {
+    if a == b {
+        return true;
+    }
+    let (Ok(pa), Ok(pb)) = (IccProfile::from_bytes(None, a), IccProfile::from_bytes(None, b)) else { return false };
+    same_colours(&pa, &pb, intent, false)
+}
+
+/// [`same_rgb_profile`] for parsed profiles: as sources (their colours read through each). With
+/// `as_destination`, colours converted into each (from the reference space) must come out with
+/// the same numbers too: a profile's tables into it can differ from its tables out of it.
+fn same_colours(pa: &IccProfile, pb: &IccProfile, intent: Intent, as_destination: bool) -> bool {
+    if pa.kind != ProfileKind::Rgb || pb.kind != ProfileKind::Rgb {
+        return false;
+    }
+    let Some(reference) = icc::builtin_rgb(PROPHOTO_RGB) else { return false };
+    let near = |x: [f32; 3], y: [f32; 3]| x.iter().zip(y).all(|(x, y)| (x - y).abs() <= 0.5 / 255.0);
+    // Relative colorimetric, and the intent asked for (a profile's tables can differ by intent).
+    let intents = if intent == Intent::RelativeColorimetric { vec![intent] } else { vec![Intent::RelativeColorimetric, intent] };
+    let same = |rgb: [f32; 3]| {
+        intents.iter().all(|&i| {
+            let at = |p: &IccProfile| p.to_rgb_of(&reference, &rgb, i, false);
+            let into = |p: &IccProfile| reference.to_rgb_of(p, &rgb, i, false);
+            matches!((at(pa), at(pb)), (Some(x), Some(y)) if near(x, y))
+                && (!as_destination || matches!((into(pa), into(pb)), (Some(x), Some(y)) if near(x, y)))
+        })
+    };
+    const STEPS: [f32; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
+    let cube = STEPS.iter().all(|&r| STEPS.iter().all(|&g| STEPS.iter().all(|&b| same([r, g, b]))));
+    // Each channel alone and the greys, at every 8-bit value.
+    cube && (0..=255).map(|i| i as f32 / 255.0).all(|v| [[v, 0.0, 0.0], [0.0, v, 0.0], [0.0, 0.0, v], [v; 3]].into_iter().all(same))
+}
+
+/// RGB colours of one ICC profile as numbers of another (the RGB working space, [`WorkingRgb`]):
+/// converted directly with its intent ([`IccProfile::to_rgb_of`], whose black-point compensation
+/// is for CMYK sources: RGB matrix profiles share black), not through sRGB, so colours outside
+/// sRGB keep their place. Colours of a profile with the destination's colours
+/// ([`same_rgb_profile`]) keep their numbers exactly.
+pub struct RgbTransform {
+    src: IccProfile,
+    dest: IccProfile,
+    intent: Intent,
+    bpc: bool,
+    same: bool,
+}
+
+impl std::fmt::Debug for RgbTransform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RgbTransform").field("src", &self.src.name).field("dest", &self.dest.name).field("same", &self.same).finish()
+    }
+}
+
+impl RgbTransform {
+    /// RGB profile `src` (an ICC file) into `dest`'s numbers; `None` when either isn't a readable
+    /// RGB profile.
+    pub fn new(src: &[u8], dest: &WorkingRgb) -> Option<Self> {
+        let s = IccProfile::from_bytes(Some("source".into()), src).ok()?;
+        let d = IccProfile::from_bytes(Some("destination".into()), &dest.icc).ok()?;
+        if s.kind != ProfileKind::Rgb || d.kind != ProfileKind::Rgb {
+            return None;
+        }
+        // Kept numbers stand for a conversion out of `src` and into the destination.
+        let same = src == &dest.icc[..] || same_colours(&s, &d, dest.intent, true);
+        Some(Self { src: s, dest: d, intent: dest.intent, bpc: dest.bpc, same })
+    }
+
+    /// Whether colours keep their numbers (the two profiles have the same colours).
+    pub fn keeps_numbers(&self) -> bool {
+        self.same
+    }
+
+    /// RGB `rgb` (0..1) in the destination's numbers; `None` when the conversion can't be made.
+    pub fn apply(&self, rgb: [f32; 3]) -> Option<[f32; 3]> {
+        if self.same {
+            return Some(rgb);
+        }
+        self.src.to_rgb_of(&self.dest, &rgb.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }), self.intent, self.bpc)
+    }
 }
 
 /// Load a `.icc`/`.icm` file from disk (native only).
@@ -346,10 +499,10 @@ impl Cms {
         }
     }
 
-    fn cmyk_to_srgb_in(space: &CmykSpace, cmyk: [f32; 4], absolute: bool) -> [f32; 3] {
+    fn cmyk_to_srgb_in(space: &CmykSpace, cmyk: [f32; 4], absolute: bool, bpc: bool) -> [f32; 3] {
         let cmyk = cmyk.map(|v| v.clamp(0.0, 1.0));
         match space {
-            CmykSpace::Generic(g) => g.to_srgb(cmyk, absolute),
+            CmykSpace::Generic(g) => g.to_srgb(cmyk, absolute, bpc),
             CmykSpace::Device => naive_cmyk_to_rgb(cmyk),
             CmykSpace::Icc(p) => {
                 let i = if absolute { Intent::AbsoluteColorimetric } else { Intent::RelativeColorimetric };
@@ -376,7 +529,7 @@ impl Cms {
         {
             return v;
         }
-        Self::cmyk_to_srgb_in(&self.cmyk, cmyk, absolute)
+        Self::cmyk_to_srgb_in(&self.cmyk, cmyk, absolute, self.settings.bpc)
     }
     /// CMYK in the working space → working RGB with `intent`. An ICC CMYK profile converts
     /// directly into the RGB profile: not through display sRGB, which would clip colours a wider
@@ -436,6 +589,15 @@ impl Cms {
             _ => lab::srgb_to_lab(self.cmyk_to_srgb(cmyk, false)),
         }
     }
+    /// Lab of working-space CMYK as it displays: [`Self::cmyk_to_lab`] plus, for the built-in
+    /// Generic CMYK, the black-point compensation of [`Self::cmyk_to_srgb`] (its press black shows
+    /// as black). Unclipped, for interpolating tables.
+    pub fn cmyk_display_lab(&self, cmyk: [f32; 4]) -> Lab {
+        match &self.cmyk {
+            CmykSpace::Generic(g) => lab::xyz_to_lab(g.display_xyz(cmyk.map(|v| v.clamp(0.0, 1.0)), false, self.settings.bpc)),
+            _ => self.cmyk_to_lab(cmyk),
+        }
+    }
     /// Lab → working CMYK with `intent`.
     pub fn lab_to_cmyk(&self, l: Lab, intent: Intent) -> [f32; 4] {
         match &self.cmyk {
@@ -457,7 +619,7 @@ impl Cms {
     /// CIE Lab (D50) of any colour.
     pub fn lab(&self, c: &Color) -> Lab {
         match *c {
-            Color::Cmyk { c, m, y, k } => self.cmyk_to_lab([c, m, y, k]),
+            Color::Cmyk { c, m, y, k } => self.cmyk_display_lab([c, m, y, k]),
             Color::Lab { l, a, b } => Lab::new(l, a, b),
             _ => lab::srgb_to_lab(self.display_rgb(c)),
         }
@@ -518,7 +680,7 @@ impl Cms {
             Color::Rgb { .. } | Color::Lab { .. } => {
                 let src = self.lab(c);
                 match &self.cmyk {
-                    CmykSpace::Generic(g) => g.gamut_error(src),
+                    CmykSpace::Generic(g) => g.gamut_error(src, self.settings.bpc),
                     CmykSpace::Device => 0.0,
                     CmykSpace::Icc(_) => {
                         let back = self.cmyk_to_srgb(self.to_cmyk(c, Intent::RelativeColorimetric), false);
@@ -551,7 +713,7 @@ impl Cms {
             ProofTarget::Cmyk(name) => match cmyk_space(name) {
                 Ok(sp) => {
                     let cmyk = Self::srgb_to_cmyk_in(&sp, srgb, proof.intent, self.settings.bpc);
-                    Self::cmyk_to_srgb_in(&sp, cmyk, proof.simulate_paper)
+                    Self::cmyk_to_srgb_in(&sp, cmyk, proof.simulate_paper, self.settings.bpc)
                 }
                 Err(_) => srgb,
             },
@@ -562,7 +724,7 @@ impl Cms {
     pub fn proof_cmyk_to_srgb(&self, cmyk: [f32; 4], proof: &ProofSetup) -> [f32; 3] {
         match &proof.target {
             ProofTarget::Cmyk(name) => match cmyk_space(name) {
-                Ok(sp) => Self::cmyk_to_srgb_in(&sp, cmyk, proof.simulate_paper),
+                Ok(sp) => Self::cmyk_to_srgb_in(&sp, cmyk, proof.simulate_paper, self.settings.bpc),
                 Err(_) => self.cmyk_to_srgb(cmyk, proof.simulate_paper),
             },
             _ => self.cmyk_to_srgb(cmyk, proof.simulate_paper),
@@ -788,32 +950,48 @@ pub const PROCESS_PLATES: [&str; 4] = ["Cyan", "Magenta", "Yellow", "Black"];
 
 const LUT_N: usize = 17;
 
-/// A 17³ RGB → RGB lookup table with trilinear interpolation.
+/// A 17³ RGB → RGB lookup table with trilinear interpolation (or another size,
+/// [`ProofLut::build_sized`]).
 pub struct ProofLut {
+    n: usize,
     data: Vec<[f32; 3]>,
 }
 
+/// The size of the tables [`ProofLut::fine`] builds: images converted on export, whose samples
+/// the 17³ table moved by up to 1 ΔE2000 near black (sRGB into Adobe RGB).
+pub const FINE_LUT_N: usize = 65;
+
 impl ProofLut {
     pub fn build(f: impl Fn([f32; 3]) -> [f32; 3]) -> Self {
-        let n = LUT_N;
+        Self::build_sized(LUT_N, f)
+    }
+
+    /// A [`FINE_LUT_N`]³ table: for converting images, where every sample counts.
+    pub fn fine(f: impl Fn([f32; 3]) -> [f32; 3]) -> Self {
+        Self::build_sized(FINE_LUT_N, f)
+    }
+
+    /// An `n`³ table (`n` at least 2).
+    pub fn build_sized(n: usize, f: impl Fn([f32; 3]) -> [f32; 3]) -> Self {
+        let n = n.max(2);
         let mut data = Vec::with_capacity(n * n * n);
+        let s = (n - 1) as f32;
         for r in 0..n {
             for g in 0..n {
                 for b in 0..n {
-                    let s = (n - 1) as f32;
                     data.push(f([r as f32 / s, g as f32 / s, b as f32 / s]));
                 }
             }
         }
-        Self { data }
+        Self { n, data }
     }
     pub fn apply(&self, rgb: [f32; 3]) -> [f32; 3] {
-        let n = LUT_N;
+        let n = self.n;
         let s = (n - 1) as f32;
-        let p = rgb.map(|v| v.clamp(0.0, 1.0) * s);
+        let p = rgb.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) * s } else { 0.0 });
         let i = p.map(|v| (v.floor() as usize).min(n - 2));
         let t = [p[0] - i[0] as f32, p[1] - i[1] as f32, p[2] - i[2] as f32];
-        let at = |r: usize, g: usize, b: usize| self.data[(r * n + g) * n + b];
+        let at = |r: usize, g: usize, b: usize| self.data.get((r * n + g) * n + b).copied().unwrap_or_default();
         let mut out = [0.0f32; 3];
         for (dr, wr) in [(0, 1.0 - t[0]), (1, t[0])] {
             for (dg, wg) in [(0, 1.0 - t[1]), (1, t[1])] {

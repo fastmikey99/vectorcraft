@@ -21,9 +21,9 @@ use vectorcraft_doc::{
 };
 use vectorcraft_geom::{FillRule, PathData};
 
-use crate::import_color::{Colors, Native};
+use crate::import_color::Colors;
 use crate::import_mask::{MaskSpec, contains, is_rectangle, luminance, mask_spec, white_cover};
-use crate::import_scan::{FontNames, MAX_NESTING, Ocgs, Scan, TextOverprint, Walked, all_on, hides_forms, scan_page, tag_key};
+use crate::import_scan::{FontNames, MAX_NESTING, Ocgs, Rgb, Scan, TextOverprint, Walked, all_on, hides_forms, scan_page_rgb, tag_key};
 use crate::import_shading::{clipped, extend_clip, fold_stop_opacity, gradient_shape, mesh_shading, shading_gradient};
 use crate::import_text::{Families, LineFacts, Look, Placement, TextLine, Upright};
 use crate::{CropTo, ImportOptions, ImportReport, PdfError, TextAs};
@@ -124,6 +124,9 @@ fn group_layer(
     let ocg = ocgs.list.get(g)?;
     let mut l = Node::layer(b.id(), &ocg.name, color);
     (l.visible, l.locked) = (ocg.on, ocg.locked);
+    if ocg.processing_white {
+        l.extras_mut().processing_white = true;
+    }
     let mut children = vec![];
     for &c in nesting.get(&g).into_iter().flatten() {
         if c == g {
@@ -146,6 +149,32 @@ pub const OFF_ARTBOARD_NOTE: &str =
 
 /// Warning: art reaching past the page box was clipped to it.
 pub const PAST_PAGE_NOTE: &str = "art reaching past the page was clipped to it, as PDF viewers show it";
+
+/// Warning: glyphs were kept as outlines rather than read as type.
+pub const OUTLINED_TEXT_NOTE: &str = "text was converted to outlines";
+/// Warning: glyphs that differ from the installed font of their name were kept as outlines.
+pub const UNMATCHED_GLYPHS_NOTE: &str = "text whose glyphs differ from the installed font of the same name was kept as outlines";
+/// The end of the warning that glyphs whose characters the file doesn't name were kept as
+/// outlines, after "text in" and the font's name.
+pub const UNNAMED_CHARACTERS_NOTE: &str = "whose characters the file doesn't name (U+FFFD) was kept as outlines";
+
+/// Is `note` one of the warnings that glyphs were kept as outlines ([`OUTLINED_TEXT_NOTE`],
+/// [`UNMATCHED_GLYPHS_NOTE`], [`UNNAMED_CHARACTERS_NOTE`])?
+pub fn is_outlines_note(note: &str) -> bool {
+    note == OUTLINED_TEXT_NOTE || note == UNMATCHED_GLYPHS_NOTE || note.starts_with("text in ") && note.ends_with(UNNAMED_CHARACTERS_NOTE)
+}
+
+/// Is `n` glyphs kept as outlines (a path the import names `<Text Outlines>`)?
+pub fn is_glyph_outlines(n: &Node) -> bool {
+    matches!(n.kind, NodeKind::Path { .. }) && n.name.as_deref() == Some(TEXT_OUTLINES)
+}
+
+/// Does `doc` hold glyphs kept as outlines ([`is_glyph_outlines`])?
+pub fn holds_outlines(doc: &Document) -> bool {
+    let mut any = false;
+    doc.walk(|n| any |= is_glyph_outlines(n));
+    any
+}
 
 /// Import a PDF, returning the document plus warnings about content that was approximated or skipped.
 pub fn import_with_report(bytes: &[u8], opts: &ImportOptions) -> Result<ImportReport, PdfError> {
@@ -175,7 +204,7 @@ fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_p
     let mut hidden_form = false;
     if hide {
         for page in picked.iter().filter_map(|&n| original.pages().get(n)) {
-            hidden_form |= hides_forms(page, &mut ocgs, original.decode_limits().max_decoded_stream())?;
+            hidden_form |= hides_forms(page, &mut ocgs, original.decode_limits().max_decoded_content())?;
             if hidden_form {
                 break;
             }
@@ -231,6 +260,7 @@ fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_p
     b.taken = taken;
     b.warnings = notes;
     b.colors.uncalibrated_rgb = opts.uncalibrated_rgb && picked.iter().filter_map(|&n| pages.get(n)).any(crate::pages::has_private_data);
+    b.colors.working_rgb = opts.working_rgb.clone();
     let cache = InterpreterCache::new();
     let mut x = 0.0;
     // Where the next page's art may begin (a `.ai` page's art reaches past its artboard).
@@ -260,14 +290,23 @@ fn read_with_reader_options(bytes: &[u8], opts: &ImportOptions, reader: &craft_p
         b.page = ab;
         // The first id of this page's art.
         let first_id = b.next;
-        let mut scan = scan_page(page, &mut ocgs, all_on, &mut b.fonts, pdf.decode_limits().max_decoded_stream())?;
+        let rgb_walk = b.colors.converts_rgb();
+        let mut scan = scan_page_rgb(page, &mut ocgs, all_on, &mut b.fonts, pdf.decode_limits().max_decoded_content(), rgb_walk)?;
         // The walk's ink names pick between spaces of inks that look the same to the interpreter. A
         // page keeps them only when it uses such an ink and the interpreter draws as many paths
         // there as the walk counts.
         let tied = scan.inks.iter().any(|n| b.colors.tied(n));
-        if !(tied && drawn_paths(page, Context::new(xf, ab, &cache, pdf.xref(), settings.clone())) == Some(scan.paints.len())) {
+        // Likewise the RGB spaces it found pick between profiles the interpreter's colours don't
+        // name, where the file's profiles leave it open (Colors::rgb_space).
+        let rgb = b.colors.rgb_needs_walk(&scan);
+        let counted = (tied || rgb) && drawn_paths(page, Context::new(xf, ab, &cache, pdf.xref(), settings.clone())) == Some(scan.paints.len());
+        if !(tied && counted) {
             scan.inks.clear();
         }
+        if !(rgb && counted) {
+            scan.forget_rgb();
+        }
+        b.colors.begin_page(scan.device_rgb);
         if route {
             let mut seen = HashSet::new();
             let marked: Vec<usize> = scan.tags.iter().filter_map(|(_, g)| g.map(|g| top_group(g, &ocgs))).filter(|g| seen.insert(*g)).collect();
@@ -860,6 +899,7 @@ struct Builder<'p> {
     unsure: bool,
     /// The marked-content sequences open: the group each marks.
     marked: Vec<Option<usize>>,
+    sep_marks: Vec<Option<vectorcraft_doc::SepMark>>,
     /// A transparency group was just pushed: a form's (whose flags come next) or an image's.
     pending: bool,
     nested: u32,
@@ -929,8 +969,17 @@ fn mean_scale(a: Affine) -> f64 {
     a.determinant().abs().sqrt()
 }
 
+/// Width a PDF line width of 0 imports as, points: a print hairline. In PDF `0 w` is the thinnest
+/// line the device can draw (ISO 32000-1, 8.4.3.2), not no line.
+const HAIRLINE: f64 = 0.25;
+
+/// Document width of the stroke `p` drawn at `scale`: `0 w` becomes a [`HAIRLINE`].
+fn line_width(p: &StrokeProps, scale: f64) -> f64 {
+    if p.line_width == 0.0 { HAIRLINE } else { p.line_width as f64 * scale }
+}
+
 fn stroke_layer(paint: Paint, opacity: f32, p: &StrokeProps, scale: f64) -> StrokeLayer {
-    let mut st = StrokeLayer::new(paint, p.line_width as f64 * scale);
+    let mut st = StrokeLayer::new(paint, line_width(p, scale));
     st.opacity = opacity;
     st.cap = match p.line_cap {
         kurbo::Cap::Butt => LineCap::Butt,
@@ -1007,6 +1056,7 @@ impl<'p> Builder<'p> {
             route,
             unsure: false,
             marked: vec![],
+            sep_marks: vec![],
             pending: false,
             nested: 0,
             white_images: false,
@@ -1053,6 +1103,7 @@ impl<'p> Builder<'p> {
         self.mask = None;
         self.masked.clear();
         self.marked.clear();
+        self.sep_marks.clear();
         self.pending = false;
         (self.scan, self.tag_at, self.group_at, self.aligned, self.paint_at) = (scan, 0, 0, true, 0);
     }
@@ -1132,7 +1183,12 @@ impl<'p> Builder<'p> {
 
     /// Add `n` to the open frame; `group`: the optional content group it was drawn in, if it
     /// knows one (else the current one).
-    fn emit(&mut self, n: Arc<Node>, group: Option<usize>) {
+    fn emit(&mut self, mut n: Arc<Node>, group: Option<usize>) {
+        if n.extras().sep_mark.is_none()
+            && let Some(mark) = self.sep_marks.iter().rev().find_map(|m| m.as_ref())
+        {
+            Arc::make_mut(&mut n).extras_mut().sep_mark = Some(mark.clone());
+        }
         let root = self.stack.len() == 1;
         let current = self.current_group();
         let Some(f) = self.stack.last_mut() else { return };
@@ -1375,14 +1431,18 @@ impl<'p> Builder<'p> {
     fn paint(&mut self, p: &craft_pdf::interpret::Paint<'_>, stroke: bool, walked: Option<Walked>) -> (Paint, f32) {
         let pattern = matches!(p, craft_pdf::interpret::Paint::Pattern(_));
         let inks = walked.and_then(|w| self.scan.ink(w, stroke, pattern));
+        let rgb = walked.map_or(Rgb::Nested, |w| self.scan.rgb(w, stroke, pattern));
         match p {
             craft_pdf::interpret::Paint::Color(c) => {
                 let [r, g, b, a] = c.to_rgba().components();
-                let paint = self.colors.solid(c, inks).map_or_else(|| Paint::solid(Color::rgb(round3(r), round3(g), round3(b))), Native::paint);
+                let paint = match self.colors.solid(c, inks, rgb) {
+                    Some(n) => n.paint(),
+                    None => Paint::solid(self.colors.srgb_in_working([round3(r), round3(g), round3(b)])),
+                };
                 (paint, a)
             }
             craft_pdf::interpret::Paint::Pattern(pat) => match pat.as_ref() {
-                Pattern::Shading(sp) => match shading_gradient(sp, &mut self.colors, inks) {
+                Pattern::Shading(sp) => match shading_gradient(sp, &mut self.colors, inks, rgb) {
                     Some((g, _)) => (Paint::Gradient(Box::new(g)), sp.opacity),
                     None => {
                         self.warn("function-based shadings (and very large meshes) are imported as a flat colour");
@@ -1659,7 +1719,7 @@ impl<'p> Builder<'p> {
             None => {
                 if o.as_unicode().is_some_and(|u| replacement(&u)) {
                     let name = self.font_name(key, o).family;
-                    self.warn(&format!("text in {name} whose characters the file doesn't name (U+FFFD) was kept as outlines"));
+                    self.warn(&format!("text in {name} {UNNAMED_CHARACTERS_NOTE}"));
                 }
                 return false;
             }
@@ -1693,7 +1753,7 @@ impl<'p> Builder<'p> {
                 }
             };
             let Some(f) = decided else {
-                self.warn("text whose glyphs differ from the installed font of the same name was kept as outlines");
+                self.warn(UNMATCHED_GLYPHS_NOTE);
                 return false;
             };
             info = FontInfo { family: f.family.clone(), style: f.style.clone(), face: Some(f) };
@@ -1711,7 +1771,7 @@ impl<'p> Builder<'p> {
             None => named(&info.face),
         };
         let (paint, opacity) = self.paint(paint, stroke.is_some(), self.walked(true));
-        let stroke = stroke.map(|p| (paint.clone(), p.line_width as f64 * scale));
+        let stroke = stroke.map(|p| (paint.clone(), line_width(p, scale)));
         let look = Look {
             font: key,
             family: info.family,
@@ -1819,7 +1879,12 @@ impl<'a> Device<'a> for Builder<'_> {
         };
         // Patch and triangle meshes are gradient meshes.
         if let (PathDrawMode::Fill(_), Some(sp)) = (draw_mode, shading)
-            && let Some(meshes) = mesh_shading(sp, &mut self.colors, walked.and_then(|w| self.scan.ink(w, false, true)))
+            && let Some(meshes) = mesh_shading(
+                sp,
+                &mut self.colors,
+                walked.and_then(|w| self.scan.ink(w, false, true)),
+                walked.map_or(Rgb::Nested, |w| self.scan.rgb(w, false, true)),
+            )
         {
             self.draw_meshes(meshes, &bp, sp.opacity);
             return;
@@ -1829,7 +1894,7 @@ impl<'a> Device<'a> for Builder<'_> {
         let (paint, opacity) = self.paint(paint, stroke, walked);
         // A gradient that doesn't extend past its ends paints only between them.
         let width = match draw_mode {
-            PathDrawMode::Stroke(p) => p.line_width as f64 * mean_scale(transform),
+            PathDrawMode::Stroke(p) => line_width(p, mean_scale(transform)),
             PathDrawMode::Fill(_) => 0.0,
         };
         let band = shading.and_then(|sp| extend_clip(sp, bp.bounding_box().inflate(width, width)));
@@ -1964,7 +2029,7 @@ impl<'a> Device<'a> for Builder<'_> {
                 if let Some(r) = &mut self.glyphs {
                     r.path.extend(bp.iter());
                 }
-                self.warn("text was converted to outlines");
+                self.warn(OUTLINED_TEXT_NOTE);
             }
             Glyph::Type3(t3) => {
                 if self.nested >= MAX_NESTED {
@@ -1994,7 +2059,7 @@ impl<'a> Device<'a> for Builder<'_> {
                 let cmyk = if known || white {
                     None
                 } else {
-                    crate::import_image::cmyk(st, w, h).unwrap_or_else(|why| {
+                    crate::import_image::cmyk(st, w, h, &mut self.colors).unwrap_or_else(|why| {
                         self.warn(why);
                         None
                     })
@@ -2082,6 +2147,12 @@ impl<'a> Device<'a> for Builder<'_> {
         if self.nested > 0 {
             return;
         }
+        let sep = crate::sep_marks::parse(tag);
+        if sep.is_some() {
+            self.flush();
+            self.last_fill = None;
+        }
+        self.sep_marks.push(sep);
         let at = self.tag_at;
         self.tag_at += 1;
         let group = match self.scan.tags.get(at) {
@@ -2115,9 +2186,12 @@ impl<'a> Device<'a> for Builder<'_> {
             return;
         }
         // The runs gathered within a layer's sequence are its art: finish them before it ends.
-        if self.marked.last().copied().flatten().is_some() {
+        if self.marked.last().copied().flatten().is_some() || self.sep_marks.last().is_some_and(Option::is_some) {
             self.flush();
         }
         self.marked.pop();
+        if self.sep_marks.pop().flatten().is_some() {
+            self.last_fill = None;
+        }
     }
 }

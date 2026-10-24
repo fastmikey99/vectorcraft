@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use vectorcraft_color::cms::{self, Cms, CmykLut, PROCESS_PLATES, ProofLut, ProofSetup};
-use vectorcraft_doc::ImageBlob;
+use vectorcraft_doc::{Document, ImageBlob};
 use vello_cpu::Pixmap;
 
 use crate::images::{self, ImageKey};
@@ -53,30 +53,71 @@ fn tables(proof: &ProofSetup) -> Arc<Tables> {
 }
 
 /// Preview pixels share the ordinary bounded image store, including mipmaps.
-/// Adjusted images use their adjusted RGB; unadjusted CMYK uses the original inks.
-pub(crate) fn image(key: &ImageKey, pm: &Arc<Pixmap>, blob: Option<&ImageBlob>, proof: &ProofSetup, touch: bool) -> (ImageKey, Arc<Pixmap>) {
+/// Adjusted images use their adjusted RGB; unadjusted CMYK uses the original inks, and its spot
+/// channels print on their own plates (in their swatches' colours in `doc` with several plates).
+pub(crate) fn image(
+    doc: &Document,
+    key: &ImageKey,
+    pm: &Arc<Pixmap>,
+    blob: Option<&ImageBlob>,
+    proof: &ProofSetup,
+    touch: bool,
+) -> Option<(ImageKey, Arc<Pixmap>)> {
     let t = tables(proof);
     let want = ImageKey { separation: t.generation, ..key.clone() };
     if let Some(hit) = crate::lookup(&want, touch) {
-        return (want, hit);
+        return Some((want, hit));
     }
-    let inks = blob
-        .filter(|_| key.luts.0 != 0 && key.adjust.is_none() && !key.grey)
-        .and_then(ImageBlob::cmyk)
-        .filter(|i| i.width == u32::from(pm.width()) && i.height == u32::from(pm.height()));
+    let sized = |w: u32, h: u32| w == u32::from(pm.width()) && h == u32::from(pm.height());
+    let own = blob.filter(|_| key.luts.0 != 0 && key.adjust.is_none() && !key.grey);
+    let inks = own.and_then(ImageBlob::cmyk).filter(|i| sized(i.width, i.height));
     let samples = inks.as_ref().map(|i| i.data.as_chunks::<4>().0);
+    let spots = match inks.as_ref().and(own).filter(|_| key.spots != 0) {
+        Some(blob) => crate::paint::decode_spots(blob)?.filter(|s| sized(s.width, s.height)),
+        None => None,
+    };
+    let visible = proof.separations.as_deref().unwrap_or_default();
+    // The spot channel the one visible plate is, or for several plates each visible spot channel's
+    // display colour.
+    let (single_spot, shown) = match &spots {
+        Some(s) if visible.len() == 1 => (s.names.iter().position(|n| *n == visible[0]), vec![]),
+        Some(s) => {
+            let c = cms::active();
+            let shown = s
+                .names
+                .iter()
+                .map(|n| visible.iter().any(|v| v == n).then(|| crate::proof::spot_color(doc, n)).flatten().map(|col| c.display_rgb(&col)))
+                .collect();
+            (None, shown)
+        }
+        None => (None, vec![]),
+    };
+    let per = spots.as_ref().map_or(0, |s| s.names.len());
     let mut out = (**pm).clone();
     for (index, px) in out.data_mut().iter_mut().enumerate() {
         if px.a == 0 {
             continue;
         }
+        let tints = spots.as_ref().and_then(|s| s.data.get(index * per..(index + 1) * per));
         let rgb = if let Some(ink) = samples.and_then(|s| s.get(index)) {
-            match t.single {
-                Some(channel) => [255 - channel.map_or(0, |c| ink[c]); 3],
-                None => t.cmyk.as_ref().map_or([255; 3], |lut| {
-                    let [r, g, b, _] = lut.apply(ink.map(|v| f32::from(v) / 255.0));
-                    [r, g, b].map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
-                }),
+            match (t.single, single_spot) {
+                (_, Some(i)) => [255 - tints.and_then(|t| t.get(i)).copied().unwrap_or(0); 3],
+                (Some(channel), None) => [255 - channel.map_or(0, |c| ink[c]); 3],
+                (None, None) => {
+                    let mut rgb = t.cmyk.as_ref().map_or([1.0; 3], |lut| {
+                        let [r, g, b, _] = lut.apply(ink.map(|v| f32::from(v) / 255.0));
+                        [r, g, b]
+                    });
+                    for (v, s) in tints.unwrap_or_default().iter().zip(&shown) {
+                        if let (Some(s), true) = (s, *v > 0) {
+                            let v = f32::from(*v) / 255.0;
+                            for i in 0..3 {
+                                rgb[i] *= 1.0 - v * (1.0 - s[i].clamp(0.0, 1.0));
+                            }
+                        }
+                    }
+                    rgb.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+                }
             }
         } else {
             let straight = [px.r, px.g, px.b].map(|v| ((u32::from(v) * 255 + u32::from(px.a) / 2) / u32::from(px.a)).min(255) as u8);
@@ -86,7 +127,7 @@ pub(crate) fn image(key: &ImageKey, pm: &Arc<Pixmap>, blob: Option<&ImageBlob>, 
         (px.r, px.g, px.b) = (r, g, b);
     }
     let out = images::store().insert(want.clone(), Arc::new(out));
-    (want, out)
+    Some((want, out))
 }
 
 #[cfg(test)]
@@ -152,5 +193,52 @@ mod tests {
         let got = Renderer::new().render_region_with(&d, d.artboards[0].rect, 1.0, &opts(&["Cyan"]));
         assert_eq!(got.pixel(0, 0), [255; 4]);
         assert!(got.pixel(2, 2)[0].abs_diff(127) <= 1, "{:?}", got.pixel(2, 2));
+    }
+
+    /// A CMYK image's spot channels print on their spot plates, show in their swatch's colour,
+    /// and leave the process plates alone.
+    #[test]
+    fn spot_channels_print_on_their_plates() {
+        use vectorcraft_color::{Color, Paint, Swatch};
+        use vectorcraft_doc::cmyk::{Inks, SpotInks};
+        let mut d = Document::new(4.0, 4.0);
+        d.swatches.push(Swatch { name: "Spot A".into(), paint: Paint::solid(Color::cmyk(0.0, 1.0, 0.0, 0.0)), global: true, spot: true });
+        let inks = Inks::new(4, 4, [40, 0, 0, 0].repeat(16)).unwrap();
+        let spots = SpotInks::new(4, 4, vec!["Spot A".into()], vec![200; 16]).unwrap();
+        d.images.insert("ink".into(), ImageBlob::cmyk_spot_tiff(&inks, &spots).unwrap());
+        let n = picture(&mut d, "ink");
+        d.insert(Some(d.layers[0].id), 0, n).unwrap();
+        let mut r = Renderer::new();
+        for (plate, coverage) in [("Spot A", 200), ("Cyan", 40), ("Magenta", 0), ("Spot B", 0)] {
+            let frame = r.render_region_with(&d, d.artboards[0].rect, 1.0, &opts(&[plate]));
+            assert_eq!(frame.pixel(2, 2), [255 - coverage, 255 - coverage, 255 - coverage, 255], "{plate}");
+        }
+        // Shown with every plate, and on screen, the spot ink darkens the image's green channel
+        // (the swatch is magenta) beyond what its cyan does.
+        let cyan_only = {
+            let mut e = Document::new(4.0, 4.0);
+            e.images.insert("ink".into(), ImageBlob::cmyk_tiff(&inks).unwrap());
+            let n = picture(&mut e, "ink");
+            e.insert(Some(e.layers[0].id), 0, n).unwrap();
+            Renderer::new()
+                .render_region_with(
+                    &e,
+                    e.artboards[0].rect,
+                    1.0,
+                    &RenderOptions { background: Some([255; 4]), smooth_images: false, ..Default::default() },
+                )
+                .pixel(2, 2)
+        };
+        let shown = r
+            .render_region_with(
+                &d,
+                d.artboards[0].rect,
+                1.0,
+                &RenderOptions { background: Some([255; 4]), smooth_images: false, ..Default::default() },
+            )
+            .pixel(2, 2);
+        assert!(shown[1] + 60 < cyan_only[1], "{shown:?} vs {cyan_only:?}");
+        let all = r.render_region_with(&d, d.artboards[0].rect, 1.0, &opts(&["Cyan", "Magenta", "Yellow", "Black", "Spot A"])).pixel(2, 2);
+        assert!(all[1] + 60 < cyan_only[1], "{all:?} vs {cyan_only:?}");
     }
 }

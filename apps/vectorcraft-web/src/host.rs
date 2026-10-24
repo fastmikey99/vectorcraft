@@ -15,11 +15,34 @@
 //!   `vectorcraft:failed` carrying it when nothing is open or the format can't be written.
 //!   With `selectedOnly`, only the selection: one selected image in a raster format comes as its
 //!   own pixels as embedded, and the `save` carries the selection's `bounds` in document points.
-//! - `vectorcraft:place` (from the parent): `{ id?, name, bytes, at? }`, the file placed in place of
+//! - `vectorcraft:open` may carry `rasterEffectsResolution` (ppi): the opened document's
+//!   raster-effects resolution is raised to at least that, without marking it changed (a file read
+//!   from a PDF starts at 72 ppi; shadows and glows are written at it). `ready` says
+//!   `rasterEffectsResolution: true`.
+//! - `vectorcraft:open` may carry `units` and `strokeUnits` (unit names such as `inches` or
+//!   `millimeters`): the opened document's General unit and the Stroke unit while it is open,
+//!   shown without marking it changed, adding an undo step or changing the person's preferences.
+//!   `ready` says `units: true`.
+//! - `vectorcraft:selection` (to the parent): `{ image, copies, otherSizes }` whenever it changes:
+//!   whether exactly one image is selected, and how many other copies of it (same pixels) the
+//!   document holds at the same printed size and at other sizes. `ready` says `selection: true`.
+//! - `vectorcraft:place` (from the parent): `{ id?, name, bytes, at?, copies? }`, the file placed in place of
 //!   the one selected object (with nothing selected, at `at`): fitted inside `at` when given, else
 //!   onto that object's own frame through its transform (an image's pixels, rotated or mirrored as
 //!   they are), one undo step, selected. Answered with `vectorcraft:placed { id, ids }` or
 //!   `vectorcraft:failed { error, id }`.
+//! - `vectorcraft:solidify` (from the parent): `{ id?, level?, copies? }`, Remove Soft Pixels on the
+//!   one selected image (`object.image.solidifyAlpha`): every alpha at or above `level` (1–255,
+//!   default 128) opaque, below it clear, colour samples kept; with `copies`, also its copies at
+//!   the same printed size; one undo step. Answered with `vectorcraft:solidified { id, ids, form,
+//!   level, softPixels, clearPixels, opaquePixels }` or `vectorcraft:failed { error, id }`. `ready`
+//!   says `solidify: true`.
+//! - `vectorcraft:colorSettings` (from the parent): `{ id?, profiles?: [{ name?, bytes }], rgb?,
+//!   cmyk?, intent?, bpc? }`, ICC profiles registered (each under `name`, else its own
+//!   description) and Edit › Color Settings set with them, before the frame's open is read; not an
+//!   edit (no dirty, no undo). Answered with `vectorcraft:colorSettingsApplied { id, loaded, rgb,
+//!   cmyk, intent, bpc, profiles }` or `vectorcraft:failed { error, id }`. `ready` says
+//!   `colorSettings: true`.
 //! - `vectorcraft:prefs` (both ways): `{ prefs }`, the preferences and workspace as JSON text. The
 //!   editor sends them when they change (the page stores them for the person signed in); the page
 //!   sends them back before opening a file, and the editor takes them on. In host mode the editor
@@ -47,8 +70,6 @@ use wasm_bindgen::closure::Closure;
 
 use crate::protocol;
 
-type Inbox = vectorcraft_ui_egui::HostInbox;
-
 #[derive(Clone)]
 pub struct Bridge {
     window: web_sys::Window,
@@ -56,14 +77,10 @@ pub struct Bridge {
     origin: String,
     /// The unsaved-changes state last reported to the parent.
     reported: Rc<Cell<Option<bool>>>,
-    /// Exports the parent asked for, run on the next frame (they need the app).
-    exports: Rc<RefCell<Vec<(JsValue, protocol::Export)>>>,
-    /// Files the parent asked to place, run on the next frame.
-    places: Rc<RefCell<Vec<(JsValue, protocol::Place)>>>,
-    /// Preferences the parent handed back, put on at the next frame (the last one wins).
-    prefs: Rc<RefCell<Option<String>>>,
-    /// The files the parent hands over (`Services::host_inbox`), which outlive graphics restarts.
-    inbox: Inbox,
+    /// The selection last reported to the parent, and the document revision it was read at.
+    selection: Rc<Cell<Option<(u64, usize, protocol::Selection)>>>,
+    /// Every parent operation, in arrival order, drained once per frame.
+    operations: Rc<RefCell<Vec<(JsValue, crate::operations::Operation)>>>,
     ready: Rc<Cell<bool>>,
 }
 
@@ -76,24 +93,14 @@ impl Bridge {
             return None;
         }
         let origin = window.location().origin().ok().filter(|o| !protocol::is_opaque(o))?;
-        Some(Self {
-            window,
-            parent,
-            origin,
-            reported: Rc::default(),
-            exports: Rc::default(),
-            places: Rc::default(),
-            prefs: Rc::default(),
-            inbox: Inbox::default(),
-            ready: Rc::default(),
-        })
+        Some(Self { window, parent, origin, reported: Rc::default(), selection: Rc::default(), operations: Rc::default(), ready: Rc::default() })
     }
 
     /// Send what VectorCraft would download to the parent instead (each time the services are
     /// made, also after a graphics restart).
     pub fn connect(&self, services: &mut Services) {
         services.single_document = true;
-        services.host_inbox = Some(self.inbox.clone());
+
         services.recovery_store = None;
         let bridge = self.clone();
         services.host_open_result = Some(Box::new(move |result| match result {
@@ -116,6 +123,12 @@ impl Bridge {
             ("openAcknowledgement", true.into()),
             ("printProduction", true.into()),
             ("productionSeparations", true.into()),
+            ("selection", true.into()),
+            ("rasterEffectsResolution", true.into()),
+            ("units", true.into()),
+            ("solidify", true.into()),
+            ("colorSettings", true.into()),
+            ("separationMarks", true.into()),
         ]);
     }
 
@@ -123,45 +136,43 @@ impl Bridge {
         self.send(&[("type", "vectorcraft:failed".into()), ("error", error.into())]);
     }
 
-    /// The refusal of the `vectorcraft:export` or `vectorcraft:place` with this `id`.
+    /// The refusal of the `vectorcraft:export`, `vectorcraft:place` or `vectorcraft:solidify` with
+    /// this `id`.
     fn post_export_failed(&self, id: &JsValue, error: &str) {
         log::warn!("refused an export for the page: {error}");
         self.send(&[("type", "vectorcraft:failed".into()), ("error", error.into()), ("id", id.clone())]);
     }
 
-    /// Each frame: write the exports the parent asked for and send them back.
+    /// Execute and reply in arrival order, so export observes preceding mutations.
     pub fn run_exports(&self, app: &mut VectorcraftApp) {
-        let asked = std::mem::take(&mut *self.exports.borrow_mut());
-        for (id, export) in asked {
-            match crate::operations::write_export(app, &export) {
-                Ok((name, bytes, bounds, native)) => match self.post_file(&name, &bytes, Some(&id), bounds, native, export.preserve_source) {
-                    Ok(()) => {
-                        if export.mark_saved
-                            && let Some(st) = app.session.active_mut()
-                        {
-                            st.mark_saved();
+        for (id, operation) in std::mem::take(&mut *self.operations.borrow_mut()) {
+            match crate::operations::execute(app, operation) {
+                Ok(crate::operations::Reply::Export { name, bytes, bounds, native, mark_saved, preserve_source }) => {
+                    match self.post_file(&name, &bytes, Some(&id), bounds, native, preserve_source) {
+                        Ok(()) => {
+                            if mark_saved && let Some(st) = app.session.active_mut() {
+                                st.mark_saved();
+                            }
                         }
+                        Err(error) => self.post_export_failed(&id, &error),
                     }
-                    Err(e) => self.post_export_failed(&id, &e),
-                },
-                Err(error) => self.post_export_failed(&id, &error),
-            }
-        }
-        let asked = std::mem::take(&mut *self.places.borrow_mut());
-        for (id, place) in asked {
-            match crate::operations::place_file(app, &place) {
-                Ok(ids) => {
-                    let ids: js_sys::Array = ids.into_iter().map(|i| JsValue::from_f64(i as f64)).collect();
-                    self.send(&[("type", "vectorcraft:placed".into()), ("id", id), ("ids", ids.into())]);
                 }
+                Ok(crate::operations::Reply::Message { kind, value }) => {
+                    match js_sys::JSON::parse(&value.to_string()) {
+                        Ok(data) => {
+                            if let Some(object) = data.dyn_ref::<js_sys::Object>() {
+                                let _ = js_sys::Reflect::set(object, &"type".into(), &kind.into()); // Fresh plain object.
+                                let _ = js_sys::Reflect::set(object, &"id".into(), &id); // Fresh plain object.
+                                let _ = self.parent.post_message(object, &self.origin); // Parent may have closed.
+                            }
+                        }
+                        Err(_) => self.post_export_failed(&id, "couldn't encode operation reply"),
+                    }
+                }
+                Ok(crate::operations::Reply::None) => {}
                 Err(error) => self.post_export_failed(&id, &error),
             }
         }
-    }
-
-    /// Preferences the parent handed back since the last frame, if any.
-    pub fn take_prefs(&self) -> Option<String> {
-        self.prefs.borrow_mut().take()
     }
 
     /// Hand the parent the preferences and workspace (they changed); false if it couldn't be sent.
@@ -169,7 +180,29 @@ impl Bridge {
         self.send(&[("type", "vectorcraft:prefs".into()), ("prefs", text.into())])
     }
 
-    /// After each frame: tell the parent when unsaved changes appear or go away.
+    /// After each frame: tell the parent what is selected when it changes (`vectorcraft:selection`:
+    /// `{ image, copies, otherSizes }`). Read again only when the document's revision moves.
+    pub fn report_selection(&self, app: &VectorcraftApp) {
+        let key = app.session.active().map_or((0, 0), |st| (st.revision, std::ptr::from_ref(st) as usize));
+        let last = self.selection.get();
+        if last.is_some_and(|(r, d, _)| (r, d) == key) {
+            return;
+        }
+        let now = crate::operations::selection(app);
+        if last.is_none_or(|(_, _, s)| s != now)
+            && !self.send(&[
+                ("type", "vectorcraft:selection".into()),
+                ("image", now.image.into()),
+                ("copies", (now.copies as f64).into()),
+                ("otherSizes", (now.other_sizes as f64).into()),
+            ])
+        {
+            return;
+        }
+        self.selection.set(Some((key.0, key.1, now)));
+    }
+
+    /// Report changes to the document's dirty state.
     pub fn report_dirty(&self, app: &VectorcraftApp) {
         let dirty = app.session.documents().iter().any(|d| d.is_dirty());
         if self.reported.get() != Some(dirty) && self.send(&[("type", "vectorcraft:dirty".into()), ("dirty", dirty.into())]) {
@@ -204,6 +237,10 @@ impl Bridge {
         {
             fields.push(("bounds", o.into()));
         }
+        let summary = crate::operations::saved_marks(name, bytes)?;
+        let marks = js_sys::JSON::parse(&summary.to_string()).map_err(|_| "couldn't encode separation marks".to_string())?;
+        fields.push(("marks", marks));
+        fields.push(("markUnits", "pt".into()));
         let message = message(&fields).ok_or_else(|| "couldn't build the message".to_string())?;
         self.parent
             .post_message_with_transfer(&message, &self.origin, &js_sys::Array::of1(&buffer))
@@ -223,6 +260,22 @@ impl Bridge {
             if !protocol::accepts(&bridge.origin, &event.origin(), from_parent, string(&data, "type").as_deref()) {
                 return;
             }
+            if let Some(kind) = string(&data, "type").filter(|k| k.starts_with("vectorcraft:sep.mark.")) {
+                let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
+                let mark = js_sys::Reflect::get(&data, &JsValue::from_str("mark"))
+                    .ok()
+                    .and_then(|m| js_sys::JSON::stringify(&m).ok())
+                    .and_then(|m| m.as_string())
+                    .and_then(|m| serde_json::from_str(&m).ok());
+                match protocol::mark_command(&kind, mark) {
+                    Ok((command, params)) => {
+                        bridge.operations.borrow_mut().push((id, crate::operations::Operation::Mark(command.into(), params)));
+                        wake();
+                    }
+                    Err(error) => bridge.post_export_failed(&id, &error),
+                }
+                return;
+            }
             if string(&data, "type").as_deref() == Some("vectorcraft:export") {
                 let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
                 let flag = |k: &str| js_sys::Reflect::get(&data, &JsValue::from_str(k)).ok().and_then(|v| v.as_bool());
@@ -239,7 +292,7 @@ impl Bridge {
                         });
                 match request {
                     Ok(export) => {
-                        bridge.exports.borrow_mut().push((id, export));
+                        bridge.operations.borrow_mut().push((id, crate::operations::Operation::Export(export)));
                         wake();
                     }
                     Err(error) => bridge.post_export_failed(&id, &error),
@@ -255,18 +308,77 @@ impl Bridge {
             if string(&data, "type").as_deref() == Some("vectorcraft:prefs") {
                 match protocol::prefs(string(&data, "prefs")) {
                     Ok(text) => {
-                        *bridge.prefs.borrow_mut() = Some(text);
+                        bridge.operations.borrow_mut().push((JsValue::UNDEFINED, crate::operations::Operation::Prefs(text)));
                         wake();
                     }
                     Err(error) => bridge.post_failed(&error),
                 }
                 return;
             }
+            if string(&data, "type").as_deref() == Some("vectorcraft:colorSettings") {
+                let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
+                // A field left out is `None`; one that is there but of the wrong type is `Some(None)`.
+                let given = |key: &str| js_sys::Reflect::get(&data, &JsValue::from_str(key)).ok().filter(|v| !v.is_undefined());
+                // Counted and sized before anything is copied out of the page.
+                let fits = given("profiles").and_then(|v| v.dyn_ref::<js_sys::Array>().cloned()).map_or(Ok(()), |list| {
+                    protocol::profiles_fit(list.length() as usize, list.iter().take(protocol::MAX_PROFILES).map(|p| byte_length(&p)))
+                });
+                if let Err(error) = fits {
+                    bridge.post_export_failed(&id, &error);
+                    return;
+                }
+                let profiles = given("profiles").map(|v| {
+                    v.dyn_ref::<js_sys::Array>().map(|list| {
+                        list.iter()
+                            .map(|p| {
+                                let name =
+                                    js_sys::Reflect::get(&p, &JsValue::from_str("name")).ok().filter(|v| !v.is_undefined()).map(|v| v.as_string());
+                                (name, bytes(&p))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                });
+                let request = protocol::color_settings(
+                    profiles,
+                    given("rgb").map(|v| v.as_string()),
+                    given("cmyk").map(|v| v.as_string()),
+                    given("intent").map(|v| v.as_string()),
+                    given("bpc").map(|v| v.as_bool()),
+                );
+                match request {
+                    Ok(request) => {
+                        bridge.operations.borrow_mut().push((id, crate::operations::Operation::ColorSettings(request)));
+                        wake();
+                    }
+                    Err(error) => bridge.post_export_failed(&id, &error),
+                }
+                return;
+            }
             if string(&data, "type").as_deref() == Some("vectorcraft:place") {
                 let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
-                match protocol::place(string(&data, "name"), bytes(&data), rect(&data, "at")) {
+                let copies = js_sys::Reflect::get(&data, &JsValue::from_str("copies")).ok().filter(|v| !v.is_undefined());
+                if copies.as_ref().is_some_and(|v| v.as_bool().is_none()) {
+                    bridge.post_export_failed(&id, "vectorcraft:place: copies must be a boolean");
+                    return;
+                }
+                match protocol::place_copies(string(&data, "name"), bytes(&data), rect(&data, "at"), copies.and_then(|v| v.as_bool())) {
                     Ok(place) => {
-                        bridge.places.borrow_mut().push((id, place));
+                        bridge.operations.borrow_mut().push((id, crate::operations::Operation::Place(place)));
+                        wake();
+                    }
+                    Err(error) => bridge.post_export_failed(&id, &error),
+                }
+                return;
+            }
+            if string(&data, "type").as_deref() == Some("vectorcraft:solidify") {
+                let id = js_sys::Reflect::get(&data, &JsValue::from_str("id")).unwrap_or(JsValue::UNDEFINED);
+                // A field left out is `None`; one that is there but of the wrong type is `Some(None)`.
+                let given = |key: &str| js_sys::Reflect::get(&data, &JsValue::from_str(key)).ok().filter(|v| !v.is_undefined());
+                let level = given("level").map(|v| v.as_f64());
+                let copies = given("copies").map(|v| v.as_bool());
+                match protocol::solidify(level, copies) {
+                    Ok(request) => {
+                        bridge.operations.borrow_mut().push((id, crate::operations::Operation::Solidify(request)));
                         wake();
                     }
                     Err(error) => bridge.post_export_failed(&id, &error),
@@ -280,6 +392,37 @@ impl Bridge {
                         bridge.post_failed("vectorcraft:open: printProduction must be a boolean");
                         return;
                     }
+                    let ppi = js_sys::Reflect::get(&data, &JsValue::from_str("rasterEffectsResolution")).unwrap_or(JsValue::UNDEFINED);
+                    let raster_effects_ppi = if ppi.is_undefined() {
+                        None
+                    } else {
+                        match ppi.as_f64().filter(|p| p.is_finite() && (1.0..=2400.0).contains(p)) {
+                            Some(p) => Some(p.round() as u32),
+                            None => {
+                                bridge.post_failed("vectorcraft:open: rasterEffectsResolution must be a ppi from 1 to 2400");
+                                return;
+                            }
+                        }
+                    };
+                    // A field left out is `None`; one that is there but not a string is `Some(None)`.
+                    let given = |key: &str| {
+                        let v = js_sys::Reflect::get(&data, &JsValue::from_str(key)).unwrap_or(JsValue::UNDEFINED);
+                        (!v.is_undefined()).then(|| v.as_string())
+                    };
+                    let units = match protocol::open_unit("units", given("units")) {
+                        Ok(u) => u,
+                        Err(e) => {
+                            bridge.post_failed(&e);
+                            return;
+                        }
+                    };
+                    let stroke_units = match protocol::open_unit("strokeUnits", given("strokeUnits")) {
+                        Ok(u) => u,
+                        Err(e) => {
+                            bridge.post_failed(&e);
+                            return;
+                        }
+                    };
                     let value = js_sys::Reflect::get(&data, &JsValue::from_str("separations")).unwrap_or(JsValue::UNDEFINED);
                     let separations = if value.is_undefined() {
                         None
@@ -301,12 +444,18 @@ impl Bridge {
                             }
                         }
                     };
-                    bridge.inbox.lock().unwrap_or_else(|e| e.into_inner()).push(vectorcraft_ui_egui::HostOpen {
-                        name: open.name,
-                        bytes: open.bytes,
-                        print_production: flag.as_bool().unwrap_or(false),
-                        separations,
-                    });
+                    bridge.operations.borrow_mut().push((
+                        JsValue::UNDEFINED,
+                        crate::operations::Operation::Open(vectorcraft_ui_egui::HostOpen {
+                            name: open.name,
+                            bytes: open.bytes,
+                            print_production: flag.as_bool().unwrap_or(false),
+                            separations,
+                            raster_effects_ppi,
+                            units,
+                            stroke_units,
+                        }),
+                    ));
                     wake();
                 }
                 Err(error) => {
@@ -340,6 +489,16 @@ fn string(data: &JsValue, key: &str) -> Option<String> {
 }
 
 /// `bytes` as an `ArrayBuffer` or `Uint8Array`.
+/// The length of `data.bytes` (as [`bytes`] reads it) without copying it.
+fn byte_length(data: &JsValue) -> Option<usize> {
+    let bytes = js_sys::Reflect::get(data, &JsValue::from_str("bytes")).ok()?;
+    if let Some(array) = bytes.dyn_ref::<js_sys::Uint8Array>() {
+        Some(array.byte_length() as usize)
+    } else {
+        bytes.dyn_ref::<js_sys::ArrayBuffer>().map(|b| b.byte_length() as usize)
+    }
+}
+
 fn bytes(data: &JsValue) -> Option<Vec<u8>> {
     let bytes = js_sys::Reflect::get(data, &JsValue::from_str("bytes")).ok()?;
     if let Some(array) = bytes.dyn_ref::<js_sys::Uint8Array>() {

@@ -1,6 +1,6 @@
 # File format parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-17 · **Change:** minor (batch exporting, #1935; legacy `.ai` runs as PostScript with a prolog of its own, #868; legacy `.ai` of version 7 saved, with type as text, hidden objects and an artboard picker, and its type read, #868; PDF.R1: shared PDF reader with windowed content scanning and explicit incomplete-content errors; scores and estimates unchanged; PDF.W1: guarded shared PDF writer; output behavior, scores and estimates unchanged; later 2026-10-14 merges: SVG `:not()` selectors, #1557, stacked selectors, #1703, linked files, #1870; DXF VPORT, #1789; nesting caps, #1852; hostile PDF, `.ai`, EPS, Affinity and native data, #1862, #1863, #1871–#1873; failed saves, #1685, #1693, #1694; type in symbols after reopening, #1738; scores unchanged; verified PngSuite downloads, #1729; EPS stitched shadings, #1653; oversized images in WMF/EMF refused from the header, #1776; PDF name trees with shared nodes, #1781; native size limits for files read from memory, #1783; private temporary files on Unix, #1778; ruzstd 0.9.1, #1807; scores unchanged; SVG import: CSS transforms and the `font` shorthand, #1565, percentage lengths in symbols, #1596, Inkscape flowed text and pages, #1568, #1601, filter warnings, #1598; type on a path from PDF and `.ai`, #1585, #1586; ICC tag alignment in JPEG, TIFF and PSD, #1584; saves to folders that refuse the temporary file, #1620 in part; scores unchanged; TIFF is available in Export for Screens and Asset Export with shared format settings; scores and hours unchanged; compact native saves for documents with a lot of path data, #1492; PDF and EPS paste as vector art, #1499; `.ai` gradient stops listed upwards, #1530; SVG text on basic shapes, #1527; PDF soft masks drawn as images, #1551; Type 42 fonts in EPS, #1553; clips that only seem to cover the page, #1542; images too large to decode are reported, #1540; a `.ai` page's art past its artboard no longer lies over the page before it when read as its PDF part; grayscale TIFFs with an alpha channel or extra channels place and open, #1466 in part; a faded or masked fill keeps its stroke apart on PDF and `.ai` import, #1434; SVG knockout groups without masks, #1435; Affinity import: a text frame too short for its first line is made taller, #1423; `.ai` editing data: a compound path takes its last path's paint and keeps paths grouped inside it, #1410; a `.ai` whose PDF part is only text opens from it, #1387; PDF and `.ai` import keep overprint, #1388; `.ai` editing data: gradients with middle stops, #1390; type of objects with an appearance, hidden layers and later artboards, #1391; area type in a frame too short for the fallback font, #1392; `.ai` editing data: placed (linked) files read, #1264; gradient-filled shapes import as paths, #1304; white constant alpha soft masks, #1286 in part; DXF control-point SPLINE closure read, #1299 follow-up; `.ai` and PDF trim and bleed boxes as artboard and bleed, #1266; `.ai` gradient matrices, meshes and artboard names from the editing data; `.ai` art styles, clipping fills and compound looks from the editing data; `editingData: "always"` opens a `.ai` from its editing data; a `.ai` whose PDF part is only text opens from it, #1387; PDF and `.ai` import keep overprint, #1388; `.ai` editing data: gradients with middle stops, #1390; type of objects with an appearance, hidden layers and later artboards, #1391; area type in a frame too short for the fallback font, #1392; `.ai` editing data: placed (linked) files read, #1264; gradient-filled shapes import as paths, #1304; white constant alpha soft masks, #1286 in part; DXF control-point SPLINE closure read, #1299 follow-up; `.ai` and PDF trim and bleed boxes as artboard and bleed, #1266; `.ai` gradient matrices, meshes and artboard names from the editing data; `.ai` art styles, clipping fills and compound looks from the editing data; a `.ai` whose PDF part is only text opens from it, #1387; PDF and `.ai` import keep overprint, #1388; `.ai` editing data: gradients with middle stops, #1390; type of objects with an appearance, hidden layers and later artboards, #1391; area type in a frame too short for the fallback font, #1392; `.ai` editing data: placed (linked) files read, #1264; gradient-filled shapes import as paths, #1304; white constant alpha soft masks, #1286 in part; DXF control-point SPLINE closure read, #1299 follow-up; `.ai` and PDF trim and bleed boxes as artboard and bleed, #1266; `.ai` gradient matrices, meshes and artboard names from the editing data; a `.ai` whose PDF part is only text opens from it, #1387; PDF and `.ai` import keep overprint, #1388; `.ai` editing data: gradients with middle stops, #1390; type of objects with an appearance, hidden layers and later artboards, #1391; area type in a frame too short for the fallback font, #1392; `.ai` editing data: placed (linked) files read, #1264; gradient-filled shapes import as paths, #1304; white constant alpha soft masks, #1286 in part; DXF control-point SPLINE closure read, #1299 follow-up; `.ai` and PDF trim and bleed boxes as artboard and bleed, #1266; SVG knockout groups of opaque art without masks; a `.ai` whose PDF part is only text opens from it, #1387; PDF and `.ai` import keep overprint, #1388; `.ai` editing data: gradients with middle stops, #1390; type of objects with an appearance, hidden layers and later artboards, #1391; area type in a frame too short for the fallback font, #1392; `.ai` editing data: placed (linked) files read, #1264; gradient-filled shapes import as paths, #1304; white constant alpha soft masks, #1286 in part; DXF control-point SPLINE closure read, #1299 follow-up; `.ai` and PDF trim and bleed boxes as artboard and bleed, #1266; `.ai` keeps its RGB numbers; PDF import keeps a stroke apart from a fill masked or faded by its group) · **Target:** Adobe Illustrator 2026 (30.x)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-23 · **Change:** minor (PDF.PRIVATE review: shared colour/preflight exclusions and unshared page-tree owners; PDF.PRIVATE: exclusive page-piece data skipped, shared streams still screened; scores and hours unchanged; an Illustrator 3 file without layers, as image editors export their paths, opens with its art on one layer, storytold/photocraft#6036; EPS editing data: legacy mesh corners, vector opacity masks and compound member paint retained; raster page comparison filters minification without relaxing limits; scores and hours unchanged; batch exporting, #1935; legacy `.ai` runs as PostScript with a prolog of its own, #868; legacy `.ai` of version 7 saved, with type as text, hidden objects and an artboard picker, and its type read, #868; PDF.R1: shared PDF reader with windowed content scanning and explicit incomplete-content errors; scores and estimates unchanged; PDF.W1: guarded shared PDF writer; output behavior, scores and estimates unchanged; later 2026-10-14 merges: SVG `:not()` selectors, #1557, stacked selectors, #1703, linked files, #1870; DXF VPORT, #1789; nesting caps, #1852; hostile PDF, `.ai`, EPS, Affinity and native data, #1862, #1863, #1871–#1873; failed saves, #1685, #1693, #1694; type in symbols after reopening, #1738; scores unchanged; verified PngSuite downloads, #1729; EPS stitched shadings, #1653; oversized images in WMF/EMF refused from the header, #1776; PDF name trees with shared nodes, #1781; native size limits for files read from memory, #1783; private temporary files on Unix, #1778; ruzstd 0.9.1, #1807; scores unchanged; SVG import: CSS transforms and the `font` shorthand, #1565, percentage lengths in symbols, #1596, Inkscape flowed text and pages, #1568, #1601, filter warnings, #1598; type on a path from PDF and `.ai`, #1585, #1586; ICC tag alignment in JPEG, TIFF and PSD, #1584; saves to folders that refuse the temporary file, #1620 in part; scores unchanged; TIFF is available in Export for Screens and Asset Export with shared format settings; scores and hours unchanged; compact native saves for documents with a lot of path data, #1492; PDF and EPS paste as vector art, #1499; `.ai` gradient stops listed upwards, #1530; SVG text on basic shapes, #1527; PDF soft masks drawn as images, #1551; Type 42 fonts in EPS, #1553; clips that only seem to cover the page, #1542; images too large to decode are reported, #1540; a `.ai` page's art past its artboard no longer lies over the page before it when read as its PDF part; grayscale TIFFs with an alpha channel or extra channels place and open, #1466 in part; a faded or masked fill keeps its stroke apart on PDF and `.ai` import, #1434; SVG knockout groups without masks, #1435; Affinity import: a text frame too short for its first line is made taller, #1423; `.ai` editing data: a compound path takes its last path's paint and keeps paths grouped inside it, #1410; a `.ai` whose PDF part is only text opens from it, #1387; PDF and `.ai` import keep overprint, #1388; `.ai` editing data: gradients with middle stops, #1390; type of objects with an appearance, hidden layers and later artboards, #1391; area type in a frame too short for the fallback font, #1392; `.ai` editing data: placed (linked) files read, #1264; gradient-filled shapes import as paths, #1304; white constant alpha soft masks, #1286 in part; DXF control-point SPLINE closure read, #1299 follow-up; `.ai` and PDF trim and bleed boxes as artboard and bleed, #1266; `.ai` gradient matrices, meshes and artboard names from the editing data; `.ai` art styles, clipping fills and compound looks from the editing data; `editingData: "always"` opens a `.ai` from its editing data; a `.ai` whose PDF part is only text opens from it, #1387; PDF and `.ai` import keep overprint, #1388; `.ai` editing data: gradients with middle stops, #1390; type of objects with an appearance, hidden layers and later artboards, #1391; area type in a frame too short for the fallback font, #1392; `.ai` editing data: placed (linked) files read, #1264; gradient-filled shapes import as paths, #1304; white constant alpha soft masks, #1286 in part; DXF control-point SPLINE closure read, #1299 follow-up; `.ai` and PDF trim and bleed boxes as artboard and bleed, #1266; `.ai` gradient matrices, meshes and artboard names from the editing data; `.ai` art styles, clipping fills and compound looks from the editing data; a `.ai` whose PDF part is only text opens from it, #1387; PDF and `.ai` import keep overprint, #1388; `.ai` editing data: gradients with middle stops, #1390; type of objects with an appearance, hidden layers and later artboards, #1391; area type in a frame too short for the fallback font, #1392; `.ai` editing data: placed (linked) files read, #1264; gradient-filled shapes import as paths, #1304; white constant alpha soft masks, #1286 in part; DXF control-point SPLINE closure read, #1299 follow-up; `.ai` and PDF trim and bleed boxes as artboard and bleed, #1266; `.ai` gradient matrices, meshes and artboard names from the editing data; a `.ai` whose PDF part is only text opens from it, #1387; PDF and `.ai` import keep overprint, #1388; `.ai` editing data: gradients with middle stops, #1390; type of objects with an appearance, hidden layers and later artboards, #1391; area type in a frame too short for the fallback font, #1392; `.ai` editing data: placed (linked) files read, #1264; gradient-filled shapes import as paths, #1304; white constant alpha soft masks, #1286 in part; DXF control-point SPLINE closure read, #1299 follow-up; `.ai` and PDF trim and bleed boxes as artboard and bleed, #1266; SVG knockout groups of opaque art without masks; a `.ai` whose PDF part is only text opens from it, #1387; PDF and `.ai` import keep overprint, #1388; `.ai` editing data: gradients with middle stops, #1390; type of objects with an appearance, hidden layers and later artboards, #1391; area type in a frame too short for the fallback font, #1392; `.ai` editing data: placed (linked) files read, #1264; gradient-filled shapes import as paths, #1304; white constant alpha soft masks, #1286 in part; DXF control-point SPLINE closure read, #1299 follow-up; `.ai` and PDF trim and bleed boxes as artboard and bleed, #1266; `.ai` keeps its RGB numbers; PDF import keeps a stroke apart from a fill masked or faded by its group) · **Target:** Adobe Illustrator 2026 (30.x)
 
 Every format Illustrator opens, places, saves or exports, against VectorCraft's format table (`FORMATS`,
 `OPEN_EXTS`, `PLACE_EXTS` in `crates/engine/src/cmd/fileio/mod.rs`). Illustrator's list comes from its public
@@ -17,10 +17,20 @@ from the public specifications, and users' own `.ai` files are used locally only
 
 | | Illustrator | VectorCraft | Notes |
 |---|---:|---:|---|
-| Formats opened or placed | ~30 | 22 | missing: FreeHand, CorelDRAW, DWG, HEIC/HEIF, JPEG 2000, PICT, PCX, Pixar, RTF/Word, PS |
+| Formats opened or placed | ~30 | 25 | missing: FreeHand, CorelDRAW, DWG, HEIC/HEIF, JPEG 2000, PICT, PCX, Pixar, Word `.doc`, PS |
 | Formats saved (Save As) | 6 (AI, AIT, PDF, EPS, SVG, SVGZ) | 6 + native | `.ai` written PDF-compatible (no Illustrator editing data) or as legacy version 7 (layers and groups, one artboard per file) |
 | Formats exported | ~16 | 17 | missing: DWG, 3D (OBJ/USDA/glTF); extra: GIF/PNG-8 palette export, DXF up to 2018, layered PSD |
 | **Overall (weighted by use)** | | **~75%** | `.ai` and PDF dominate the weighting |
+
+EPS editing-data follow-up (2026-10-16): both mesh-corner layouts (with and without opacity)
+read in RGB, CMYK and gray. Vector opacity-mask art and its Clip, Invert, Disabled and Linked
+flags are retained. Winding-declared legacy compound member groups keep their shared paint even
+when followed by `9 () XW`. Fully rasterized print pages are compared using the same filtered
+minification for both representations; the existing error thresholds and ordinary vector-page
+checks remain. Synthetic regressions reject truncated meshes, non-unit rational weights,
+unbalanced mask art, unknown mask operators, missing artwork and wrong page framing. Real
+user files remain local; no SVG replacement or tracing is used. Small rendering differences
+continue to produce import warnings.
 
 ## The main format: `.ai`
 
@@ -31,7 +41,8 @@ private editing data. VectorCraft:
   *structure* of the editing data (below). Opens Illustrator EPS the same way through its own PostScript
   Level 3 interpreter. A `.ai` in PostScript form (versions 3 to 8, and what Rhino and other CAD apps
   write) is its own editing data: it opens through the layers its program has, compared with its page
-  when the program runs, from the layers alone when it names its prolog without including it (#1027).
+  when the program runs, from the layers alone when it names its prolog without including it (#1027), and with its art on one
+  layer when it has no layers (Illustrator 3, and image editors' exported paths: storytold/photocraft#6036).
   RGB in the PDF page's `ICCBased` spaces keeps the file's numbers in a `.ai` (the `uncalibrated_rgb`
   import option, on for editor documents, off for PDFs), so `.ai` files tagged with a non-sRGB RGB profile
   open with different, unconverted RGB colours than before.
@@ -55,7 +66,9 @@ private editing data. VectorCraft:
   graphics and gradient or pattern fills make that type outlines, and Text: Outlines (`outlineText: true`) writes
   all type as outlines. The format can hide only layers: hidden objects go to a hidden layer of their own above
   their layer, are omitted, or are made visible (Hidden Objects, `hiddenObjects: "layer"|"omit"|"visible"`).
-  Sublayers become groups; appearances, effects and brushes are expanded; object names are left out.
+  Sublayers become groups; appearances, effects and brushes are expanded; object names are left out; layer
+  names, spot color and gradient names and the title are written in Windows-1252, with `?` for characters outside
+  it (two spot colors or two gradients whose names become the same are numbered).
   The file is also a PostScript program that runs: its prolog, a procedure set of VectorCraft's own written from
   the PostScript Language Reference, gives the format's operators their meaning, so it prints and previews
   (gradients filled with their first stop's colour, type left to the apps that read the format). VectorCraft
@@ -75,25 +88,21 @@ the app's own editing copy of a file (an EPS after its `%%EOF`, a `.ai`'s `AIPri
 
 ## Format by format
 
-Local print-PDF preservation work (16 October): process-only DeviceN bitmap inks, path overprint modes, compatible page boxes/blending/output intents, hard bitmap export edges and bitmap separation previews are covered by original regression tests; remaining production-fidelity limits are recorded in [pdf-print-preservation.md](pdf-print-preservation.md). Estimates unchanged.
-
 | Format | Illustrator | Ours: open/place | Ours: save/export | Fidelity and tests |
 |---|---|---|---|---|
 | VectorCraft `.vectorcraft` / `.vctemplate` | — | yes | yes | lossless JSON, versioned, save down to v1; property-tested round trips (`format/tests/prop_format.rs`); documents with a lot of path data are written as compact JSON, about a fifth of the size (#1492); a save falls back to a plain fsync and to writing elsewhere and copying in when the folder refuses the usual steps (#1625, #1649, part of #1620; not confirmed on a real network share); the size limits on embedded data also apply to files read from memory (#1783), and saving over a private file on Unix leaves no readable temporary copy beside it (#1778) |
-| Illustrator `.ai` | open, save | yes (PDF-compatible + editing-data structure, File Info) | PDF-compatible only | see above; no real-file corpus |
 | Illustrator template `.ait` | open, save | yes | PDF-compatible only, from Save as Template (`.vctemplate` stays its default) | New from Template opens a saved `.ait` untitled with its layers and art (`tests_pdfedit.rs`) |
 | Illustrator `.ai` | open, save | yes (PDF-compatible + editing-data structure, File Info) | PDF-compatible, or legacy version 7 (layers and groups) | see above; no real-file corpus |
-| Illustrator template `.ait` | open, save | yes | no (save as `.vctemplate`) | |
 | PDF | open, place, save | yes (layers, masks, editable text, security, overprint, File Info from the XMP packet and the document information dictionary; Crop To › Trim takes the bleed box as the document's bleed) | yes (presets, PDF/X-1a/3/4, layers, marks and bleed, ICC, fast web view, 1.3+) | fuzzed import; shared guarded writer and windowed reader ([pdf-backend.md](pdf-backend.md)), metadata, incomplete-content and dependency-source regressions; PDF text placement issues in some files (#722); alpha soft masks drawn as images import with the mask (#1551); a clip only counts as covering the page when its shape does (#1542); a PDF another app copied pastes as editable vector art (#1499); letter-spaced type on a path keeps its length and its glyph-by-glyph stroke comes in as one text object (#1586, #1585); a crafted name tree with shared nodes no longer takes exponential time on open (#1781) |
-| EPS | open, place, save | yes (own PostScript L3 interpreter, Illustrator EPS editing data structure) | yes (L2/L3, TIFF previews) | CID-keyed CJK type and CCITTFax images not read; #505; Type 42 (TrueType) fonts set type at its size (#1553); a clip only counts as covering the page when its shape does (#1542); an EPS another app copied pastes as editable vector art (`clipboard.importEps`, #1499); a stitched shading keeps its hard colour changes on import (#1654); CMYK images, CMYK JPEGs included, keep their ink amounts on import, as from PDF, and the pixels a `MaskColor` or `ImageType 3` mask hides become a grayscale opacity mask; ruzstd 0.9.1 for compressed editing data (#1807, RUSTSEC-2026-0344) |
-| PostScript `.ps` | open | no | via Print to PostScript | |
+| EPS | open, place, save | yes (own PostScript L3 interpreter, Illustrator EPS editing data structure) | yes (L2/L3, TIFF previews) | CID-keyed CJK type not read; #505; images encoded with `CCITTFaxDecode` (ITU-T T.4 Group 3 and T.6 Group 4, with `K`, `Columns`, `Rows`, `EndOfBlock`, `EndOfLine`, `EncodedByteAlign` and `BlackIs1`) draw, and damaged data keeps the rows decoded before its first damaged row; Type 42 (TrueType) fonts set type at its size (#1553); a clip only counts as covering the page when its shape does (#1542); an EPS another app copied pastes as editable vector art (`clipboard.importEps`, #1499); a stitched shading keeps its hard colour changes on import (#1654); CMYK images, CMYK JPEGs included, keep their ink amounts on import, as from PDF, and the pixels a `MaskColor` or `ImageType 3` mask hides become a grayscale opacity mask; ruzstd 0.9.1 for compressed editing data (#1807, RUSTSEC-2026-0344) |
+| PostScript `.ps` | open, place | yes (the EPS reader reads its first page; `.epsf` files open and place as EPS) | via Print to PostScript | `tests_epsimport.rs` |
 | SVG / SVGZ | open, place, save | yes | yes (SVG Options, Preserve Editing, symbols, filters, rich text) | strongest format; tests in `crates/svg/tests`; text on a path follows basic shapes as their SVG 2 equivalent paths (#1527); CSS transforms and the `font` shorthand (#1565), percentage lengths in symbols (#1596), Inkscape flowed text as area type (#1568) and Inkscape pages as artboards (#1601) import; an unsupported filter is named in its warning (#1598) |
 | DXF | open, export | yes | yes (R12–2018) | R13–2018 closed SPLINE flags and control-point closure on import verified (#1299); [Autodesk group 70](https://help.autodesk.com/cloudhelp/2024/ENU/AutoCAD-DXF/files/GUID-E1F884F8-AA90-4864-A215-3182D47A9C74.htm). CIRCLE/ARC export fitting, CNC preset and VCarve QA remain open |
 | DWG | open, export | no | no | no open spec; DXF instead |
 | EMF / WMF | open, export | yes | yes | an oversized embedded PNG or JPEG is refused from its header, before any pixels are decoded (#1776) |
 | PSD | open, place, export | yes (merged image, every mode and depth) | yes (layered, max editability) | placing as layers (Photoshop Import Options) missing; the embedded ICC profile's tags are 4-byte aligned (#1584) |
 | PSB | open | yes (merged image) | no | |
-| PNG / JPEG / GIF / BMP / TIFF / Targa | open, export | yes (Targa: export only) | yes; TIFF is also selectable in Export for Screens and Asset Export with its existing options | Targa import missing; TIFF: grayscale with an alpha channel or other extra channels reads (#1466 in part), CCITT Group 3 and planar files with extra channels don't; the ICC profiles embedded in JPEG and TIFF have 4-byte aligned tags (#1584) |
+| PNG / JPEG / GIF / BMP / TIFF / Targa | open, place, export | yes (Targa: `.tga`, `.vda`, `.icb` and `.vst`, raw or run-length encoded, with a 16-bit file's one-bit alpha) | yes; TIFF is also selectable in Export for Screens and Asset Export with its existing options | Targa: `tests_tiffbmp.rs`, `tests_links.rs`; TIFF: grayscale with an alpha channel or other extra channels reads (#1466 in part), and so do files that store each channel as its own plane (PlanarConfiguration 2), CMYK ones with their ink amounts, and 1-bit files compressed with CCITT Group 3 (Compression 2 and 3, one- and two-dimensional rows); the ICC profiles embedded in JPEG and TIFF have 4-byte aligned tags (#1584); PNG export marks its colours as sRGB (`embedIcc`, an `sRGB` chunk; no ICC profile is embedded, #2221) |
 | WebP | export (Export for Screens) | yes | yes (lossless only; lossy written lossless with a warning) | |
 | HEIC / HEIF | open, place | no | no | |
 | JPEG 2000 | open, place | no | no | |
@@ -101,11 +110,17 @@ Local print-PDF preservation work (16 October): process-only DeviceN bitmap inks
 | FreeHand `.fh*` | open (legacy) | no | no | |
 | CorelDRAW `.cdr` | open | no | no | |
 | Text `.txt` | place, export | place (Text Import Options) | yes | |
-| RTF / Word `.doc`/`.docx` | place | no | no | |
+| RTF `.rtf` | place | place (area type with fonts, size, bold, italic, underline, strikethrough, caps, superscript and subscript, color, alignment, indents and paragraph spacing) | no | `tests_textimport.rs`, `place/rtf.rs`; fuzzed (`text_import_fuzz.rs`); `\'hh` bytes read as Windows-1252 or Mac Roman only |
+| Word `.docx` | place | place (area type with the document's styles and its fonts, size, bold, italic, underline, strikethrough, caps, superscript and subscript, color, alignment, indents and paragraph spacing) | no | `tests_textimport.rs`, `place/docx.rs`; fuzzed (`text_import_fuzz.rs`); list numbers, pictures and text boxes are left out |
+| Word `.doc` | place | no | no | |
 | CSS | export (CSS Properties) | — | yes | |
 | OBJ / USDA / glTF | 3D export | — | no | needs 3D (gap G3) |
 | Affinity `.af`, `.afdesign`, `.afpub` | no | yes (beyond Illustrator) | no (#665) | 51 pinned files, [affinity-validation.md](affinity-validation.md) |
 | Clipboard: PDF, SVG, PNG, EMF, text | yes | yes | yes | copied files paste as art |
+
+## PDF private application data
+
+- [x] `PieceInfo` containers used only as application data are skipped by the shared preflight and colour-discovery walk (ISO 32000-1 §14.5). Only an unshared catalog or page-tree leaf grants the exclusion. Every reference is counted; sharing a stream, its owner or its ancestors with drawing resources (including inherited resources) retains normal screening. Reader limits are unchanged. Evidence: `streams::tests::piece_only_tint_functions_are_skipped_by_preflight_and_colour_discovery`, `piece_dictionary_shared_through_inherited_resources_keeps_its_screen` (including object-stream dictionaries), `private_piece_info_grants_follow_use_and_never_hide_reader_roots`, `piece_info_streams_are_exempt_only_when_every_reference_is_private` and `pdf_private_data_shared_references_keep_screening` in engine `import_fuzz`.
 
 ## Corpus download integrity
 
@@ -113,10 +128,12 @@ Local print-PDF preservation work (16 October): process-only DeviceN bitmap inks
 
 ## Revision history
 
-16 October 2026: local print-PDF preservation experiment and remaining limits documented; scores and estimates unchanged.
-
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-23 | minor | PDF.PRIVATE review: preflight and colour discovery share a piece-only object walk; grants require an unshared catalog or page-tree leaf. Reused owners, inherited resources and object-stream dictionaries retain screening; tint-function regressions added; scores and hours unchanged. |
+| 2026-10-23 | minor | PDF.PRIVATE: streams reached exclusively through page-piece private data are exempt from preflight decoding; shared drawing streams retain every existing limit. Synthetic oversized-stream and shared-reference regressions; scores and hours unchanged. |
+| 2026-10-16 | minor | An Illustrator 3 file without prolog or layers (an image editor's exported paths) opens with its art on one layer instead of being refused (storytold/photocraft#6036); scores unchanged |
+| 2026-10-16 | minor | EPS editing data: legacy mesh corners, vector opacity masks and compound member paint retained; raster page comparison filters minification without relaxing limits; scores and hours unchanged. Synthetic EPS/parser/minification regressions; user EPS/SVG/JPG kept local. |
 | 2026-10-16 | minor | Batch exporting in Export for Screens (#1935): a file name pattern (document and item names, a counter, the date), folders per format, item or both, Layers and Selection tabs with thumbnails, EPS, AI and VectorCraft rows, a PDF row with printer's marks, and export presets (built-in Logo Package and Print-Ready PDF, saved ones); scores and hours unchanged (estimated) |
 | 2026-10-16 | minor | `.ai` editing data: a rotated embedded image lands where its raster matrix puts it, not turned 180° around its corner; the legacy version 7 writer and its prolog write and draw rotated images with the same matrix (#2269). Scores unchanged |
 | 2026-10-14 | minor | Legacy `.ai` of version 7 runs as a PostScript program: its prolog is a procedure set of VectorCraft's own that gives each operator the writer uses its meaning (paths, colours, compound paths, clipping groups, layers that don't print, images; gradients flat, type not set), and the page trailer's `annotatepage` (§3 of the specification) marks nothing; every file the writer's tests write is run through VectorCraft's PostScript reader and must draw what the document it was written from draws (#868) |
@@ -152,117 +169,3 @@ Local print-PDF preservation work (16 October): process-only DeviceN bitmap inks
 | 2026-10-11 | minor | `.ai` in PostScript form opens through its layers, also without its prolog (#1027) |
 | 2026-10-11 | minor | `.ai` editing data: global process colours and pattern fills read, so they no longer drop sublayers (#1025) |
 | 2026-10-10 | major | First checklist; moved the `.ai` editing-data scope from the ROADMAP's "Out of scope" here; added the user-reported `.ai` failures |
-
-
-### Local separation roundtrip validation — 16 October 2026
-
-The validation branch adds an explicit public-PDF print import mode, a
-Separation Roundtrip export preset, fractional CMYK/spot ink preservation,
-unchanged DeviceCMYK JPEG pass-through across native saves, and proof-aware
-headless screenshots. See [print preservation](pdf-print-preservation.md) for the supported cases
-and remaining limitations. This does not increase the general parity score or
-claim production Switch/RIP approval; separation generation remains separate.
-
-Revision history: 2026-10-16 — narrowed the imported-print preservation gaps;
-production acceptance remains pending.
-
-
-### Separation precision follow-up — 16 October 2026
-
-Editable PDF page bounds, path/clip coordinates and placement matrices retain
-double precision; fractional ink import and repeated-vertex geometry have
-regressions. Source page blending also governs writer-created transparency
-groups, removing a measured CMYK tone shift. See
-[pdf-print-preservation.md](pdf-print-preservation.md#edge-and-tone-follow-up--16-october-2026)
-for evidence and limits. Scores, hours and production readiness are unchanged.
-
-
-### 17 October 2026: explicit source-colour preservation (local qualification)
-
-RGB and grey PDF output now retain fractional components through the shared
-writer's normalized constructors. DeviceRGB import reads the original components
-instead of an 8-bit display conversion. The `output.conversion: "preserveSource"`
-setting retains RGB/CMYK/grey values in either document colour mode. It refuses
-conflicting destination conversions, PDF/X-1a, PDF 1.3 flattening, ordinary Lab
-fallback and profile conversions that would change the source RGB values. Named
-spots continue using their exact names and tints. Imported print/page settings
-are retained with this setting when their existing preservation checks pass.
-
-Evidence: `tests_output::preserve_source_*`, the craft-pdf writer's fractional
-RGB/grey serialization test, and Reporter's recipe-driven WE qualification
-harness. The shared writer is published and pinned to immutable revision
-`6f322f53d6f73c937b4347a146e911f037d16752`; no local dependency override is used.
-No headline parity score changes and no production compatibility claim.
-
-Validation: all nine `cargo xtask ci` stages passed against the published pin,
-including the immutable PDF dependency gate and all 23 wasm crates. Homebrew Rust
-used `RUSTC_BOOTSTRAP=1 CARGO_UNSTABLE_BUILD_STD=std,panic_abort`. The strict WE
-Dark/Light probe also passed with the CLI built against this published revision.
-
-### WEB.H1 — Reporter embed bridge (17 October 2026)
-
-Port the existing same-origin single-document bridge onto the current web shell,
-retaining pointer input, parent-owned preferences, image-only export, transformed
-image replacement and undo. Hybrid hosts negotiate production PDF import and an
-explicit source-preserving export; open completion and refused exports are reported
-to the parent. The parent owns persistence and production release. See
-`docs/web-embed.md` and the native bridge/UI tests. No parity score increase or
-production qualification is claimed by this integration alone.
-
-### WEB.H2 — Production import guard and mask rendering (17 October 2026)
-
-Production PDF import now refuses documents exceeding safe editable nesting limits
-before the limiter can remove clipping paths or opacity masks. This is a guarded
-unsupported case, not support for arbitrarily deep artwork. Synthetic import and
-engine tests cover refusal and retaining the previously open document.
-
-Restore bounded opacity-mask raster work in the updated renderer, retaining the
-full-viewport reference and conservative fallback for symbols and effects. Coverage
-tests compare the two paths across clipping, inversion, transforms and antialiasing.
-The runtime-file `soft_mask_profile` example measures redraw/pan/zoom/move without
-embedding customer artwork. Reporter rollout remains held for DF fidelity and the
-actual Switch layer-consumption contract; parity scores and estimates are unchanged.
-
-Validation: all nine `cargo xtask ci` gates passed. All 16 Hybrid/gang references
-retain identical artwork objects and streams across 48 exports compared with the
-previous bridge build (writer timestamps/generated IDs excluded). The deep DF
-reference is refused in production mode before any export. All 58 sampled mask
-render frame hashes match the uncropped renderer. Customer PDFs stay outside Git.
-
-### WEB.H3 — Upstream 0.12 and nested production artwork (17 October 2026)
-
-Working integration of upstream 0.12.0 (`8bc65329`). Editable object nesting is
-bounded at 64, native JSON at 256 after an iterative preflight, and aggregate
-symbol/pattern drawing at the unchanged 128. This retains legitimate nested
-PDF clips/masks that the former 32-level limiter removed. Beyond-cap production
-imports still fail before simplification. Synthetic tests cover maximum-depth
-native roundtrips, hostile JSON, 48 nested PDF clips, and physical page/ink
-positions when retained print settings meet upstream's large-page UserUnit.
-The local customer DF export removes the pale gradient patch and has no
-nesting-loss warning. All 18 native corpus cases pass including exact native
-save/reopen equality. Six optimized-browser cases pass open/edit/export/undo
-and native reopen, with unchanged PDF artwork after undo/reopen; synthetic
-64-level groups and masks also reopen in the browser. All nine full CI gates
-pass. No broader lossless claim or parity score change is made. Customer
-files remain local and uncommitted.
-
-
-### DF.9 — CMYK editing-copy substitution (17 October 2026)
-
-Ordinary PDF open retains the public PDF artwork when its embedded editing copy
-would replace CMYK image inks with RGB previews. Synthetic image, luminosity and
-alpha soft-mask regressions cover import and PDF export. See
-[local DF validation](supacolour/df-cmyk-softmask-prefs.md). G9/file-format scores,
-hours and milestone estimates remain unchanged.
-
-Revision history: 2026-10-17 — add CMYK substitution regression evidence; no parity increase.
-
-### DF.10 — printed CMYK occurrences (18 October 2026)
-
-Editing-copy adoption now pairs printed image occurrences in paint order and page-relative
-placement. Hidden, nonprinting, misplaced and duplicate resources cannot authorize an RGB
-substitution. Matched CMYK objects use the public PDF image bytes without replacing the
-editable layer tree or its hidden originals, including JPEG/lossless pairs. Ambiguous
-compositing and multi-artboard mappings retain the public PDF with a warning. This is a
-conservative import guard, not a general lossless-editing guarantee. Synthetic regressions
-cover masking, opacity, clipping, repeated uses and PDF export/reopen. Scores unchanged.

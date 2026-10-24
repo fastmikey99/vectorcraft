@@ -1,7 +1,7 @@
 //! The pages of a PDF to import: opening with a password, the pages picked, the box each page
 //! is cropped to ([`CropTo`]) and [`info`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use craft_pdf::syntax::object::{Array, Dict, MaybeRef, Name, Object, ObjectIdentifier, Stream, dict_or_stream};
 use craft_pdf::syntax::page::Page;
@@ -116,7 +116,8 @@ fn procedures_too_deep(o: &Object<'_>) -> bool {
 }
 
 /// The error of a file with a stream the reader would fail on ([`crate::streams`]).
-const STREAM_NOTE: &str = "a stream in it would decode to more than 256 MB, or its decode parameters can't be applied";
+const STREAM_NOTE: &str = "a stream in it would decode to more than 256 MB (the content of a page or form: 512 MB, \
+                           at most 32 times its stored size), or its decode parameters can't be applied";
 
 /// The error of a file with functions or color spaces built on one another past [`MAX_LINKS`]
 /// (or on themselves), or a calculator function nested past [`MAX_PROCEDURES`].
@@ -127,31 +128,425 @@ const UNREADABLE_NOTE: &str = "an array in it is damaged and can't be read";
 
 /// Why `pdf` is refused, if it is: a stream the reader would fail on ([`STREAM_NOTE`]), or
 /// functions, color spaces or calculator procedures nested too deep ([`NESTED_NOTE`]). Every
-/// object is looked at, and every array, dictionary and stream written inside one, wherever it
-/// is used from: the interpreter builds functions and color spaces from resources, shadings,
-/// images, patterns, masks and graphics states alike.
+/// object is looked at, and every array, dictionary and stream written inside one. Objects
+/// reached exclusively through an unshared catalog or page-tree leaf's `PieceInfo` are exempt:
+/// drawing never decodes them, including during colour discovery.
+/// Shared streams keep their checks, including when a private dictionary is itself shared.
 fn hostile(pdf: &Pdf) -> Option<&'static str> {
     let xref = pdf.xref();
+    let refs = references(pdf.objects().into_iter());
+    let objects = scanned_objects_with_refs(pdf, &refs, u32::MAX);
+    let content = content_streams(pdf, &refs);
     let mut known = HashMap::new();
-    // The objects of the file, then what each holds directly (64 deep at most: the reader's cap).
-    let mut pending: Vec<Object<'_>> = pdf.objects().into_iter().collect();
-    while let Some(o) = pending.pop() {
+    for o in objects {
         // A stream's own checks come first: a calculator function is decoded below.
-        if matches!(&o, Object::Stream(s) if crate::streams::unsafe_stream(s)) {
+        if matches!(&o, Object::Stream(s) if crate::streams::unsafe_stream(s, content.contains(&s.obj_id()))) {
             return Some(STREAM_NOTE);
         }
         if procedures_too_deep(&o) || built_on(MaybeRef::NotRef(o.clone()), xref, &mut known, MAX_LINKS).is_none() {
             return Some(NESTED_NOTE);
         }
-        match &o {
-            // An array with an item that can't be read can't be looked at whole, and the
-            // interpreter would still read its leading items: the file is refused.
-            Object::Array(a) if !readable(a) => return Some(UNREADABLE_NOTE),
-            Object::Array(a) => pending.extend(items(a).filter_map(direct)),
-            _ => pending.extend(dict_or_stream(&o).into_iter().flat_map(|(d, _)| values(d)).filter_map(direct)),
+        // An array with an item that can't be read can't be looked at whole, and the
+        // interpreter would still read its leading items: the file is refused.
+        if matches!(&o, Object::Array(a) if !readable(a)) {
+            return Some(UNREADABLE_NOTE);
         }
     }
     None
+}
+
+/// The streams `pdf` uses as content and as nothing else. Content is found where the interpreter
+/// finds it, from the pages of the page tree: a page's `Contents` (a stream or an array of them);
+/// in the resources of a page (its own or inherited), a form, a tiling pattern, a Type 3 font or
+/// an appearance stream, the forms of `XObject`, the tiling patterns of `Pattern`, a Type 3
+/// font's `CharProcs` and the group (`G`) of a graphics state's soft mask; and the appearance
+/// streams (`AP`: `N`, `R` and `D`, each a stream or a dictionary of them) of a page's
+/// annotations. A stream the file also refers to from anywhere else (an Indexed colour table, a
+/// function, an unrelated dictionary's `Contents`) is not content here: it gets the ordinary
+/// limit ([`crate::streams`]).
+fn content_streams(pdf: &Pdf, refs: &HashMap<ObjectIdentifier, usize>) -> HashSet<ObjectIdentifier> {
+    let mut uses = Uses {
+        xref: pdf.xref(),
+        seen: HashSet::new(),
+        inherited: HashSet::new(),
+        roles: HashMap::new(),
+        content: HashMap::new(),
+        path: vec![],
+        depth: 0,
+    };
+    for page in pdf.pages().iter() {
+        uses.page(page.raw());
+    }
+    // Content only, and reached only through objects the file uses for nothing else: an object
+    // also referred to from anywhere else (`/XObject 7 0 R /Shading 7 0 R`) passes no content on.
+    let only_here = |id: &ObjectIdentifier| uses.roles.get(id) == refs.get(id);
+    uses.content.iter().filter(|(id, within)| only_here(id) && within.iter().all(only_here)).map(|(id, _)| *id).collect()
+}
+
+/// Count every reference in these objects and their direct children, without following it.
+/// Both content grants and private-data exemptions must account for every incoming reference.
+fn references<'a>(objects: impl Iterator<Item = Object<'a>>) -> HashMap<ObjectIdentifier, usize> {
+    let mut refs = HashMap::new();
+    let mut pending: Vec<_> = objects.collect();
+    while let Some(o) = pending.pop() {
+        let held: Vec<MaybeRef<Object<'_>>> = match &o {
+            Object::Array(a) => items(a).collect(),
+            _ => dict_or_stream(&o).into_iter().flat_map(|(d, _)| values(d).collect::<Vec<_>>()).collect(),
+        };
+        for h in held {
+            match h {
+                MaybeRef::Ref(r) => *refs.entry(ObjectIdentifier::from(r)).or_default() += 1,
+                MaybeRef::NotRef(o) => pending.push(o),
+            }
+        }
+    }
+    refs
+}
+
+/// Objects reached only through an unshared catalog or page's `PieceInfo` (ISO 32000-1
+/// §14.5). A form or a reader root also used elsewhere cannot grant an exemption.
+/// https://developer.adobe.com/document-services/docs/assets/35e4369068f86065372c18787171a17e/PDF_ISO_32000-1.pdf
+fn private_objects(pdf: &Pdf, refs: &HashMap<ObjectIdentifier, usize>) -> HashSet<(usize, usize)> {
+    let xref = pdf.xref();
+    let catalog = xref.get::<Dict<'_>>(xref.root_id());
+    let mut roots = vec![];
+    if refs.get(&xref.root_id()).copied().unwrap_or(0) == 0 {
+        roots.extend(catalog.clone());
+    }
+    // Confirm membership through the real page tree, rather than the reader's repair fallback.
+    // Each leaf must have exactly its one Kids reference; resources or any other use revoke it.
+    let pages: HashSet<_> = pdf.pages().iter().filter_map(|p| p.raw().obj_id()).collect();
+    let mut pending: Vec<_> = catalog
+        .and_then(|d| d.get::<Dict<'_>>(b"Pages"))
+        .filter(|d| d.get::<Name<'_>>(b"Type").is_some_and(|t| t.as_ref() == b"Pages"))
+        .into_iter()
+        .collect();
+    let mut seen = HashSet::new();
+    let mut work = 1usize;
+    while let Some(node) = pending.pop() {
+        if node.obj_id().is_some_and(|id| !seen.insert(id)) {
+            continue;
+        }
+        if node.get::<Name<'_>>(b"Type").is_some_and(|t| t.as_ref() == b"Pages") {
+            if let Some(kids) = node.get::<Array<'_>>(b"Kids") {
+                for kid in items(&kids) {
+                    work += 1;
+                    if work > MAX_PAGE_TREE {
+                        // An incomplete ownership walk grants nothing.
+                        return HashSet::new();
+                    }
+                    if let MaybeRef::Ref(r) = kid {
+                        pending.extend(xref.get::<Dict<'_>>(r.into()));
+                    }
+                }
+            }
+        } else if node.get::<Name<'_>>(b"Type").is_some_and(|t| t.as_ref() == b"Page")
+            && node.obj_id().is_some_and(|id| pages.contains(&id) && refs.get(&id) == Some(&1))
+        {
+            roots.push(node);
+        }
+    }
+    let public: HashSet<_> = std::iter::once(xref.root_id()).chain(pages).collect();
+    let mut granted = HashMap::<ObjectIdentifier, usize>::new();
+    let mut skipped = HashSet::new();
+    for root in roots {
+        let Some(piece) = root.get::<Dict<'_>>(b"PieceInfo") else { continue };
+        let children = match root.get_raw::<Object<'_>>(b"PieceInfo") {
+            Some(MaybeRef::Ref(r)) => HashMap::from([(r.into(), 1)]),
+            Some(MaybeRef::NotRef(o)) => {
+                skipped.insert(identity(piece.data()));
+                references(std::iter::once(o))
+            }
+            None => HashMap::new(),
+        };
+        for (id, n) in children {
+            *granted.entry(id).or_default() += n;
+        }
+    }
+    // First grant the whole reachable graph, counting each edge once, including cycles and
+    // repeated references. Then revoke any object with an outside reference, and propagate
+    // that revocation to its descendants. This is linear even for a shared or cyclic graph.
+    let mut pending: Vec<_> = granted.keys().copied().collect();
+    let mut edges = HashMap::new();
+    while let Some(id) = pending.pop() {
+        if edges.contains_key(&id) {
+            continue;
+        }
+        let children = references(xref.get::<Object<'_>>(id).into_iter());
+        for (child, n) in &children {
+            *granted.entry(*child).or_default() += n;
+            if !edges.contains_key(child) {
+                pending.push(*child);
+            }
+        }
+        edges.insert(id, children);
+    }
+    let mut private: HashSet<_> = edges.keys().copied().collect();
+    pending.extend(private.iter().filter(|id| public.contains(id) || granted.get(id) != refs.get(id)).copied());
+    while let Some(id) = pending.pop() {
+        if !private.remove(&id) {
+            continue;
+        }
+        for (child, n) in edges.get(&id).into_iter().flatten() {
+            if let Some(count) = granted.get_mut(child) {
+                *count = count.saturating_sub(*n);
+                if Some(&*count) != refs.get(child) {
+                    pending.push(*child);
+                }
+            }
+        }
+    }
+    for id in private {
+        if let Some(o) = xref.get::<Object<'_>>(id)
+            && let Some(data) = object_data(&o)
+            // Reader structural streams always retain their checks.
+            && !matches!(&o, Object::Stream(s) if s.dict().get::<Name<'_>>(b"Type")
+                .is_some_and(|t| matches!(t.as_ref(), b"ObjStm" | b"XRef")))
+        {
+            skipped.insert(identity(data));
+        }
+    }
+    skipped
+}
+
+// Identify the actual parsed container, including arrays and dictionaries inside object streams.
+// Equal bytes in a different object do not establish ownership. The PDF outlives the walk.
+fn identity(data: &[u8]) -> (usize, usize) {
+    (data.as_ptr() as usize, data.len())
+}
+
+fn object_data<'a>(o: &Object<'a>) -> Option<&'a [u8]> {
+    match o {
+        Object::Array(a) => Some(a.data()),
+        _ => dict_or_stream(o).map(|(d, _)| d.data()),
+    }
+}
+
+/// All containers that retain normal screening, with their direct children. Both preflight and
+/// colour discovery use this walk so private tint functions and profiles are never decoded.
+pub(crate) fn scanned_objects(pdf: &Pdf, max_depth: u32) -> impl Iterator<Item = Object<'_>> {
+    let refs = references(pdf.objects().into_iter());
+    scanned_objects_with_refs(pdf, &refs, max_depth)
+}
+
+fn scanned_objects_with_refs<'a>(
+    pdf: &'a Pdf,
+    refs: &HashMap<ObjectIdentifier, usize>,
+    max_depth: u32,
+) -> impl Iterator<Item = Object<'a>> + use<'a> {
+    let skipped = private_objects(pdf, refs);
+    let mut pending: Vec<_> = pdf.objects().into_iter().map(|o| (o, 0u32)).collect();
+    pending.reverse();
+    std::iter::from_fn(move || {
+        while let Some((o, depth)) = pending.pop() {
+            if depth > max_depth {
+                continue;
+            }
+            if object_data(&o).is_some_and(|data| skipped.contains(&identity(data))) {
+                continue;
+            }
+            let children: Vec<_> = match &o {
+                Object::Array(a) => items(a).filter_map(direct).collect(),
+                _ => dict_or_stream(&o).into_iter().flat_map(|(d, _)| values(d)).filter_map(direct).collect(),
+            };
+            // Colour discovery historically counts a stream and its dictionary separately.
+            let child_depth = depth.saturating_add(if matches!(o, Object::Stream(_)) { 2 } else { 1 });
+            pending.extend(children.into_iter().rev().map(|child| (child, child_depth)));
+            return Some(o);
+        }
+        None
+    })
+}
+
+/// How deep [`content_streams`] follows content inside content (forms in forms, glyphs in
+/// glyphs): the interpreter's limit on nested forms. Content past it gets the ordinary limit.
+const MAX_CONTENT_NESTING: usize = 50;
+
+/// How many page tree nodes above a page [`content_streams`] looks through for the resources it
+/// inherits: the reader's page tree work budget, so any page it reads has its resources found.
+const MAX_PAGE_TREE: usize = 100_000;
+
+/// The walk of [`content_streams`]: each place that holds content is looked at once.
+struct Uses<'a> {
+    xref: &'a XRef,
+    /// The objects looked at already.
+    seen: HashSet<ObjectIdentifier>,
+    /// The page tree nodes whose resources were walked for the pages that inherit them.
+    inherited: HashSet<ObjectIdentifier>,
+    /// The references to each object from where the walk found it.
+    roles: HashMap<ObjectIdentifier, usize>,
+    /// Each content stream, and the objects the walk went through to find it (anywhere).
+    content: HashMap<ObjectIdentifier, HashSet<ObjectIdentifier>>,
+    /// The objects the walk is inside, below the page.
+    path: Vec<ObjectIdentifier>,
+    /// How many resource dictionaries the walk is inside.
+    depth: usize,
+}
+
+impl<'a> Uses<'a> {
+    /// The object `o` is or refers to, the first time it is met (`None` after that); a
+    /// reference is counted each time.
+    fn first(&mut self, o: MaybeRef<Object<'a>>) -> Option<Object<'a>> {
+        match o {
+            MaybeRef::Ref(r) => {
+                let id = ObjectIdentifier::from(r);
+                *self.roles.entry(id).or_default() += 1;
+                if self.seen.insert(id) { self.xref.get::<Object<'a>>(id) } else { None }
+            }
+            MaybeRef::NotRef(o) => Some(o),
+        }
+    }
+
+    /// The dictionary `o` is or refers to, the first time it is met, and the object it is.
+    fn dict(&mut self, o: Option<MaybeRef<Object<'a>>>) -> Option<(Dict<'a>, Option<ObjectIdentifier>)> {
+        let o = o?;
+        let id = o.as_obj_ref().map(ObjectIdentifier::from);
+        match self.first(o)? {
+            Object::Dict(d) => Some((d, id)),
+            _ => None,
+        }
+    }
+
+    /// `f`, inside the object `id` (when it is one).
+    fn within(&mut self, id: Option<ObjectIdentifier>, f: impl FnOnce(&mut Self)) {
+        self.path.extend(id);
+        f(self);
+        if id.is_some() {
+            self.path.pop();
+        }
+    }
+
+    /// The stream `o` refers to, used as content from here when `kind` accepts its dictionary;
+    /// its resources are walked the first time. `false` when `o` isn't a stream.
+    fn content(&mut self, o: &MaybeRef<Object<'a>>, kind: fn(&Dict<'_>) -> bool) -> bool {
+        // (A stream is always an indirect object.)
+        let MaybeRef::Ref(r) = o else { return false };
+        let id = ObjectIdentifier::from(*r);
+        let Some(Object::Stream(s)) = self.xref.get::<Object<'a>>(id) else { return false };
+        *self.roles.entry(id).or_default() += 1;
+        if kind(s.dict()) {
+            self.content.entry(id).or_default().extend(self.path.iter().copied());
+            if self.seen.insert(id) {
+                self.within(Some(id), |u| u.resources(s.dict().get_raw::<Object<'a>>(b"Resources")));
+            }
+        }
+        true
+    }
+
+    /// The stream `o` refers to as content, or the streams of the array (or, `in_dict`, the
+    /// dictionary of appearance states) it is or refers to.
+    fn streams(&mut self, o: Option<MaybeRef<Object<'a>>>, in_dict: bool) {
+        let Some(o) = o else { return };
+        if self.content(&o, any) {
+            return;
+        }
+        let id = o.as_obj_ref().map(ObjectIdentifier::from);
+        match self.first(o) {
+            Some(Object::Array(a)) if !in_dict => self.within(id, |u| items(&a).for_each(|i| _ = u.content(&i, any))),
+            Some(Object::Dict(d)) if in_dict => self.within(id, |u| values(&d).for_each(|v| _ = u.content(&v, any))),
+            _ => {}
+        }
+    }
+
+    fn page(&mut self, page: &Dict<'a>) {
+        if page.obj_id().is_some_and(|id| !self.seen.insert(id)) {
+            return;
+        }
+        self.streams(page.get_raw::<Object<'a>>(b"Contents"), false);
+        // Its own resources, or those of the nearest node above it (walked once for all its pages).
+        let mut node = page.clone();
+        let mut above = HashSet::new();
+        for _ in 0..MAX_PAGE_TREE {
+            if let Some(res) = node.get_raw::<Object<'a>>(b"Resources") {
+                if node.obj_id() == page.obj_id() || node.obj_id().is_some_and(|id| self.inherited.insert(id)) {
+                    self.resources(Some(res));
+                }
+                break;
+            }
+            let Some(parent) = node.get::<Dict<'a>>(b"Parent") else { break };
+            if parent.obj_id().is_some_and(|id| !above.insert(id)) {
+                break;
+            }
+            node = parent;
+        }
+        let annots_id = page.get_ref(b"Annots").map(ObjectIdentifier::from);
+        let Some(Object::Array(annots)) = page.get_raw::<Object<'a>>(b"Annots").and_then(|a| self.first(a)) else { return };
+        self.within(annots_id, |u| {
+            for annot in items(&annots) {
+                let Some((annot, annot_id)) = u.dict(Some(annot)) else { continue };
+                u.within(annot_id, |u| {
+                    let Some((ap, ap_id)) = u.dict(annot.get_raw::<Object<'a>>(b"AP")) else { return };
+                    u.within(ap_id, |u| {
+                        for key in [&b"N"[..], b"R", b"D"] {
+                            let Some(a) = ap.get_raw::<Object<'a>>(key) else { continue };
+                            if !u.content(&a, any) {
+                                u.streams(Some(a), true);
+                            }
+                        }
+                    });
+                });
+            }
+        });
+    }
+
+    fn resources(&mut self, res: Option<MaybeRef<Object<'a>>>) {
+        if self.depth >= MAX_CONTENT_NESTING {
+            return;
+        }
+        let Some((res, id)) = self.dict(res) else { return };
+        self.depth += 1;
+        self.within(id, |u| u.resources_in(&res));
+        self.depth -= 1;
+    }
+
+    fn resources_in(&mut self, res: &Dict<'a>) {
+        if let Some((x, id)) = self.dict(res.get_raw::<Object<'a>>(b"XObject")) {
+            self.within(id, |u| values(&x).for_each(|v| _ = u.content(&v, form)));
+        }
+        if let Some((p, id)) = self.dict(res.get_raw::<Object<'a>>(b"Pattern")) {
+            self.within(id, |u| values(&p).for_each(|v| _ = u.content(&v, |d| d.get::<u8>(b"PatternType") == Some(1))));
+        }
+        if let Some((fonts, id)) = self.dict(res.get_raw::<Object<'a>>(b"Font")) {
+            self.within(id, |u| {
+                for f in values(&fonts) {
+                    let Some((f, font_id)) = u.dict(Some(f)) else { continue };
+                    if f.get::<Name<'_>>(b"Subtype").is_some_and(|s| s.as_ref() == b"Type3") {
+                        u.within(font_id, |u| {
+                            if let Some((procs, procs_id)) = u.dict(f.get_raw::<Object<'a>>(b"CharProcs")) {
+                                u.within(procs_id, |u| values(&procs).for_each(|v| _ = u.content(&v, any)));
+                            }
+                            u.resources(f.get_raw::<Object<'a>>(b"Resources"));
+                        });
+                    }
+                }
+            });
+        }
+        if let Some((states, id)) = self.dict(res.get_raw::<Object<'a>>(b"ExtGState")) {
+            self.within(id, |u| {
+                for gs in values(&states) {
+                    let Some((gs, gs_id)) = u.dict(Some(gs)) else { continue };
+                    u.within(gs_id, |u| {
+                        if let Some((mask, mask_id)) = u.dict(gs.get_raw::<Object<'a>>(b"SMask"))
+                            && let Some(g) = mask.get_raw::<Object<'a>>(b"G")
+                        {
+                            u.within(mask_id, |u| _ = u.content(&g, any));
+                        }
+                    });
+                }
+            });
+        }
+    }
+}
+
+/// Any stream: a page's contents, a glyph's procedure, an appearance stream or a soft mask's
+/// group is drawn as content whatever its dictionary says.
+fn any(_: &Dict<'_>) -> bool {
+    true
+}
+
+/// A form XObject.
+fn form(d: &Dict<'_>) -> bool {
+    d.get::<Name<'_>>(b"Subtype").is_some_and(|s| s.as_ref() == b"Form")
 }
 
 /// Read a PDF, decrypting it with `password` (none: the empty user password). The permissions

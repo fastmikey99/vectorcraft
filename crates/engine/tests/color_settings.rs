@@ -226,3 +226,124 @@ fn live_objects_draw_through_new_color_settings() {
         assert!(warm == fresh, "{what}: drawn as a new renderer draws it");
     }
 }
+
+/// #2276: with a working RGB space other than sRGB, the Eyedropper takes an image's sRGB pixel
+/// into the working space, so the sampled fill shows as the pixel it was picked from.
+#[test]
+fn the_eyedropper_takes_an_image_pixel_into_the_working_rgb_space() {
+    use vectorcraft_color::Color;
+    use vectorcraft_doc::{ImageBlob, ImageObject, Node, NodeKind};
+    use vectorcraft_engine::ViewInfo;
+    use vectorcraft_tools::{PointerEvent, PointerKind};
+    let _g = settings();
+    let old = cms::active_settings();
+    let mut s = session();
+    let img = image::RgbaImage::from_raw(1, 1, vec![83, 170, 223, 255]).unwrap();
+    let mut png = vec![];
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    s.edit("Place", |d, _| {
+        d.images.insert("px".into(), ImageBlob::png(png));
+        let l = d.layers[0].id;
+        let id = d.alloc_id();
+        let xf = Affine::translate((300.0, 0.0)) * Affine::scale(100.0);
+        let im = ImageObject { key: "px".into(), width: 1, height: 1, xf, link: None, placement: Default::default() };
+        d.insert(Some(l), 0, Node::new(id, NodeKind::Image(Box::new(im)))).map_err(|e| vectorcraft_engine::EngineError::Other(e.to_string()))
+    })
+    .unwrap();
+    let dst = rect(&mut s, 10.0, 10.0, 50.0, 50.0);
+    s.execute("edit.colorSettings", &json!({"rgb": cms::WIDE_GAMUT_RGB})).unwrap();
+    s.select_tool("eyedropper", ViewInfo::default()).unwrap();
+    s.pointer(&PointerEvent::new(PointerKind::Down, 350.0, 50.0), ViewInfo::default()).unwrap();
+    let got = s.doc().unwrap().doc.node(dst).unwrap().appearance.fill_paint().color();
+    let shown = got.map(|c| c.to_rgba8(1.0));
+    cms::set_active(&old).unwrap();
+    assert!(matches!(got, Some(Color::Rgb { .. })), "{got:?}");
+    let [r, g, b, _] = shown.unwrap_or_default();
+    assert!(r.abs_diff(83) <= 1 && g.abs_diff(170) <= 1 && b.abs_diff(223) <= 1, "{shown:?} for 83/170/223");
+}
+
+/// With a working RGB space other than sRGB, a freeform gradient of RGB points expands to mesh
+/// points with the points' own RGB values, and points in different models expand to mesh points
+/// that show the colors the gradient shows there.
+#[test]
+fn a_freeform_gradient_expands_with_its_rgb_values_in_the_working_rgb_space() {
+    use vectorcraft_color::freeform::spread_scale;
+    use vectorcraft_color::{Color, Paint};
+    use vectorcraft_doc::NodeKind;
+    use vectorcraft_geom::Rect;
+    let _g = settings();
+    let old = cms::active_settings();
+    cms::set_active(&cms::ColorSettings { rgb: cms::WIDE_GAMUT_RGB.into(), ..old.clone() }).unwrap();
+    // Each mesh point's color, the display color it shows and the display color the gradient
+    // shows at its place.
+    let expand = |colors: [serde_json::Value; 4]| {
+        let mut s = session();
+        let id = rect(&mut s, 20.0, 20.0, 160.0, 160.0);
+        select(&mut s, &[id]);
+        exec(&mut s, "paint.setFill", json!({"gradient": {"kind": "freeform"}}));
+        exec(&mut s, "paint.setStroke", json!({"none": true}));
+        for (i, c) in colors.into_iter().enumerate() {
+            exec(&mut s, "paint.freeform.setPoint", json!({"index": i, "color": c, "stroke": false}));
+        }
+        let b = Rect::new(20.0, 20.0, 180.0, 180.0);
+        let field = match s.doc().unwrap().doc.node(id).map(|n| n.appearance.fill_paint()) {
+            Some(Paint::Gradient(g)) => g.freeform_on(b).field(spread_scale(b)),
+            p => panic!("a gradient fill: {p:?}"),
+        };
+        exec(&mut s, "object.expand", json!({}));
+        let d = &s.doc().unwrap();
+        let mesh = d.selection.objects.first().and_then(|id| d.doc.node(*id)).map(|n| n.kind.clone());
+        let Some(NodeKind::Mesh(m)) = mesh else { panic!("a mesh: {mesh:?}") };
+        m.points.iter().map(|p| (p.color, p.color.to_rgb(), field.sample(p.p).0)).collect::<Vec<_>>()
+    };
+    let rgb = expand([json!("#3399e6"), json!("#3399e6"), json!("#3399e6"), json!("#3399e6")]);
+    let mixed = expand([json!("#3399e6"), json!("#3399e6"), json!({"gray": 0.5}), json!({"gray": 0.5})]);
+    cms::set_active(&old).unwrap();
+    let want = Color::rgb8(0x33, 0x99, 0xe6);
+    for (c, ..) in &rgb {
+        let (Color::Rgb { r, g, b }, Color::Rgb { r: r2, g: g2, b: b2 }) = (*c, want) else { panic!("an RGB point: {c:?}") };
+        assert!((r - r2).abs() < 1e-5 && (g - g2).abs() < 1e-5 && (b - b2).abs() < 1e-5, "{c:?} for {want:?}");
+    }
+    for (c, shown, field) in &mixed {
+        let close = shown.iter().zip(field).all(|(a, b)| (a - b).abs() < 2.0 / 255.0);
+        assert!(matches!(c, Color::Rgb { .. }) && close, "{c:?} shows {shown:?} for {field:?}");
+    }
+}
+
+/// A working space registered again under its own name takes the new profile at once, without the
+/// settings' names changing (a page sending its profiles again, `vectorcraft:colorSettings`).
+#[test]
+fn a_working_space_registered_again_takes_its_new_profile() {
+    let _g = settings();
+    let old = cms::active_settings();
+    let name = "Re-registered Working RGB";
+    cms::register_icc(&cms::icc_bytes(cms::WIDE_GAMUT_RGB).unwrap(), Some(name.into())).unwrap();
+    cms::set_active(&cms::ColorSettings { rgb: name.into(), ..old.clone() }).unwrap();
+    let wide = cms::active().rgb_to_srgb([0.2, 0.6, 0.4]);
+    cms::register_icc(&cms::icc_bytes(cms::PROPHOTO_RGB).unwrap(), Some(name.into())).unwrap();
+    let now = cms::active().rgb_to_srgb([0.2, 0.6, 0.4]);
+    let prophoto = cms::Cms::new(&cms::ColorSettings { rgb: cms::PROPHOTO_RGB.into(), ..old.clone() }).unwrap().rgb_to_srgb([0.2, 0.6, 0.4]);
+    cms::set_active(&old).unwrap();
+    assert!(wide != now, "{wide:?} {now:?}");
+    assert!(now.iter().zip(prophoto).all(|(a, b)| (a - b).abs() < 1e-4), "{now:?} vs {prophoto:?}");
+}
+
+/// A profile of another kind can't take the name of a working space in use: it is refused, and the
+/// working space keeps its profile.
+#[test]
+fn a_working_space_name_refuses_a_profile_of_another_kind() {
+    let _g = settings();
+    let old = cms::active_settings();
+    let name = "Working RGB Not To Be CMYK";
+    cms::register_icc(&cms::icc_bytes(cms::WIDE_GAMUT_RGB).unwrap(), Some(name.into())).unwrap();
+    cms::set_active(&cms::ColorSettings { rgb: name.into(), ..old.clone() }).unwrap();
+    let cmyk = cms::icc_bytes(cms::GENERIC_CMYK).unwrap();
+    let checked = cms::check_icc(&cmyk, Some(name.into()));
+    let registered = cms::register_icc(&cmyk, Some(name.into()));
+    let kind = cms::profile(name).map(|p| p.kind);
+    cms::set_active(&old).unwrap();
+    assert!(checked.is_err() && registered.is_err(), "{checked:?} {registered:?}");
+    assert_eq!(kind, Some(cms::ProfileKind::Rgb));
+    // Not in use, the name may take another kind.
+    assert_eq!(cms::register_icc(&cmyk, Some(name.into())).unwrap().kind, cms::ProfileKind::Cmyk);
+}

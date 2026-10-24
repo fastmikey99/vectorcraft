@@ -38,6 +38,24 @@ fn sel(s: &mut Session, ids: &[NodeId]) {
     s.execute("select.set", &json!({"ids": ids.iter().map(|i| i.0).collect::<Vec<_>>()})).unwrap();
 }
 
+/// A placed 64 × 32 px PNG whose header reads (so it places at its size) but whose pixel data is
+/// cut short: the renderer can't decode it and draws nothing.
+pub(crate) fn place_undecodable_png(s: &mut Session) -> NodeId {
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(64, 32, image::Rgba([200, 30, 30, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let idat = png.windows(4).position(|w| w == b"IDAT").unwrap();
+    png.truncate(idat + 8);
+    let r = s.execute("file.place", &json!({"name": "cut.png", "dataBase64": vectorcraft_format::base64_encode(&png)})).unwrap();
+    NodeId(r["ids"][0].as_u64().unwrap())
+}
+
+/// Whether reply `r` warns that an image couldn't be decoded, as raster exports do.
+pub(crate) fn warns_undecoded(r: &Value) -> bool {
+    r["warning"].as_str() == Some("an image couldn't be decoded and is missing from the picture")
+}
+
 fn fill(s: &mut Session, id: NodeId, hex: &str) {
     s.execute("paint.setFill", &json!({"ids": [id.0], "color": hex})).unwrap();
 }
@@ -63,6 +81,13 @@ fn selected(s: &Session) -> Vec<NodeId> {
 
 fn close(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-6
+}
+
+/// `cmd` with `p` fails with the error for `key`, which `p` gives as something other than a number.
+fn refuses_non_number(s: &mut Session, cmd: &str, p: &Value, key: &str) {
+    let r = s.execute(cmd, p);
+    let want = format!("`{key}` must be a number, not {}", p[key]);
+    assert!(matches!(&r, Err(EngineError::BadParams { msg, .. }) if *msg == want), "{cmd} {p}: {r:?}");
 }
 
 // ---------- Object → Lock / Hide ----------
@@ -357,6 +382,53 @@ fn transform_each_random_is_deterministic_with_seed() {
     assert!(x.x0.abs() <= 50.0 && x.width() == 100.0);
 }
 
+/// A `reference` or `seed` that is not a whole number (a fraction, a negative number or a string) is an error naming
+/// the key, and the object stays as it was; a `reference` of 0.0 is the top-left point.
+#[test]
+fn transform_each_refuses_a_reference_or_seed_that_is_not_a_whole_number() {
+    let mut s = session();
+    let a = rect(&mut s, 0.0, 0.0, 100.0, 100.0);
+    sel(&mut s, &[a]);
+    let before = (undo_len(&s), bounds(&s, a));
+    for (p, msg) in [
+        (json!({"scaleH": 50, "reference": 2.5}), "`reference` must be a whole number"),
+        (json!({"scaleH": 50, "reference": -1}), "`reference` must be a whole number"),
+        (json!({"scaleH": 50, "reference": "0"}), "`reference` must be a number, not \"0\""),
+        (json!({"moveH": 50, "random": true, "seed": 7.5}), "`seed` must be a whole number"),
+        (json!({"moveH": 50, "random": true, "seed": -7}), "`seed` must be a whole number"),
+        (json!({"moveH": 50, "random": true, "seed": "7"}), "`seed` must be a number, not \"7\""),
+    ] {
+        let r = s.execute("object.transformEach", &p);
+        assert!(matches!(&r, Err(EngineError::BadParams { msg: m, .. }) if m == msg), "{p}: {r:?}");
+        assert_eq!((undo_len(&s), bounds(&s, a)), before, "{p}");
+    }
+    s.execute("object.transformEach", &json!({"scaleH": 50, "scaleV": 50, "reference": 0.0})).unwrap();
+    assert_eq!(bounds(&s, a), Rect::new(0.0, 0.0, 50.0, 50.0));
+}
+
+/// Transform Each refuses a scale, move or rotation given as text or as another value that is not a
+/// number, and the object stays as it was; numbers for the scales and the horizontal move transform it.
+#[test]
+fn transform_each_refuses_a_number_given_as_text() {
+    let mut s = session();
+    let a = rect(&mut s, 0.0, 0.0, 100.0, 100.0);
+    sel(&mut s, &[a]);
+    let before = (undo_len(&s), bounds(&s, a));
+    for (key, p) in [
+        ("scaleH", json!({"scaleH": "50"})),
+        ("scaleV", json!({"scaleH": 50, "scaleV": "50%"})),
+        ("moveH", json!({"moveH": "10"})),
+        ("moveV", json!({"moveH": 10, "moveV": [5]})),
+        ("rotate", json!({"rotate": "45"})),
+        ("rotate", json!({"moveH": 10, "rotate": true})),
+    ] {
+        refuses_non_number(&mut s, "object.transformEach", &p, key);
+        assert_eq!((undo_len(&s), bounds(&s, a)), before, "{p}");
+    }
+    s.execute("object.transformEach", &json!({"scaleH": 50, "scaleV": 50, "moveH": 10, "moveV": null})).unwrap();
+    assert_eq!(bounds(&s, a), Rect::new(35.0, 25.0, 85.0, 75.0));
+}
+
 /// #1910: Transform Each's Reflect X flips left-right; Reflect Y flips top-bottom (same as
 /// Effect › Distort › Transform and Illustrator's Transform Each checkboxes).
 #[test]
@@ -529,6 +601,45 @@ fn rasterize_replaces_selection_with_image() {
     assert_eq!(selected(&s), vec![img]);
 }
 
+/// Rasterize refuses a resolution given as text or as another value that is not a number, and the
+/// selected art stays as it was.
+#[test]
+fn rasterize_refuses_a_ppi_given_as_text() {
+    let mut s = session();
+    let a = rect(&mut s, 10.0, 20.0, 40.0, 30.0);
+    sel(&mut s, &[a]);
+    let before = (undo_len(&s), node(&s, a));
+    for p in [json!({"ppi": "144"}), json!({"ppi": "300 ppi", "padding": 0}), json!({"ppi": [72]})] {
+        refuses_non_number(&mut s, "object.rasterize", &p, "ppi");
+        assert_eq!((undo_len(&s), node(&s, a)), before, "{p}");
+    }
+    let img = id_of(&s.execute("object.rasterize", &json!({"ppi": 144, "padding": 0})).unwrap());
+    assert!(matches!(node(&s, img).kind, NodeKind::Image(_)));
+}
+
+#[test]
+fn rasterize_says_when_an_image_could_not_be_decoded() {
+    let mut s = session();
+    let a = rect(&mut s, 10.0, 20.0, 40.0, 30.0);
+    let cut = place_undecodable_png(&mut s);
+    sel(&mut s, &[a, cut]);
+    let r = s.execute("object.rasterize", &json!({"ppi": 72})).unwrap();
+    assert!(warns_undecoded(&r), "{r}");
+    // The image still replaces the selection.
+    assert!(matches!(node(&s, id_of(&r)).kind, NodeKind::Image(_)));
+    assert!(s.doc().unwrap().doc.node(a).is_none() && s.doc().unwrap().doc.node(cut).is_none());
+}
+
+#[test]
+fn crop_image_says_when_the_image_could_not_be_decoded() {
+    let mut s = session();
+    let cut = place_undecodable_png(&mut s);
+    sel(&mut s, &[cut]);
+    let b = bounds(&s, cut);
+    let r = s.execute("object.cropImage", &json!({"rect": [b.x0, b.y0, b.width() / 2.0, b.height()]})).unwrap();
+    assert!(warns_undecoded(&r), "{r}");
+}
+
 #[test]
 fn crop_image_to_rect() {
     let mut s = session();
@@ -541,6 +652,25 @@ fn crop_image_to_rect() {
     assert!(close(b.x0, 10.0) && close(b.y0, 10.0) && close(b.width(), 50.0) && close(b.height(), 40.0), "{b:?}");
     // Image fully inside the artboard: default crop has nothing to do.
     assert!(s.execute("object.cropImage", &json!({})).is_err());
+}
+
+/// Crop Image refuses a `rect` that is not an array, such as text, and the image stays as it was; a
+/// null `rect` crops to the artboard as a missing one does.
+#[test]
+fn crop_image_refuses_a_rect_given_as_text() {
+    let mut s = session();
+    let a = rect(&mut s, -20.0, -20.0, 100.0, 100.0);
+    sel(&mut s, &[a]);
+    let img = id_of(&s.execute("object.rasterize", &json!({"ppi": 72})).unwrap());
+    let before = (undo_len(&s), node(&s, img));
+    for p in [json!({"rect": "0, 0, 20, 20"}), json!({"rect": {"x": 0, "y": 0, "width": 20, "height": 20}}), json!({"rect": 20})] {
+        let r = s.execute("object.cropImage", &p);
+        assert!(matches!(&r, Err(EngineError::BadParams { msg, .. }) if msg == "rect must be [x, y, width, height]"), "{p}: {r:?}");
+        assert_eq!((undo_len(&s), node(&s, img)), before, "{p}");
+    }
+    s.execute("object.cropImage", &json!({"rect": null})).unwrap();
+    let b = bounds(&s, img);
+    assert!(close(b.x0, 0.0) && close(b.y0, 0.0), "{b:?}");
 }
 
 #[test]
@@ -589,6 +719,30 @@ fn trim_marks_around_selection() {
     let b = n.geometric_bounds().unwrap();
     let vb = s.doc().unwrap().doc.bounds_of(&[a], true).unwrap();
     assert!(close(b.x0, vb.x0 - 30.0) && close(b.y1, vb.y1 + 30.0), "{b:?} {vb:?}");
+}
+
+/// Create Trim Marks refuses an offset, length, bleed or weight given as text or as another value
+/// that is not a number, around the selection and around the artboards, and makes no marks.
+#[test]
+fn trim_marks_refuse_a_number_given_as_text() {
+    let mut s = session();
+    let a = rect(&mut s, 100.0, 100.0, 200.0, 100.0);
+    let calls = [
+        ("offset", json!({"offset": "10"})),
+        ("length", json!({"length": "20 pt"})),
+        ("bleed", json!({"style": "japanese", "bleed": "3"})),
+        ("weight", json!({"weight": true})),
+        ("offset", json!({"allArtboards": true, "offset": {"value": 10}})),
+    ];
+    for ids in [vec![a], vec![]] {
+        sel(&mut s, &ids);
+        let before = (undo_len(&s), s.doc().unwrap().doc.layers[0].children().unwrap().len());
+        for (key, p) in &calls {
+            refuses_non_number(&mut s, "object.createTrimMarks", p, key);
+            assert_eq!((undo_len(&s), s.doc().unwrap().doc.layers[0].children().unwrap().len()), before, "{p}");
+        }
+    }
+    s.execute("object.createTrimMarks", &json!({"offset": 10, "length": 20, "bleed": null})).unwrap();
 }
 
 // ---------- Convert to Shape ----------
@@ -705,6 +859,43 @@ fn convert_to_artboards_and_rearrange() {
     assert_eq!(bounds(&s, b), Rect::new(50.0, 675.0, 60.0, 685.0));
 }
 
+/// Rearrange All Artboards refuses `columns` that are not a whole number (a fraction, a negative number or a string),
+/// and the artboards stay where they were; 1.0, as the Rearrange All Artboards dialog sends a count, is one column.
+#[test]
+fn rearrange_refuses_columns_that_are_not_a_whole_number() {
+    let mut s = session();
+    s.execute("artboard.new", &json!({"x": 1000, "y": 0, "width": 400, "height": 300})).unwrap();
+    let boards = |s: &Session| s.doc().unwrap().doc.artboards.iter().map(|a| a.rect).collect::<Vec<_>>();
+    let before = (boards(&s), undo_len(&s));
+    for (p, msg) in [
+        (json!({"columns": 1.5}), "`columns` must be a whole number"),
+        (json!({"columns": -1}), "`columns` must be a whole number"),
+        (json!({"columns": "1"}), "`columns` must be a number, not \"1\""),
+    ] {
+        let r = s.execute("artboard.rearrange", &p);
+        assert!(matches!(&r, Err(EngineError::BadParams { msg: m, .. }) if m == msg), "{p}: {r:?}");
+        assert_eq!((boards(&s), undo_len(&s)), before, "{p}");
+    }
+    let r = s.execute("artboard.rearrange", &json!({"columns": 1.0, "spacing": 50})).unwrap();
+    assert_eq!((r["rows"].clone(), r["columns"].clone()), (json!(2), json!(1)));
+}
+
+/// Rearrange All Artboards refuses a spacing given as text or as another value that is not a number,
+/// and the artboards stay where they were.
+#[test]
+fn rearrange_refuses_a_spacing_given_as_text() {
+    let mut s = session();
+    s.execute("artboard.new", &json!({"x": 1000, "y": 0, "width": 400, "height": 300})).unwrap();
+    let boards = |s: &Session| s.doc().unwrap().doc.artboards.iter().map(|a| a.rect).collect::<Vec<_>>();
+    let before = (boards(&s), undo_len(&s));
+    for p in [json!({"spacing": "50"}), json!({"columns": 1, "spacing": "50 pt"}), json!({"layout": "row", "spacing": false})] {
+        refuses_non_number(&mut s, "artboard.rearrange", &p, "spacing");
+        assert_eq!((boards(&s), undo_len(&s)), before, "{p}");
+    }
+    s.execute("artboard.rearrange", &json!({"columns": 1, "spacing": 50})).unwrap();
+    assert_eq!(boards(&s)[1], Rect::new(0.0, 650.0, 400.0, 950.0));
+}
+
 /// Fit to Artwork Bounds fits each artboard it is given to the art on it, in one undo step: an
 /// object partly on an artboard counts for each artboard it overlaps, art flush with an edge from
 /// outside or on no artboard doesn't count, and an artboard with no art stays as it is.
@@ -734,6 +925,49 @@ fn fit_to_artwork_bounds_fits_each_artboard_to_its_own_art() {
     assert_eq!(boards(&s), was);
     s.execute("artboard.fitToArt", &json!({})).unwrap();
     assert_eq!(boards(&s), [Rect::new(100.0, 100.0, 1050.0, 280.0), was[1], was[2]], "the first artboard by default");
+}
+
+/// `document: true` fits ALL the art the document prints, not just the art on the artboard: a
+/// print-preparation script measuring a customer file must not lose art that lies off its page
+/// (the Supacolour prep worker; upstream's fit is per artboard, as Illustrator's).
+#[test]
+fn fit_to_art_with_document_takes_the_art_off_the_artboard_too() {
+    let mut s = session();
+    s.execute("artboard.setProps", &json!({"index": 0, "x": 0, "y": 0, "width": 100, "height": 100})).unwrap();
+    rect(&mut s, 10.0, 10.0, 20.0, 20.0);
+    rect(&mut s, 120.0, 10.0, 20.0, 20.0);
+    let board = |s: &Session| s.doc().unwrap().doc.artboards[0].rect;
+    s.execute("artboard.fitToArt", &json!({})).unwrap();
+    assert_eq!(board(&s), Rect::new(9.5, 9.5, 30.5, 30.5), "the art on the artboard (with its 1 pt stroke)");
+    s.execute("edit.undo", &json!({})).unwrap();
+    s.execute("artboard.fitToArt", &json!({"document": true})).unwrap();
+    assert_eq!(board(&s), Rect::new(9.5, 9.5, 140.5, 30.5), "all the art");
+    assert!(s.execute("artboard.fitToArt", &json!({"document": "yes"})).is_err());
+}
+
+/// Artboard Options and Fit to Selected Art fail with `no such artboard` on an `index` that names
+/// no artboard (past the last, negative, fractional, a string or null), and the artboards stay as
+/// they were. Artboard Options needs an `index`; Fit to Selected Art without one fits the first
+/// artboard.
+#[test]
+fn artboard_options_and_fit_to_selected_art_refuse_an_index_that_names_no_artboard() {
+    let mut s = session();
+    s.execute("artboard.new", &json!({"x": 1000, "y": 0, "width": 400, "height": 300})).unwrap();
+    rect(&mut s, 100.0, 100.0, 50.0, 50.0);
+    s.execute("select.all", &json!({})).unwrap();
+    s.execute("paint.setStroke", &json!({"none": true})).unwrap();
+    let boards = |s: &Session| s.doc().unwrap().doc.artboards.iter().map(|a| a.rect).collect::<Vec<_>>();
+    let (was, n) = (boards(&s), undo_len(&s));
+    for index in [json!(99), json!(-1), json!(1.5), json!("1"), Value::Null] {
+        for (cmd, p) in [("artboard.setProps", json!({"index": index, "width": 300})), ("artboard.fitToSelection", json!({"index": index}))] {
+            assert_eq!(s.execute(cmd, &p).unwrap_err().to_string(), "no such artboard", "{cmd} {p}");
+        }
+    }
+    let e = s.execute("artboard.setProps", &json!({"width": 300})).unwrap_err().to_string();
+    assert_eq!(e, "invalid parameters for `artboard.setProps`: missing index");
+    assert_eq!((boards(&s), undo_len(&s)), (was.clone(), n), "the artboards and the undo steps as they were");
+    s.execute("artboard.fitToSelection", &json!({})).unwrap();
+    assert_eq!(boards(&s), [Rect::new(100.0, 100.0, 150.0, 150.0), was[1]], "the first artboard by default");
 }
 
 // ---------- Edit Colors ----------
@@ -913,6 +1147,55 @@ fn select_same_paint_reads_type_characters() {
     assert_eq!(same(&mut s, t3, "select.same.strokeColor"), vec![t3, q]);
     assert_eq!(same(&mut s, q, "select.same.strokeWeight"), vec![t3, q]);
     assert_eq!(same(&mut s, t1, "select.same.fillAndStroke"), vec![t1, r]);
+}
+
+/// Select by Color needs no object to start from: it matches fills and strokes as
+/// `document.inspect` reports them, `#rrggbb`.
+#[test]
+fn select_color_matches_fill_and_stroke_without_a_selection() {
+    let mut s = session();
+    let [a, b, c] = [0.0, 20.0, 40.0].map(|x| rect(&mut s, x, 0.0, 10.0, 10.0));
+    let t = text(&mut s, "a");
+    fill(&mut s, a, "#000000");
+    fill(&mut s, t, "#000000");
+    // A grey as a PDF stores it reads as #fefefe.
+    s.execute("paint.setFill", &json!({"ids": [b.0], "color": [0.996, 0.996, 0.996]})).unwrap();
+    fill(&mut s, c, "#ff0000");
+    s.execute("paint.setStroke", &json!({"ids": [a.0, c.0], "color": "#0000ff"})).unwrap();
+    s.execute("select.none", &json!({})).unwrap();
+    let pick = |s: &mut Session, p: Value| {
+        s.execute("select.color", &p).unwrap();
+        let mut v = selected(s);
+        v.sort();
+        v
+    };
+    assert_eq!(pick(&mut s, json!({"fill": "#000000"})), vec![a, t]);
+    assert_eq!(pick(&mut s, json!({"fill": "#fefefe"})), vec![b]);
+    assert_eq!(pick(&mut s, json!({"stroke": "#0000ff"})), vec![a, c]);
+    assert_eq!(pick(&mut s, json!({"fill": "#000000", "stroke": "#0000ff"})), vec![a]);
+    // Select > Reselect repeats it.
+    s.execute("select.none", &json!({})).unwrap();
+    s.execute("select.reselect", &json!({})).unwrap();
+    assert_eq!(selected(&s), vec![a]);
+    // A compound path reads as its own paint, never its members'.
+    let outer = rect(&mut s, 100.0, 0.0, 50.0, 50.0);
+    let inner = rect(&mut s, 110.0, 10.0, 20.0, 20.0);
+    fill(&mut s, outer, "#000000");
+    fill(&mut s, inner, "#000000");
+    sel(&mut s, &[outer, inner]);
+    let compound = id_of(&s.execute("object.compoundPath.make", &json!({})).unwrap());
+    assert_eq!(pick(&mut s, json!({"fill": "#000000"})), vec![a, t, compound]);
+    fill(&mut s, compound, "#ff0000");
+    assert_eq!(pick(&mut s, json!({"fill": "#000000"})), vec![a, t]);
+    assert_eq!(pick(&mut s, json!({"fill": "#ff0000"})), vec![c, compound]);
+    // Type without characters reads as the default character fill, black.
+    let empty = text(&mut s, "x");
+    if let Some(NodeKind::Text(t)) = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().doc).node_mut(empty).map(|n| &mut n.kind) {
+        t.runs.clear();
+    }
+    assert_eq!(pick(&mut s, json!({"fill": "#000000"})), vec![a, t, empty]);
+    assert!(s.execute("select.color", &json!({})).is_err());
+    assert!(s.execute("select.color", &json!({"fill": "not a colour"})).is_err());
 }
 
 #[test]
@@ -1187,6 +1470,23 @@ fn select_all_in_pattern_and_mask_editing_selects_the_art_being_edited() {
     for c in commands {
         assert_eq!(select_from_none(&mut s, c), mask, "{c} in opacity mask editing");
     }
+}
+
+/// All on Active Artboard takes a line on the artboard's right or bottom edge, as it takes one on
+/// the left or top edge. A line on the edge two artboards share is on both.
+#[test]
+fn select_all_on_artboard_takes_lines_on_its_right_and_bottom_edges() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({"width": 100, "height": 50, "artboards": 2, "artboardLayout": {"layout": "row", "spacing": 0}})).unwrap();
+    let mut line = |x1: f64, y1: f64, x2: f64, y2: f64| id_of(&s.execute("shape.line", &json!({"x1": x1, "y1": y1, "x2": x2, "y2": y2})).unwrap());
+    let (bottom, right, shared) = (line(10.0, 50.0, 40.0, 50.0), line(200.0, 10.0, 200.0, 40.0), line(100.0, 10.0, 100.0, 40.0));
+    line(200.5, 10.0, 200.5, 40.0);
+    let mut on = |i: u64| {
+        s.execute("select.allOnArtboard", &json!({"artboard": i})).unwrap();
+        selected(&s)
+    };
+    assert_eq!(on(0), vec![bottom, shared]);
+    assert_eq!(on(1), vec![right, shared]);
 }
 
 #[test]
@@ -1467,6 +1767,23 @@ fn change_case_variants() {
     assert!(s.execute("type.changeCase", &json!({"case": "weird"})).is_err());
 }
 
+/// Georgian has no word capitals: title and sentence case leave Mkhedruli lower case (and bring
+/// Mtavruli back to it) instead of capitalizing it; upper case still gives Mtavruli.
+#[test]
+fn change_case_leaves_georgian_uncapitalized() {
+    let mut s = session();
+    let t = text(&mut s, "ფენის სახელი. ახალი Layer");
+    sel(&mut s, &[t]);
+    s.execute("type.changeCase", &json!({"case": "title"})).unwrap();
+    assert_eq!(plain(&s, t), "ფენის სახელი. ახალი Layer");
+    s.execute("type.changeCase", &json!({"case": "sentence"})).unwrap();
+    assert_eq!(plain(&s, t), "ფენის სახელი. ახალი layer");
+    s.execute("type.changeCase", &json!({"case": "upper"})).unwrap();
+    assert_eq!(plain(&s, t), "ᲤᲔᲜᲘᲡ ᲡᲐᲮᲔᲚᲘ. ᲐᲮᲐᲚᲘ LAYER");
+    s.execute("type.changeCase", &json!({"case": "title"})).unwrap();
+    assert_eq!(plain(&s, t), "ფენის სახელი. ახალი Layer");
+}
+
 /// Change Case is one undo step, and Change Case to the case the text has already records no undo
 /// step: the step to redo stays and the document stays unmodified. It still replies with the
 /// objects.
@@ -1730,6 +2047,139 @@ fn locked_guides_lock_guide_paths() {
     assert_eq!(selected(&s), vec![a, b]);
     s.execute("view.guides.lock", &json!({"locked": true})).unwrap();
     assert_eq!(selected(&s), vec![b]);
+}
+
+/// A rectangle at (`x`, 0), 10 pt wide, made into a guide; nothing is selected after.
+fn guide_path(s: &mut Session, x: f64) -> NodeId {
+    let g = rect(s, x, 0.0, 10.0, 10.0);
+    sel(s, &[g]);
+    s.execute("view.guides.make", &json!({})).unwrap();
+    g
+}
+
+/// Exit Isolation Mode selects the isolated art, except a guide path while Lock Guides is on, so
+/// a move after it leaves the guide where it is.
+#[test]
+fn exit_isolation_leaves_a_locked_guide_path_deselected() {
+    let mut s = session();
+    let g = guide_path(&mut s, 0.0);
+    s.execute("view.guides.lock", &json!({"locked": true})).unwrap();
+    s.execute("object.isolate", &json!({"id": g.0})).unwrap();
+    s.execute("object.exitIsolation", &json!({})).unwrap();
+    assert!(selected(&s).is_empty());
+    let _ = s.execute("object.move", &json!({"dx": 10, "dy": 0}));
+    assert_eq!(bounds(&s, g).x0, 0.0);
+    // Lock Guides off: the guide is selected.
+    s.execute("view.guides.lock", &json!({"locked": false})).unwrap();
+    s.execute("object.isolate", &json!({"id": g.0})).unwrap();
+    s.execute("object.exitIsolation", &json!({})).unwrap();
+    assert_eq!(selected(&s), vec![g]);
+}
+
+/// Undo and Redo bring back a selection without the guides, ruler guides or guide paths, that
+/// Lock Guides has locked since, so a move after them leaves the guides where they are.
+#[test]
+fn undo_and_redo_leave_locked_guides_deselected() {
+    let mut s = session();
+    let g = guide_path(&mut s, 0.0);
+    s.execute("guide.add", &json!({"vertical": true, "pos": 100})).unwrap();
+    let select_both = |s: &mut Session| {
+        sel(s, &[g]);
+        s.execute("guide.select", &json!({"indexes": [0], "toggle": true})).unwrap();
+    };
+    select_both(&mut s);
+    s.execute("object.move", &json!({"dx": 10, "dy": 0})).unwrap();
+    assert_eq!((bounds(&s, g).x0, guides(&s)), (10.0, vec![(true, 110.0)]));
+    s.execute("view.guides.lock", &json!({"locked": true})).unwrap();
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!((selected(&s), selected_guides(&s)), (vec![], vec![]), "after Undo");
+    let _ = s.execute("object.move", &json!({"dx": 10, "dy": 0}));
+    assert_eq!((bounds(&s, g).x0, guides(&s)), (0.0, vec![(true, 100.0)]));
+    // Undone with both selected, redone once they are locked.
+    s.execute("view.guides.lock", &json!({"locked": false})).unwrap();
+    select_both(&mut s);
+    s.execute("object.move", &json!({"dx": 10, "dy": 0})).unwrap();
+    s.execute("edit.undo", &json!({})).unwrap();
+    s.execute("view.guides.lock", &json!({"locked": true})).unwrap();
+    s.execute("edit.redo", &json!({})).unwrap();
+    assert_eq!((selected(&s), selected_guides(&s)), (vec![], vec![]), "after Redo");
+    let _ = s.execute("object.move", &json!({"dx": 10, "dy": 0}));
+    assert_eq!((bounds(&s, g).x0, guides(&s)), (10.0, vec![(true, 110.0)]));
+}
+
+/// Unlock All, Show All and Paste select the art they unlock, show or paste, except guide paths
+/// while Lock Guides is on.
+#[test]
+fn unlock_all_show_all_and_paste_leave_locked_guide_paths_deselected() {
+    let mut s = session();
+    let (g, h) = (guide_path(&mut s, 0.0), guide_path(&mut s, 20.0));
+    sel(&mut s, &[g]);
+    s.execute("edit.copy", &json!({})).unwrap();
+    s.execute("object.lock", &json!({})).unwrap();
+    sel(&mut s, &[h]);
+    s.execute("object.hide", &json!({})).unwrap();
+    s.execute("view.guides.lock", &json!({"locked": true})).unwrap();
+    assert_eq!(s.execute("object.unlockAll", &json!({})).unwrap()["count"], 1);
+    assert!(selected(&s).is_empty(), "after Unlock All");
+    assert_eq!(s.execute("object.showAll", &json!({})).unwrap()["count"], 1);
+    assert!(selected(&s).is_empty(), "after Show All");
+    s.execute("edit.paste", &json!({})).unwrap();
+    assert!(selected(&s).is_empty(), "after Paste");
+    // Lock Guides off: the pasted guide is selected.
+    s.execute("view.guides.lock", &json!({"locked": false})).unwrap();
+    s.execute("edit.paste", &json!({})).unwrap();
+    let [copy] = selected(&s)[..] else { panic!("the pasted guide is selected") };
+    assert!(crate::is_guide_path(&s.doc().unwrap().doc, copy));
+}
+
+/// Lock Guides deselects the guides of every open document, not only the active one's.
+#[test]
+fn lock_guides_deselects_the_guides_of_every_open_document() {
+    let mut s = session();
+    let g = guide_path(&mut s, 0.0);
+    s.execute("guide.add", &json!({"vertical": true, "pos": 100})).unwrap();
+    sel(&mut s, &[g]);
+    s.execute("guide.select", &json!({"indexes": [0], "toggle": true})).unwrap();
+    s.execute("file.new", &json!({"width": 800, "height": 600})).unwrap();
+    s.execute("view.guides.lock", &json!({"locked": true})).unwrap();
+    s.execute("document.activate", &json!({"index": 0})).unwrap();
+    assert_eq!((selected(&s), selected_guides(&s)), (vec![], vec![]));
+}
+
+/// A failed batch and a canceled undo group bring back the selection from before them, without
+/// the guide paths that Lock Guides locked inside them.
+#[test]
+fn a_failed_batch_and_a_canceled_undo_group_leave_locked_guides_deselected() {
+    let mut s = session();
+    let g = guide_path(&mut s, 0.0);
+    sel(&mut s, &[g]);
+    let steps = json!([{"command": "view.guides.lock", "params": {"locked": true}}, {"command": "object.isolate", "params": {}}]);
+    assert!(s.execute("command.batch", &json!({"commands": steps})).is_err());
+    assert!(s.guides_locked());
+    assert!(selected(&s).is_empty(), "after the failed batch");
+    s.execute("view.guides.lock", &json!({"locked": false})).unwrap();
+    sel(&mut s, &[g]);
+    s.execute("edit.undoGroup.begin", &json!({})).unwrap();
+    s.execute("object.move", &json!({"dx": 10, "dy": 0})).unwrap();
+    s.execute("view.guides.lock", &json!({"locked": true})).unwrap();
+    s.execute("edit.undoGroup.end", &json!({"cancel": true})).unwrap();
+    assert_eq!(bounds(&s, g).x0, 0.0);
+    assert!(selected(&s).is_empty(), "after the canceled undo group");
+}
+
+/// Canceling a drag or a dialog's preview brings back the selection from before it, without the
+/// guide paths that Lock Guides locked during it.
+#[test]
+fn a_canceled_interaction_leaves_locked_guides_deselected() {
+    let mut s = session();
+    let g = guide_path(&mut s, 0.0);
+    sel(&mut s, &[g]);
+    s.begin_interaction("Move").unwrap();
+    s.preview("object.move", &json!({"dx": 10, "dy": 0})).unwrap();
+    s.execute("view.guides.lock", &json!({"locked": true})).unwrap();
+    s.cancel_interaction().unwrap();
+    assert_eq!(bounds(&s, g).x0, 0.0);
+    assert!(selected(&s).is_empty());
 }
 
 fn guides(s: &Session) -> Vec<(bool, f64)> {
@@ -2424,6 +2874,24 @@ fn crop_image_trim_cuts_to_the_opaque_pixels_as_they_are() {
 }
 
 #[test]
+fn crop_image_trim_checks_the_rgba_size_before_decoding() {
+    // 1-bit gray PNGs, header only: their samples are within the decoder's limit, and as RGBA
+    // (4 bytes a pixel) they are just over or just within the 2 GB allowance.
+    let trim = |w: u32, h: u32| {
+        let png = super::tests_linkspanel::png_header(w, h);
+        let mut s = Session::new();
+        s.execute("document.open", &json!({"name": "wall.png", "dataBase64": vectorcraft_format::base64_encode(&png)})).unwrap();
+        s.execute("select.all", &json!({})).unwrap();
+        s.execute("object.cropImage", &json!({"trim": true})).unwrap_err().to_string()
+    };
+    let over = trim(23_171, 23_170);
+    assert!(over.contains("an image of 23171 × 23170 pixels is too large to draw"), "{over}");
+    // One column fewer is within the allowance: it is decoded, and its missing rows can't be read.
+    let within = trim(23_170, 23_170);
+    assert!(within.contains("the image's pixels can't be read"), "{within}");
+}
+
+#[test]
 fn crop_image_trim_leaves_a_cmyk_image_alone() {
     // CMYK images keep their ink amounts and have no alpha: nothing to cut, and not an error.
     let inks = vectorcraft_doc::cmyk::Inks::new(4, 2, [255, 0, 0, 0].repeat(8)).unwrap();
@@ -2433,4 +2901,42 @@ fn crop_image_trim_leaves_a_cmyk_image_alone() {
     s.execute("select.all", &json!({})).unwrap();
     let r = s.execute("object.cropImage", &json!({"trim": true})).unwrap();
     assert_eq!((r["trimmed"].as_bool(), r["width"].as_u64(), r["height"].as_u64()), (Some(false), Some(4), Some(2)), "{r}");
+}
+
+/// A whole 547 × 984 mm gang sheet (Feedback #1269) rasterizes at 300 ppi: about 74 MP, over the
+/// old 64 MP limit.
+#[test]
+fn rasterize_a_gang_sheet_at_300_ppi() {
+    let mut s = session();
+    let mm = 72.0 / 25.4;
+    let a = rect(&mut s, 0.0, 0.0, 547.0 * mm, 984.0 * mm);
+    fill(&mut s, a, "#ff0000");
+    sel(&mut s, &[a]);
+    let r = s.execute("object.rasterize", &json!({"ppi": 300, "padding": 0})).unwrap();
+    let (w, h) = (r["width"].as_u64().unwrap(), r["height"].as_u64().unwrap());
+    assert!(w * h > 64_000_000 && w * h <= 100_000_000, "{w} × {h}");
+    assert_eq!(r["ppi"], json!(300.0));
+    assert!(r.get("note").is_none(), "{r}");
+}
+
+/// Past the limit, Rasterize makes the image at the highest whole ppi that fits and says so,
+/// instead of refusing.
+#[test]
+fn rasterize_too_large_lowers_the_ppi_to_fit() {
+    let mut s = session();
+    let mm = 72.0 / 25.4;
+    let a = rect(&mut s, 0.0, 0.0, 1000.0 * mm, 1000.0 * mm);
+    fill(&mut s, a, "#00ff00");
+    sel(&mut s, &[a]);
+    let r = s.execute("object.rasterize", &json!({"ppi": 300, "padding": 0})).unwrap();
+    let ppi = r["ppi"].as_f64().unwrap();
+    let (w, h) = (r["width"].as_u64().unwrap(), r["height"].as_u64().unwrap());
+    assert!(w * h <= 100_000_000, "{w} × {h}");
+    // 1 m square: 100 MP is 10,000 px a side, 254 ppi; a stroke widens the bounds a little.
+    assert!((250.0..254.0).contains(&ppi) && ppi.fract() == 0.0, "{ppi}");
+    let note = r["note"].as_str().unwrap();
+    assert!(note.contains(&format!("{ppi} ppi")) && note.contains("asked for 300 ppi"), "{note}");
+    // The image covers the art at that ppi.
+    let NodeKind::Image(im) = &node(&s, id_of(&r)).kind else { panic!() };
+    assert_eq!((im.width, im.height), (w as u32, h as u32));
 }

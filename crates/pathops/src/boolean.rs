@@ -18,6 +18,30 @@ use crate::fit::{end_tangent, fit_single, is_straight, sample, start_tangent};
 /// Similar in spirit to Illustrator's Pathfinder "Precision" option (0.028 pt).
 pub const DEFAULT_PRECISION: f64 = 0.01;
 
+/// Hard limits for a topology sweep, checked before allocating input and during the sweep.
+#[derive(Clone, Copy, Debug)]
+pub struct GeometryBudget {
+    pub input_segments: usize,
+    pub output_segments: usize,
+    pub work_steps: usize,
+    pub winding_bytes: usize,
+    pub time_limit: std::time::Duration,
+}
+// Real 38,778-object production art: 657,473 input elements, 543,350 topology
+// segments, 1,646,458 guard steps and 52,334,944 winding bytes at the largest sweep.
+// These limits leave 7.6–9.6 times that measured headroom; the time limit is a backstop.
+impl Default for GeometryBudget {
+    fn default() -> Self {
+        Self {
+            input_segments: 5_000_000,
+            output_segments: 5_000_000,
+            work_steps: 15_000_000,
+            winding_bytes: 500_000_000,
+            time_limit: std::time::Duration::from_secs(600),
+        }
+    }
+}
+
 /// Binary boolean operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BoolOp {
@@ -97,6 +121,9 @@ impl std::ops::AddAssign for Multi {
 
 impl WindingNumber for Multi {
     type Tag = usize;
+    fn storage_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(self.0.capacity().saturating_mul(std::mem::size_of::<(usize, i32)>()))
+    }
     fn single(tag: usize, positive: bool) -> Self {
         Multi(vec![(tag, if positive { 1 } else { -1 })])
     }
@@ -279,15 +306,64 @@ impl Tidy {
 }
 
 impl Arrangement {
-    pub(crate) fn new(mut paths: Vec<(BezPath, FillRule)>) -> Result<Self, PathOpsError> {
+    pub(crate) fn new(paths: Vec<(BezPath, FillRule)>) -> Result<Self, PathOpsError> {
+        Self::new_controlled(
+            paths,
+            GeometryBudget {
+                input_segments: usize::MAX,
+                output_segments: usize::MAX,
+                work_steps: usize::MAX,
+                winding_bytes: usize::MAX,
+                time_limit: std::time::Duration::MAX,
+            },
+            || false,
+        )
+    }
+    fn new_controlled(
+        mut paths: Vec<(BezPath, FillRule)>,
+        budget: GeometryBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PathOpsError> {
+        if cancelled() {
+            return Err(PathOpsError::Cancelled);
+        }
+        let segments = paths.iter().try_fold(0usize, |count, (p, _)| count.checked_add(p.elements().len())).ok_or(PathOpsError::SegmentBudget)?;
+        if segments > budget.input_segments {
+            return Err(PathOpsError::SegmentBudget);
+        }
+        let started = web_time::Instant::now();
+        let mut work = 0usize;
+        let mut topology_segments = 0usize;
+        let mut topology_bytes = 0usize;
         let eps = eps_for(paths.iter().map(|p| &p.0))?;
         snap_horizontals(&mut paths.iter_mut().map(|p| &mut p.0).collect::<Vec<_>>(), eps);
         // The sweep can panic on rare near-degenerate input; that must never take the app down,
         // so it becomes an error (callers fall back to leaving the art unchanged).
         let sweep = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Topology::<Multi>::from_paths(paths.iter().enumerate().map(|(i, (p, _))| (p, i)), eps)
+            Topology::<Multi>::from_paths_guarded(paths.iter().enumerate().map(|(i, (p, _))| (p, i)), eps, |segments, winding_bytes| {
+                if cancelled() {
+                    return Err(PathOpsError::Cancelled);
+                }
+                work = work.saturating_add(1);
+                topology_segments = topology_segments.max(segments);
+                topology_bytes = topology_bytes.max(winding_bytes);
+                if started.elapsed() >= budget.time_limit {
+                    return Err(PathOpsError::TimeBudget);
+                }
+                if segments > budget.output_segments || work > budget.work_steps || winding_bytes > budget.winding_bytes {
+                    return Err(PathOpsError::IntersectionBudget);
+                }
+                Ok(())
+            })
         }));
-        let top = sweep.map_err(|_| PathOpsError::Degenerate)?.map_err(|_| PathOpsError::OpenPath)?;
+        if budget.input_segments != usize::MAX && std::env::var_os("VECTORCRAFT_GEOMETRY_TRACE").is_some() {
+            let source_segments: usize = paths.iter().map(|(p, _)| p.segments().count()).sum();
+            eprintln!(
+                "geometry sweep: input_elements={segments} input_segments={source_segments} topology={topology_segments} work={work} winding_bytes={topology_bytes} seconds={:.6}",
+                started.elapsed().as_secs_f64()
+            );
+        }
+        let top = sweep.map_err(|_| PathOpsError::Degenerate)??.map_err(|_| PathOpsError::OpenPath)?;
         let tidy = Tidy::keeping(DEFAULT_PRECISION, paths.iter().map(|p| &p.0));
         Ok(Self { top, rules: paths.iter().map(|p| p.1).collect(), tidy })
     }
@@ -655,6 +731,73 @@ pub fn try_boolean(a: &PathData, a_rule: FillRule, b: &PathData, b_rule: FillRul
     let c = arr.contours(|m| op.apply(m[0], m[1]));
     let tidy = Tidy { precision, ..arr.tidy };
     Ok(all_contours_to_path(&c, &tidy))
+}
+
+/// Bounded binary operation for optional geometric refinements. Cancellation is checked
+/// inside topology construction, before intersection growth can exhaust memory.
+pub fn try_boolean_with_control(
+    a: &PathData,
+    a_rule: FillRule,
+    b: &PathData,
+    b_rule: FillRule,
+    op: BoolOp,
+    budget: GeometryBudget,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<PathData, PathOpsError> {
+    // Refuse oversized inputs before allocating their Bezier copies, as the bulk
+    // sweep does. An anchor contributes at most one segment, plus MoveTo/ClosePath.
+    let mut elements = 0usize;
+    for subpath in a.subpaths.iter().chain(&b.subpaths) {
+        if cancelled() {
+            return Err(PathOpsError::Cancelled);
+        }
+        elements = elements.saturating_add(subpath.anchors.len().saturating_add(2));
+        if elements > budget.input_segments {
+            return Err(PathOpsError::SegmentBudget);
+        }
+    }
+    let arr = Arrangement::new_controlled(vec![(fill_bezpath(a), a_rule), (fill_bezpath(b), b_rule)], budget, cancelled)?;
+    let c = arr.contours(|m| op.apply(m[0], m[1]));
+    Ok(all_contours_to_path(&c, &arr.tidy))
+}
+
+/// Resolve an opaque paint stack, back to front, in one arrangement. A `true` input adds
+/// its filled area; a `false` input knocks it out. The last covering input owns each face.
+/// Unlike `boolean_n`, this reads sparse winding entries rather than allocating and scanning
+/// a flag for every input at every edge. Each path retains its own fill rule and winding.
+pub fn try_paint_stack(paths: &[(&PathData, FillRule, bool)]) -> Result<PathData, PathOpsError> {
+    try_paint_stack_with_control(paths, GeometryBudget::default(), || false)
+}
+
+/// Bounded bulk paint sweep with cooperative cancellation, including topology construction.
+pub fn try_paint_stack_with_control(
+    paths: &[(&PathData, FillRule, bool)],
+    budget: GeometryBudget,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<PathData, PathOpsError> {
+    let mut inputs = Vec::new();
+    let mut segments = 0usize;
+    for (path, rule, _) in paths {
+        if cancelled() {
+            return Err(PathOpsError::Cancelled);
+        }
+        for subpath in &path.subpaths {
+            segments = segments.saturating_add(subpath.anchors.len().saturating_add(2));
+            if segments > budget.input_segments {
+                return Err(PathOpsError::SegmentBudget);
+            }
+        }
+        inputs.push((fill_bezpath(path), *rule));
+    }
+    let arr = Arrangement::new_controlled(inputs, budget, &mut cancelled)?;
+    if cancelled() {
+        return Err(PathOpsError::Cancelled);
+    }
+    let contours = arr.contours_where(|w| arr.covered(w).next_back().and_then(|i| paths.get(i)).is_some_and(|p| p.2));
+    if cancelled() {
+        return Err(PathOpsError::Cancelled);
+    }
+    Ok(all_contours_to_path(&contours, &arr.tidy))
 }
 
 /// N-ary boolean: the area where `pred(inside_flags)` holds, `inside_flags[i]` telling whether a

@@ -148,35 +148,48 @@ fn header<'a>(r: &mut Reader<'a>) -> Result<Header<'a>, String> {
     Ok(Header { psb, channels, width, height, depth, mode, palette, resources, layers })
 }
 
-/// The resolution a Photoshop document declares (pixels per inch, across and down), from its
-/// ResolutionInfo resource (1005).
-pub fn resolution(bytes: &[u8]) -> Option<(f64, f64)> {
+/// The data of image resource `id` of a Photoshop document (the first of that id).
+fn resource(bytes: &[u8], id: u16) -> Option<&[u8]> {
     let mut r = Reader::new(bytes);
     let h = header(&mut r).ok()?;
     let mut r = Reader::new(h.resources);
     while !r.rest().is_empty() {
         r.take(4).ok()?;
-        let id = r.u16().ok()?;
+        let at = r.u16().ok()?;
         // A Pascal string padded to an even size, length byte included.
         let name = usize::from(r.u8().ok()?);
         r.take(name + (name + 1) % 2).ok()?;
         let size = usize::try_from(r.u32().ok()?).ok()?;
         let data = r.take(size).ok()?;
         r.take(size % 2).ok()?;
-        if id == 0x03ed {
-            let mut d = Reader::new(data);
-            // Fixed 16.16 values, each with its unit (1: per inch, 2: per centimetre) and the
-            // unit the size is shown in.
-            let mut axis = || -> Option<f64> {
-                let v = f64::from(d.u32().ok()?) / 65536.0;
-                let unit = d.u16().ok()?;
-                d.u16().ok()?;
-                Some(if unit == 2 { v * 2.54 } else { v })
-            };
-            return Some((axis()?, axis()?));
+        if at == id {
+            return Some(data);
         }
     }
     None
+}
+
+/// The resolution a Photoshop document declares (pixels per inch, across and down), from its
+/// ResolutionInfo resource (1005).
+pub fn resolution(bytes: &[u8]) -> Option<(f64, f64)> {
+    let mut d = Reader::new(resource(bytes, 0x03ed)?);
+    // Fixed 16.16 values, each with its unit (1: per inch, 2: per centimetre) and the unit the
+    // size is shown in.
+    let mut axis = || -> Option<f64> {
+        let v = f64::from(d.u32().ok()?) / 65536.0;
+        let unit = d.u16().ok()?;
+        d.u16().ok()?;
+        Some(if unit == 2 { v * 2.54 } else { v })
+    };
+    Some((axis()?, axis()?))
+}
+
+/// The ICC profile an 8- or 16-bit RGB Photoshop document embeds (its ICC Profile resource,
+/// 1039): the space its merged image's numbers are in. `None` for other modes and depths (a
+/// 32-bit document's values are linear), and without one.
+pub fn rgb_profile(bytes: &[u8]) -> Option<&[u8]> {
+    let h = header(&mut Reader::new(bytes)).ok()?;
+    (h.mode == Mode::Rgb && matches!(h.depth, 8 | 16)).then(|| resource(bytes, 0x040f)).flatten().filter(|p| !p.is_empty())
 }
 
 /// Does the merged image keep its transparency in the first extra channel? Yes when the layer
@@ -329,10 +342,22 @@ fn byte(v: f32) -> u8 {
 /// amounts 0..1 → sRGB). Fails, without allocating, when the image would need more than
 /// `max_alloc` bytes.
 pub fn decode(bytes: &[u8], max_alloc: u64, cmyk: impl Fn([f32; 4]) -> [f32; 3]) -> Result<image::RgbaImage, String> {
+    decode_rgb(bytes, max_alloc, cmyk, None)
+}
+
+/// Converts a row of interleaved RGB values in place ([`decode_rgb`]); `false`: left as they are.
+pub type RgbRows = dyn Fn(&mut [f32]) -> bool;
+
+/// [`decode`], an RGB document's colours (straight, 0..1, a row of interleaved RGB at a time)
+/// converted by `rgb` before they are quantised to 8 bits (its embedded profile into sRGB: a
+/// 16-bit document keeps its precision until then). `rgb` returning `false` leaves that row's
+/// numbers as they are.
+pub fn decode_rgb(bytes: &[u8], max_alloc: u64, cmyk: impl Fn([f32; 4]) -> [f32; 3], rgb: Option<&RgbRows>) -> Result<image::RgbaImage, String> {
     let mut r = Reader::new(bytes);
     let h = header(&mut r)?;
     let colors = h.mode.colors();
     let alpha = h.channels > colors && merged_alpha(h.layers, h.psb);
+    let alpha_channel = alpha;
     let channels = colors + usize::from(alpha);
     let (w, rows) = (h.width as usize, h.height as usize);
     let row = row_bytes(w, h.depth);
@@ -344,8 +369,28 @@ pub fn decode(bytes: &[u8], max_alloc: u64, cmyk: impl Fn([f32; 4]) -> [f32; 3])
     let data = channel_data(r.rest(), &h, channels, row)?;
     let mut out = image::RgbaImage::new(h.width, h.height);
     let linear = h.depth == 32;
-    for (y, line) in out.rows_mut().enumerate() {
+    let rgb = rgb.filter(|_| h.mode == Mode::Rgb);
+    // One row's straight colours, for `rgb`.
+    let mut held: Vec<f32> = Vec::with_capacity(if rgb.is_some() { w * 3 } else { 0 });
+    for (y, mut line) in out.rows_mut().enumerate() {
         let planes: Vec<&[u8]> = (0..channels).map(|c| data.get((c * rows + y) * row..(c * rows + y + 1) * row).unwrap_or_default()).collect();
+        if let Some(convert) = rgb {
+            held.clear();
+            let mut alpha = Vec::with_capacity(w);
+            for x in 0..w {
+                let v = |c: usize| planes.get(c).map_or(0.0, |p| sample(p, x, h.depth, linear && c < colors));
+                let a = if alpha_channel { v(colors) } else { 1.0 };
+                let straight = |c: f32| if a <= 0.0 { 0.0 } else { (c - (1.0 - a)) / a };
+                held.extend([v(0), v(1), v(2)].map(|c| if alpha_channel { straight(c) } else { c }.clamp(0.0, 1.0)));
+                alpha.push(a);
+            }
+            // `false` leaves the row's numbers as they are (read as sRGB).
+            let _ = convert(&mut held);
+            for ((px, rgb), a) in line.by_ref().zip(held.as_chunks::<3>().0).zip(&alpha) {
+                px.0 = [byte(rgb[0]), byte(rgb[1]), byte(rgb[2]), byte(*a)];
+            }
+            continue;
+        }
         for (x, px) in line.enumerate() {
             let v = |c: usize| planes.get(c).map_or(0.0, |p| sample(p, x, h.depth, linear && c < colors));
             let rgb = match h.mode {

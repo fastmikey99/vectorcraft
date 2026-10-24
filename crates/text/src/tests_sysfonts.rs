@@ -332,18 +332,30 @@ fn service_font() -> PathBuf {
 }
 
 /// The fonts a font service (Adobe Fonts on Windows, through DirectWrite) loads in place are
-/// cataloged: named by the platform's lister, read whatever their file is called (#579).
+/// cataloged: named by the platform's lister, read whatever their file is called (#579), and one it
+/// activates after a scan is picked up by the next check (#2576). One test: the lister is set once
+/// per process, so two tests changing what it lists would race.
 #[test]
 fn fonts_the_platform_lists_outside_the_font_folders_are_cataloged() {
+    use std::sync::Mutex;
+    static FILES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let list = |files: Vec<String>| *FILES.lock().unwrap_or_else(|e| e.into_inner()) = files;
+    set_platform_font_files(|| FILES.lock().unwrap_or_else(|e| e.into_inner()).clone());
     let file = service_font();
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let _ = std::fs::remove_file(&file);
+    // Nothing listed at the first scan; then a font service activates a font.
+    let db = FontDb::for_system_scan_test();
+    assert!(!db.installed_fonts_changed());
+    db.load_system_fonts();
+    assert!(!db.has_family("Service Sans3"));
     std::fs::write(&file, renamed_to("SourceSans3-Regular.ttf", "Service Sans3")).unwrap();
-    // The lister's files outside the font folders are scanned with them, each once (a collection
-    // lists its file once per face).
-    fn lister() -> Vec<String> {
-        vec![service_font().to_string_lossy().into_owned(); 2]
-    }
-    set_platform_font_files(lister);
+    // A collection lists its file once per face.
+    list(vec![file.to_string_lossy().into_owned(); 2]);
+    assert!(db.installed_fonts_changed(), "a font a font service activated since the scan");
+    db.load_system_fonts();
+    assert!(db.has_family("Service Sans3"));
+    // The lister's files outside the font folders are scanned with them, each once.
     let dirs = system_font_dirs();
     assert_eq!(dirs.iter().filter(|d| **d == file).count(), 1, "{dirs:?}");
     // A file named by itself is read without a font's extension, one in a folder isn't.
@@ -640,6 +652,38 @@ fn family_display_name_follows_show_font_names_in_english() {
     assert_eq!(db.family_display_name("Source Sans 3", false), "Source Sans 3");
     let face = db.face("ヒラギノ角ゴシック", "Regular").unwrap();
     assert_eq!(face.family, "Hiragino Sans");
+}
+
+/// #2208: English-only typographic names must not hide a localized legacy family name.
+/// Cover both fonts added as bytes and the system-font catalog before a face is loaded.
+#[test]
+fn family_display_name_falls_back_to_localized_legacy_names() {
+    const ZH: u16 = 0x0804;
+    for (case, (typographic, legacy, expected)) in
+        [(None, Some("宋体"), "宋体"), (Some("排印宋体"), Some("宋体"), "排印宋体"), (None, None, "SimSun")].into_iter().enumerate()
+    {
+        let mut records = vec![(3, EN, 1, "SimSun"), (3, EN, 2, "Regular"), (3, EN, 6, "SimSun-Regular"), (3, EN, 16, "SimSun")];
+        if let Some(label) = typographic {
+            records.push((3, ZH, 16, label));
+        }
+        if let Some(label) = legacy {
+            records.push((3, ZH, 1, label));
+        }
+        let bytes = named(&records);
+        let loaded = FontDb::with_font_dirs(vec![]);
+        assert!(loaded.add_font(bytes.clone()) > 0);
+        let dir = std::env::temp_dir().join(format!("vc-sysfonts-{}-localized-family-{case}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("localized.ttf"), bytes).unwrap();
+        let catalog = FontDb::with_font_dirs(vec![dir.clone()]);
+        for (source, db) in [("loaded", loaded), ("catalog", catalog)] {
+            assert_eq!(db.family_display_name("SimSun", true), "SimSun", "{source}, case {case}: English requested");
+            assert_eq!(db.family_display_name("SimSun", false), expected, "{source}, case {case}: native requested");
+            assert_eq!(db.family_display_name("SimSun", true), "SimSun", "{source}, case {case}: switch back to English");
+            assert_eq!(db.is_loaded("SimSun"), source == "loaded", "{source}, case {case}: catalog names need no face loading");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 /// Thai typed in a font without Thai takes an installed font made for Thai (Leelawadee UI,

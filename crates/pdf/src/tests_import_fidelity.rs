@@ -376,6 +376,124 @@ fn a_coons_patch_mesh_becomes_a_gradient_mesh() {
     assert!(!all(&d).iter().any(|n| matches!(n.kind, NodeKind::Group { clip: true, .. })), "the mesh lies inside the page");
 }
 
+/// A grid of Coons patches: `n`×`n` cells over (10, 10)–(90, 90), corner colours a red→blue ramp.
+fn mesh_doc(n: u32, opacity: f32) -> Document {
+    let mut d = Document::new(100.0, 100.0);
+    let m = vectorcraft_doc::live::GradientMesh::from_surface(n, n, &|u, v| kurbo::Point::new(10.0 + 80.0 * u, 10.0 + 80.0 * v), &|u, v| {
+        Color::rgb(u as f32, 0.0, v as f32)
+    });
+    let mut m = m;
+    for p in &mut m.points {
+        p.opacity = opacity;
+    }
+    add(&mut d, Node::new(NodeId(0), NodeKind::Mesh(m)));
+    d
+}
+
+#[test]
+fn a_gradient_mesh_is_written_as_one_mesh_shading_and_reads_back_as_meshes() {
+    let d = mesh_doc(20, 1.0);
+    let pdf = export(&d, &PdfOptions::default()).unwrap();
+    let text = String::from_utf8_lossy(&pdf);
+    // One Coons patch mesh shading, not 20 × 20 × 64 flat-colour pieces.
+    assert_eq!(text.matches("/ShadingType 6").count(), 1, "one mesh shading");
+    assert!(pdf.len() < 40_000, "a 400-patch mesh stays small: {} bytes", pdf.len());
+    let back = open(&pdf);
+    let meshes: Vec<vectorcraft_doc::live::GradientMesh> =
+        all(&back).into_iter().filter_map(|n| if let NodeKind::Mesh(m) = n.kind { Some(m) } else { None }).collect();
+    assert_eq!(meshes.len(), 400, "each patch reads back as a mesh");
+    // The corner of the ramp keeps its colour (8-bit components), and its place.
+    let corner = meshes.iter().flat_map(|m| m.points.iter()).find(|p| (p.p - kurbo::Point::new(90.0, 90.0)).hypot() < 0.01).expect("the far corner");
+    let [r, g, b] = corner.color.to_rgb();
+    assert!((r - 1.0).abs() < 0.01 && g.abs() < 0.01 && (b - 1.0).abs() < 0.01, "{:?}", corner.color);
+}
+
+#[test]
+fn a_gradient_mesh_group_is_one_shading_and_opacity_is_a_soft_mask() {
+    // Two meshes side by side in a group: one shading for both.
+    let mut d = mesh_doc(2, 1.0);
+    let a = all(&d).into_iter().find(|n| matches!(n.kind, NodeKind::Mesh(_))).unwrap();
+    let mut b = a.clone();
+    if let NodeKind::Mesh(m) = &mut b.kind {
+        for p in &mut m.points {
+            p.p.x += 100.0;
+        }
+    }
+    let mut d2 = Document::new(200.0, 100.0);
+    add(&mut d2, Node::group(NodeId(0), vec![Arc::new(a), Arc::new(b)]));
+    let text = String::from_utf8_lossy(&export(&d2, &PdfOptions::default()).unwrap()).into_owned();
+    assert_eq!(text.matches("/ShadingType 6").count(), 1, "the group is one shading");
+    // Half-transparent corners: the colour shading plus a gray one inside a luminosity soft mask.
+    d = mesh_doc(2, 0.5);
+    let text = String::from_utf8_lossy(&export(&d, &PdfOptions::default()).unwrap()).into_owned();
+    assert_eq!(text.matches("/ShadingType 6").count(), 2, "colour and opacity shadings");
+    assert!(text.contains("/Luminosity"), "a luminosity soft mask carries the opacity");
+}
+
+#[test]
+fn a_folded_mesh_patch_is_not_clipped_and_translucent_or_mixed_meshes_stay_apart() {
+    // A patch whose right edge's handles bulge out to x = 100: the surface reaches past them
+    // (x ≈ 125 at the middle), so the fill must too (review: bounds clipped folded patches).
+    let mut d = Document::new(200.0, 100.0);
+    let mut m = vectorcraft_doc::live::GradientMesh::from_surface(1, 1, &|u, v| kurbo::Point::new(20.0 + 60.0 * u, 20.0 + 60.0 * v), &|_, _| {
+        Color::rgb(1.0, 0.0, 0.0)
+    });
+    for i in [m.idx(0, 1), m.idx(1, 1)] {
+        let p = m.points[i].p;
+        m.points[i].handles[vectorcraft_doc::live::H_DOWN] = kurbo::Vec2::new(100.0 - p.x, 0.0);
+        m.points[i].handles[vectorcraft_doc::live::H_UP] = kurbo::Vec2::new(100.0 - p.x, 0.0);
+    }
+    for i in [m.idx(0, 0), m.idx(1, 0)] {
+        let p = m.points[i].p;
+        m.points[i].handles[vectorcraft_doc::live::H_RIGHT] = kurbo::Vec2::new(100.0 - p.x, 0.0);
+        m.points[i].handles[vectorcraft_doc::live::H_LEFT] = kurbo::Vec2::new(100.0 - p.x, 0.0);
+    }
+    for i in [m.idx(0, 1), m.idx(1, 1)] {
+        m.points[i].handles[vectorcraft_doc::live::H_LEFT] = kurbo::Vec2::new(100.0 - m.points[i].p.x, 0.0);
+    }
+    // The boundary points alone stop at x = 100; the surface goes past them.
+    let cp = {
+        use vectorcraft_doc::live::{H_DOWN, H_LEFT, H_RIGHT, H_UP};
+        let (p00, p01, p10, p11) = (&m.points[m.idx(0, 0)], &m.points[m.idx(0, 1)], &m.points[m.idx(1, 0)], &m.points[m.idx(1, 1)]);
+        [
+            p00.p,
+            p00.p + p00.handles[H_DOWN],
+            p10.p + p10.handles[H_UP],
+            p10.p,
+            p10.p + p10.handles[H_RIGHT],
+            p11.p + p11.handles[H_LEFT],
+            p11.p,
+            p11.p + p11.handles[H_UP],
+            p01.p + p01.handles[H_DOWN],
+            p01.p,
+            p01.p + p01.handles[H_LEFT],
+            p00.p + p00.handles[H_RIGHT],
+        ]
+    };
+    let reach =
+        (0..=20).flat_map(|i| (0..=20).map(move |j| (i, j))).map(|(i, j)| m.eval(0, 0, i as f64 / 20.0, j as f64 / 20.0).x).fold(f64::MIN, f64::max);
+    let net = crate::export::coons_net(&cp).iter().map(|p| p.x).fold(f64::MIN, f64::max);
+    assert!(reach > 100.5 && net >= reach, "surface reaches {reach}; the net bounds it at {net}");
+    add(&mut d, Node::new(NodeId(0), NodeKind::Mesh(m)));
+    assert_eq!(String::from_utf8_lossy(&export(&d, &PdfOptions::default()).unwrap()).matches("/ShadingType 6").count(), 1);
+    // Two translucent meshes, or meshes in different colour models, are not one shading.
+    let two = |a: Color, b: Color, opacity: f32| {
+        let mesh = |x: f64, c: Color| {
+            let mut m = vectorcraft_doc::live::GradientMesh::from_surface(1, 1, &|u, v| kurbo::Point::new(x + 40.0 * u, 10.0 + 40.0 * v), &|_, _| c);
+            for p in &mut m.points {
+                p.opacity = opacity;
+            }
+            Arc::new(Node::new(NodeId(0), NodeKind::Mesh(m)))
+        };
+        let mut d = Document::new(200.0, 100.0);
+        add(&mut d, Node::group(NodeId(0), vec![mesh(10.0, a), mesh(30.0, b)]));
+        String::from_utf8_lossy(&export(&d, &PdfOptions::default()).unwrap()).matches("/ShadingType 6").count()
+    };
+    assert_eq!(two(Color::rgb(1.0, 0.0, 0.0), Color::rgb(0.0, 0.0, 1.0), 1.0), 1, "opaque, one model: one shading");
+    assert_eq!(two(Color::rgb(1.0, 0.0, 0.0), Color::rgb(0.0, 0.0, 1.0), 0.5), 4, "translucent: a shading and a mask each");
+    assert_eq!(two(Color::cmyk(0.6, 0.2, 0.1, 0.5), Color::rgb(0.0, 0.0, 1.0), 1.0), 2, "CMYK beside RGB: not forced into one model");
+}
+
 #[test]
 fn gradient_stop_opacity_round_trips() {
     let mut d = Document::new(100.0, 100.0);
@@ -660,6 +778,19 @@ fn clips_with_the_page_as_bounding_box_still_clip() {
     assert!(clipped("50 0 m 100 50 l 50 100 l 0 50 l h"), "diamond");
     assert!(!clipped("0 0 100 100 re"), "the page");
     assert!(!clipped("50 -60 m 160 50 l 50 160 l -60 50 l h"), "a turned square around the page");
+}
+
+/// Issue #2674: `0 w` is the thinnest line the device can draw (ISO 32000-1, 8.4.3.2), not no
+/// line: it imports as a visible hairline and survives a PDF round trip.
+#[test]
+fn zero_width_lines_import_as_hairlines() {
+    let d = open(&one_page("0 0 0 RG 0 w 10 50 m 90 50 l S 0.9 g 0 w 20 60 30 20 re b 1 w 10 20 m 90 20 l S", "", &[]));
+    let widths = |d: &Document| -> Vec<f64> { all(d).iter().filter_map(|n| n.appearance.stroke().map(|s| s.width)).collect() };
+    let w = widths(&d);
+    assert_eq!(w.len(), 3, "{w:?}");
+    assert!(w.iter().all(|w| *w > 0.0 && *w <= 1.0), "zero width strokes become hairlines: {w:?}");
+    let back = widths(&roundtrip(&d));
+    assert_eq!(back.len(), 3, "hairlines survive the PDF round trip: {back:?}");
 }
 
 /// A synthetic stack of nonrectangular clips must never become an editable production file

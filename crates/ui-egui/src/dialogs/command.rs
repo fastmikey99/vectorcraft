@@ -95,7 +95,14 @@ fn confirm(app: &mut VectorcraftApp, d: &Dialog) -> Result<Value, String> {
     {
         return app.run(&c, p);
     }
-    app.run(&cmd, params)
+    let r = app.run(&cmd, params)?;
+    // Rasterize at a lower ppi than asked (the most that fits): said in the status bar.
+    if cmd == "object.rasterize"
+        && let Some(note) = r["note"].as_str()
+    {
+        app.status(note);
+    }
+    Ok(r)
 }
 
 #[cfg(test)]
@@ -171,5 +178,21 @@ mod tests {
         crate::dialogs::confirm(&mut app).unwrap();
         assert_eq!(app.session.execute("graph.setType", &json!({})).unwrap()["type"], "stackedBar");
         assert_eq!(app.session.execute("graph.setData", &json!({})).unwrap(), data);
+    }
+
+    /// Rasterize… on art too large for the ppi asked for makes the image at the most that fits
+    /// and says so in the status bar (Feedback #1269: a whole gang sheet at 300 ppi was refused).
+    #[test]
+    fn rasterize_dialog_says_when_the_ppi_was_lowered() {
+        let mut app = VectorcraftApp::new(Session::new(), Default::default());
+        app.run("file.new", json!({"width": 3000, "height": 3000})).unwrap();
+        app.run("shape.rectangle", json!({"x": 0, "y": 0, "width": 2835, "height": 2835})).unwrap();
+        crate::menus::invoke(&mut app, "object.rasterize", json!({}));
+        app.ui.dialog.as_mut().unwrap().fields.insert("ppi".into(), json!(300));
+        let r = crate::dialogs::confirm(&mut app).unwrap();
+        assert!(r["ppi"].as_f64().unwrap() < 300.0, "{r}");
+        assert!(app.ui.status.contains("asked for 300 ppi"), "{}", app.ui.status);
+        let st = app.session.active().unwrap();
+        assert!(st.selection.objects.iter().any(|id| matches!(st.doc.node(*id).map(|n| &n.kind), Some(NodeKind::Image(_)))));
     }
 }

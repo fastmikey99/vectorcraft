@@ -40,7 +40,11 @@ Every message is a plain object with a string `type`. VectorCraft posts only to 
 | `vectorcraft:export` | from the parent | `id` (any), `format` (string, optional), `markSaved` (boolean, optional), `selectedOnly` (boolean, optional), `imageOnly` (boolean, optional), `preserveEditing` (boolean, optional, PDF only) | Write the active document (or only the selection) as `format` (PDF without it) and send it back. |
 | `vectorcraft:place` | from the parent | `id` (any), `name` (string), `bytes` (`ArrayBuffer` or `Uint8Array`), `at` (`{x, y, width, height}`, optional) | Put this file in place of the selected object, fitted inside `at`. |
 | `vectorcraft:placed` | to the parent | `id`, `ids` (numbers) | The place with this `id` is done. |
+| `vectorcraft:solidify` | from the parent | `id` (any), `level` (whole number 1–255, optional, 128), `copies` (boolean, optional) | Remove Soft Pixels on the one selected image: every pixel fully opaque or fully clear. |
+| `vectorcraft:solidified` | to the parent | `id`, `ids` (numbers), `form` (`"alpha"` or `"mask"`), `level`, `softPixels`, `clearPixels`, `opaquePixels` (numbers) | The solidify with this `id` is done. |
 | `vectorcraft:save` | to the parent | `name` (string), `bytes` (`ArrayBuffer`, transferred), `id` (when it answers an export), `bounds` (with `selectedOnly`), `native` (`true` when the bytes are an image's own pixels) | Store this file. |
+| `vectorcraft:colorSettings` | from the parent | `id` (any), `profiles` (`[{name?, bytes}]`, optional), `rgb`, `cmyk` (profile names, optional), `intent` (optional), `bpc` (boolean, optional) | Load these ICC profiles and set Edit › Color Settings with them. |
+| `vectorcraft:colorSettingsApplied` | to the parent | `id`, `loaded` (names), `rgb`, `cmyk`, `intent`, `bpc`, `profiles` (every name available) | The colour settings with this `id` are in effect. |
 | `vectorcraft:prefs` | both ways | `prefs` (string: JSON text) | From the editor: its preferences and workspace changed; store them. From the parent: put these on. |
 | `vectorcraft:dirty` | to the parent | `dirty` (boolean) | Unsaved changes appeared (`true`) or went away (`false`). |
 | `vectorcraft:failed` | to the parent | `error` (string), `id` (when it answers an export) | Before `ready`: the app couldn't start. After `ready`: the last `vectorcraft:open` was refused, or with an `id` that export was; the app keeps running. |
@@ -105,6 +109,15 @@ placement regressions, plus Reporter's editor message tests.
 - It is one undo step: Undo brings back what it replaced. What it placed is selected.
 - The answer is `vectorcraft:placed` with the same `id` and the placed objects' `ids`, or `vectorcraft:failed` with the `error` and the `id`.
 
+**`vectorcraft:solidify`** removes the soft pixels of the one selected image in the editor, without sending its pixels anywhere (`object.image.solidifyAlpha`). `ready` says `solidify: true`; a page talking to an editor that doesn't say so keeps its own fallback.
+
+- Every alpha at or above `level` (1–255 on the 8-bit scale; 16-bit alpha is cut at `level × 257`) becomes fully opaque, every one below it fully clear. Colour samples are copied as they are (never through premultiplied colour), so soft pixels keep their exact colour values, and the pixel grid doesn't change.
+- It works on the image's own stored samples: its alpha channel (a PNG, RGBA or grey + alpha, 8 or 16 bits, keeping its colour type, depth and colour/resolution chunks; a WebP or GIF becomes a PNG), or, when the image has an opacity mask that is one greyscale image (a CMYK image read from a PDF with a soft mask), that mask's image; the CMYK samples are then untouched. `form` says which (`"alpha"` or `"mask"`).
+- The result is decoded again and checked before it is kept: every alpha is 0 or full and equals the thresholded source at every pixel, every colour sample is unchanged. If not, nothing changes and the answer is `vectorcraft:failed`.
+- With `copies: true` every other image showing the same pixels and transparency at the same printed size gets the same result; copies at other sizes keep theirs. `vectorcraft:selection`'s `copies` counts by pixels and size only: a copy with a different opacity mask (or a mask on one and not the other) is counted there but not changed here, since this image's result isn't its transparency; the reply's `ids` lists what was changed. Either way it is one undo step.
+- `ids` are the images changed. They are empty, with no undo step, when no pixel was soft (`softPixels: 0`).
+- Refused with `vectorcraft:failed` (the `error` and the `id`): nothing or several objects selected, the selection isn't an image, a linked image, an image with no transparency (`the image has no transparency: nothing to remove`), an opacity mask that isn't one greyscale image, a mask whose image has transparency of its own (opacity, a blend mode, effects or a mask of its own: `the image's opacity mask has its own transparency: release it first`), or an image whose own alpha is not fully opaque that also has a mask (own alpha that is fully opaque everywhere plus a mask is accepted: the mask is the effective transparency and is thresholded). The message's `id` is only the request's: the image is always the selected one. (Underneath, `object.image.solidifyAlpha` takes the selection only when its own `id` parameter is absent; any `id` given, `null` included, that doesn't name an image is refused with `id must name an image`. The bridge always passes the selected image's id.) `level` that isn't a whole number from 1 to 255, or `copies` that isn't a boolean, are refused before anything runs.
+
 Together they make a "trace this image" button: export the selected image with `selectedOnly`, send the pixels to a tracing service, and place its SVG back (with no `at`) while the image is still selected.
 
 **`vectorcraft:prefs`** lets the page keep the editor's preferences and workspace (units, the panel layout, workspaces, recent fonts…) for each person rather than each browser:
@@ -125,7 +138,7 @@ The bridge reads a message only when all of these hold:
 
 1. it comes from `window.parent` (`event.source`), not from another window or frame on the site;
 2. its origin (`event.origin`) is exactly the page's own: same scheme, host and port;
-3. its `type` is `vectorcraft:open`, `vectorcraft:export` or `vectorcraft:place`.
+3. its `type` is `vectorcraft:open`, `vectorcraft:export`, `vectorcraft:place`, `vectorcraft:solidify`, `vectorcraft:colorSettings`, `vectorcraft:prefs` or `vectorcraft:hello`.
 
 Anything else is ignored without a reply, so a page on another origin can neither open files in VectorCraft nor learn that it is there. Saves and other replies go only to `window.parent`, with the page's own origin as the target, so the browser delivers them to no other site. A same-origin parent can already script the frame directly, so the bridge gives it nothing it couldn't otherwise do; it only spares it reaching into the app's internals.
 
@@ -187,6 +200,119 @@ it is not embedded as production recipe authority in the PDF. Named object group
 persist in native documents; public PDF import cannot reconstruct group roles that
 were flattened or omitted by an exporter.
 
+### Colour settings from the page (Reporter fork)
+
+The ready message advertises `colorSettings: true`. A page whose files are made with particular
+ICC profiles (Supacolour's prep worker: U.S. Web Coated (SWOP) v2, Adobe RGB (1998), sRGB) hands
+the editor the same profiles and settings, so a sep shows, and is saved, in the colours the worker
+made it in. The web build can't read profiles from disk (`color.loadProfile` is native only), and
+without this it works in its defaults: sRGB, VectorCraft Generic CMYK, relative colorimetric.
+
+```js
+post({ type: 'vectorcraft:colorSettings', id: 'cs1',
+  profiles: [{ bytes: swopIcc }, { bytes: adobeRgbIcc }, { bytes: srgbIcc }],
+  cmyk: 'U.S. Web Coated (SWOP) v2', rgb: 'Adobe RGB (1998)', intent: 'perceptual', bpc: true })
+// then vectorcraft:open
+```
+
+- Each profile is registered under `name`, else the description it carries, and then appears
+  under that name in the Separations panel's Color Settings menus. A built-in name is refused.
+  At most 16 profiles of at most 32 MB each.
+- `rgb`, `cmyk`, `intent` (`perceptual`, `relative`, `saturation`, `absolute`) and `bpc` set the
+  working spaces as Edit › Color Settings does; a field left out stays as it is. A space must be a
+  built-in profile or one registered (by this message or earlier).
+- They are applied in the order the parent's messages arrive, with the opens and exports, so
+  send them before the open: the file is then read in them (see below). They last for the page's
+  life (every later open), like the person's own Color Settings; the page sends them again after
+  a reload. They are not preferences (`vectorcraft:prefs` doesn't carry them) and not an edit:
+  no `dirty: true`, no undo step.
+- Answered with `vectorcraft:colorSettingsApplied`, or `vectorcraft:failed` with the `id` (an
+  unreadable profile, an unknown space, a field of the wrong type, an empty message, more than
+  64 MB of profiles together). The profiles and the spaces are checked before anything is
+  registered: a refused message registers nothing and leaves the settings unchanged. A profile
+  registered again under the name of a working space in use takes its place at once.
+
+**Tagged RGB lands in the RGB working space.** A PDF's `ICCBased` RGB colours used to be read
+through their profile into sRGB numbers (and a profile naming the sRGB device model was taken as
+DeviceRGB). With an RGB working space other than sRGB those sRGB numbers were then taken as
+working-space numbers: a file tagged with the working space itself (the prep worker's Adobe RGB
+output, read with Adobe RGB as the working space) came out more saturated each time it was read
+(ΔE2000 about 4–7 per round on Supacolour's seps), and an sRGB-tagged customer file more saturated
+once (ΔE2000 up to about 10 on saturated colours). Now, with a working space other than sRGB:
+
+- RGB in any profile is converted into the working space, directly (not through sRGB) with the
+  colour settings' intent (black-point compensation, which applies to CMYK sources, changes
+  nothing between RGB profiles); colours in the working space's own
+  profile (the same file, or one giving the same colours) keep their numbers exactly. Solid
+  fills, strokes and text, axial, radial and mesh shadings alike.
+- On a page with several RGB profiles, or with sRGB-tagged and DeviceRGB colours together, the
+  page's walk of its content says which colour is in which space (when it can be matched with
+  the reader's paths; otherwise a tagged colour goes through sRGB into the working space and a
+  DeviceRGB-looking one keeps its numbers). The walk doesn't follow tiling-pattern cells, soft
+  masks or Type 3 glyphs: there, in a file whose only RGB profile is an sRGB one, a
+  DeviceRGB-looking colour keeps its numbers (it may be DeviceRGB). Text shown in several RGB
+  spaces between two painted paths can't be told apart by glyph either (as for spot inks).
+- DeviceRGB numbers are the working space's, and stand.
+- Colours the reader can only give as sRGB (Lab, CalRGB, Indexed, mixed DeviceN inks, and solid
+  colours painted under a transfer function, `TR`/`TR2`) are converted from sRGB into the working
+  space instead of being taken as its numbers. A shading's transfer function isn't applied on
+  import (as before): its stops are its own colours.
+- Images are unchanged: they are sRGB in a document, as before (colours outside sRGB clip).
+
+With sRGB as the working space nothing changes. This holds for the CLI and desktop app too (any
+`document.open` or place of a PDF).
+
+**A PSD is read in the profile it embeds.** An 8- or 16-bit RGB Photoshop document's merged image
+is converted from its embedded ICC profile (resource 1039) into the sRGB pixels a document's images
+are, at full precision before it is cut to 8 bits, with the colour settings' intent; a profile with
+sRGB's colours for that intent (or none) leaves the numbers as they are. Whether two profiles are
+the same is judged for the intent a conversion uses (a profile's tables can differ by intent). Before, the profile was ignored and
+the numbers read as sRGB whatever the working space (choosing the working space didn't change
+it), so an Adobe RGB PSD came out duller. Colours outside sRGB clip, as for any image. CMYK,
+grey, Lab and 32-bit documents read as before.
+
+**Images keep their colour on export.** Converting images to an RGB destination (`output:
+{conversion: "destination"}`) uses a 65³ table instead of 17³: an sRGB image written as Adobe RGB
+moved by up to 1 ΔE2000 near black, now about 0.6 at most (8-bit rounding).
+
+**What the host sends.** Give the editor the colour settings the next prep will read its save
+with: the same `rgb` (and `cmyk`, `intent`, `bpc`). A PDF saved with Preserve Editing (the default)
+reopens from the native document it carries, whose RGB numbers are the editor's working-space
+numbers, whatever the PDF's tags say; a working space that differs on the way back shifts them.
+`vectorcraft:export` accepts `output: {conversion: "preserveSource"}` only; a tagged destination
+export isn't available to the page.
+
+### Per-job units (Reporter fork)
+
+The ready message advertises `units: true`. An open can include two optional fields:
+
+- `units`: the opened document's General unit (rulers, positions, sizes, dialog
+  distances), such as `"inches"` or `"millimeters"`.
+- `strokeUnits`: the Stroke unit (weights, dashes) while that document is open.
+
+Each is a string naming a unit as Preferences › Units names them: the key, label or
+suffix in any case, ignoring spaces and punctuation (`inches`, `Inches`, `in`,
+`millimeters`, `mm`, `points`, `pt`, `picas`, `centimeters`, `pixels`, `feetInches`,
+`meters`, `yards`, `feet`). Anything else (a number, an unknown name) is refused
+with `vectorcraft:failed` (`vectorcraft:open: units must name a unit, such as inches
+or millimeters`) and nothing opens.
+
+They are display choices for this job, not edits and not preferences:
+
+- `units` is applied to the document the open makes, also a native document saved in
+  other units, and also after the Import PDF dialog. The document stays unmodified:
+  no `dirty: true`, no undo step. A later save carries the units it shows.
+- Neither changes the person's stored preferences, so the `vectorcraft:prefs` the
+  editor sends back keep their own Units › General and Stroke (a person who works in
+  millimetres is not left in inches by one US job).
+- Preferences › OK stores Units › General and Stroke only when the person changed
+  them in the dialog: pressing OK during an inches job leaves their stored units as
+  they were.
+- Every open sets them for its job: an open without `strokeUnits` shows strokes in
+  the person's Stroke preference again; one without `units` opens in the file's own
+  units or the preference, as before. Choosing a different Stroke unit in
+  Preferences ends the page's choice.
+
 ### Production preview and floating panels (2026-10-17)
 
 Host configuration starts the ink composite immediately, with visibility stored on
@@ -199,3 +325,12 @@ Shared docking now supplies opaque panel and tab backgrounds to floating groups.
 Regression coverage compares actual composite pixels across load, ink isolation
 and Show all, verifies the source document stays unchanged, and inspects the
 floating panel's painted background.
+
+### Overprint Preview in the production panel (2026-10-18)
+
+The production panel has its own Overprint Preview checkbox, off by default, so
+operators no longer switch to the native Separations Preview panel to toggle it.
+Off, each ink covers what is under it (an opaque top powder plate hides the
+artwork, as in ordinary viewing); on, overprinting inks are see-through. Plate
+eyes and component eyes work either way. The choice is per document view state,
+survives the host re-supplying context, and never changes saved artwork.

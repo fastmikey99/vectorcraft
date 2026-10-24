@@ -49,7 +49,7 @@ impl Session {
     pub fn unit(&self, m: Measure) -> Unit {
         match m {
             Measure::General => self.active().map_or_else(|| self.default_units(), |d| d.doc.units),
-            Measure::Stroke => pref_unit(&self.prefs.units_stroke),
+            Measure::Stroke => self.stroke_unit_override.unwrap_or_else(|| pref_unit(&self.prefs.units_stroke)),
             Measure::Type => pref_unit(&self.prefs.units_type),
         }
     }
@@ -62,6 +62,18 @@ impl Session {
     /// Units ▸ Type: the unit type sizes, leading and baseline shift show in.
     pub fn type_unit(&self) -> Unit {
         self.unit(Measure::Type)
+    }
+
+    /// Show strokes in `unit` instead of Preferences ▸ Units ▸ Stroke, or in the preference again
+    /// (`None`), without changing the preference: an embedding page's choice for the job it opened,
+    /// which the person's stored preferences must not keep. Setting the Stroke preference ends it.
+    pub fn set_stroke_unit_override(&mut self, unit: Option<Unit>) {
+        self.stroke_unit_override = unit;
+    }
+
+    /// The Stroke unit an embedding page chose ([`Self::set_stroke_unit_override`]), if any.
+    pub fn stroke_unit_override(&self) -> Option<Unit> {
+        self.stroke_unit_override
     }
 
     /// Preferences ▸ Units ▸ General: the units new documents start in.

@@ -34,10 +34,12 @@ mod halftone;
 pub mod help;
 pub mod importmatches;
 pub(crate) mod inline;
+mod interactivity;
 mod intertwine;
 mod layer;
 mod layerpanel;
 pub mod library;
+pub mod lineweight;
 pub mod linkfiles;
 pub mod links;
 mod live;
@@ -55,6 +57,7 @@ pub mod params;
 mod path;
 mod pathops;
 mod patterncmds;
+mod patternimages;
 pub mod pdfcmds;
 pub mod perspgrid;
 pub(crate) mod place;
@@ -70,9 +73,12 @@ mod recolor;
 pub mod recovery;
 pub mod scripts;
 mod select;
+mod sep;
+mod sep_trap;
 pub(crate) mod shaper;
 pub mod shortcutset;
 pub(crate) mod slices;
+pub(crate) mod solidify;
 mod stroke;
 mod style;
 pub mod stylelib;
@@ -181,6 +187,10 @@ pub fn can_undo(s: &Session) -> std::result::Result<(), String> {
 pub fn can_redo(s: &Session) -> std::result::Result<(), String> {
     s.active().filter(|d| !d.history.redo.is_empty()).map(|_| ()).ok_or_else(|| "nothing to redo".into())
 }
+/// The active document has a step to undo or to redo (Clear History).
+pub fn can_clear_history(s: &Session) -> std::result::Result<(), String> {
+    s.active().filter(|d| !d.history.undo.is_empty() || !d.history.redo.is_empty()).map(|_| ()).ok_or_else(|| "no history to clear".into())
+}
 pub fn has_clipboard(s: &Session) -> std::result::Result<(), String> {
     has_doc(s)?;
     if s.clipboard.is_empty() { Err("clipboard is empty".into()) } else { Ok(()) }
@@ -209,6 +219,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(object::specs());
         v.extend(path::specs());
         v.extend(select::specs());
+        v.extend(sep::specs());
         v.extend(wand::specs());
         v.extend(paint::specs());
         // Split out of `paint` (M3.8); kept next to it so lists in registry order (the command
@@ -265,6 +276,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(library::specs());
         v.extend(expand::specs());
         v.extend(attributes::specs());
+        v.extend(interactivity::specs());
         v.extend(newart::specs());
         v.extend(colortheme::specs());
         v.extend(fileio::pdf::specs());
@@ -272,6 +284,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(newdoc::specs());
         v.extend(place::specs());
         v.extend(links::specs());
+        v.extend(patternimages::specs());
         v.extend(linkfiles::specs());
         v.extend(pdfcmds::specs());
         v.extend(fileio::dxf::specs());
@@ -290,7 +303,10 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(scripts::specs());
         v.extend(cut::specs());
         v.extend(halftone::specs());
+        v.extend(solidify::specs());
+        v.extend(sep_trap::specs());
         v.extend(perspgrid::specs());
+        v.extend(lineweight::specs());
         v.extend(shortcutset::specs());
         v.extend(importmatches::specs());
         v
@@ -496,7 +512,7 @@ pub(crate) fn date_param(p: &Value, key: &str, cmd: &str) -> Result<Option<Optio
 /// no clock). It joins the running command's journal entry as `key`, so a replay of the journal
 /// gives the same date whenever it runs (an action leaves it out: [`crate::Session::journal_for_action`]).
 pub(crate) fn clock_date(s: &mut Session, key: &str, given: Option<Option<i64>>) -> Option<i64> {
-    let t = given.unwrap_or_else(vectorcraft_doc::metadata::now_unix);
+    let t = given.unwrap_or_else(vectorcraft_doc::metadata::output_time);
     s.note_journal(key, serde_json::json!(t));
     t
 }
