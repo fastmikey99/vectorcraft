@@ -1065,3 +1065,15 @@ fn opacity_masks_with_symbols_or_layer_effects_match_full_viewport() {
     let d = masked_doc(true, false);
     assert!(!mask_needs_full_viewport(&d.layers[0].children().unwrap()[0].extras().mask.as_ref().unwrap().art));
 }
+
+#[test]
+fn spot_decode_limit_reports_failure_without_caching_process_only_pixels() {
+    let blob = vectorcraft_testkit::tiff::oversized_spot_image();
+    let d = Document::new(100., 100.);
+    for _ in 0..2 {
+        let before = decode_failures();
+        assert!(blob_pixmap(&d, &blob, true).is_none());
+        assert_eq!(decode_failures(), before + 1);
+        assert!(decode_failure_reason(before).unwrap().contains("decoded ink bytes"));
+    }
+}

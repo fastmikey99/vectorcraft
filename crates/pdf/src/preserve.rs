@@ -131,6 +131,28 @@ fn printed_transparency(doc: &Document, n: &vectorcraft_doc::Node, page: vectorc
     (true, descendants.into_iter().find_map(|(_, reason)| reason))
 }
 
+fn blending_space(group: &Dict<'_>) -> String {
+    if let Some(name) = group.get::<Name<'_>>(b"CS") {
+        return name.as_str().to_owned();
+    }
+    if let Some(array) = group.get::<Array<'_>>(b"CS") {
+        let mut items = array.flex_iter();
+        if let Some(name) = items.next::<Name<'_>>() {
+            if name.as_str() == "ICCBased" {
+                let space = match items.next::<Stream<'_>>().and_then(|s| s.dict().get::<u8>(b"N")) {
+                    Some(4) => "CMYK",
+                    Some(3) => "RGB",
+                    Some(1) => "Gray",
+                    _ => "unknown components",
+                };
+                return format!("ICC-based {space}");
+            }
+            return name.as_str().to_owned();
+        }
+    }
+    "an unrecognized colour space".into()
+}
+
 /// Store recognized, bounded public print settings with the native document.
 pub(crate) fn capture(doc: &mut Document, pdf: &Pdf, selected: &[usize], crop: CropTo, warnings: &mut Vec<String>) {
     let mut state = State::default();
@@ -159,7 +181,10 @@ pub(crate) fn capture(doc: &mut Document, pdf: &Pdf, selected: &[usize], crop: C
                     printed.into_iter().find_map(|(_, reason)| reason)
                 };
                 warnings.push(match reason {
-                    Some(reason) => format!("the imported page transparency group has an unsupported blending space affecting {reason}"),
+                    Some(reason) => format!(
+                        "Uses transparency blending in {}, which the builder can't reproduce exactly. Affects the {reason}",
+                        blending_space(&g)
+                    ),
                     None => IRRELEVANT_BLEND_SPACE.into(),
                 });
                 return None;
@@ -419,11 +444,24 @@ mod tests {
             page.entries = format!("/Group << /S /Transparency /CS [/CalRGB << /WhitePoint [0.9505 1 1.089] >>] /K {knockout} >>");
             page.resources = format!("/ExtGState << /Gs << {state} >> >>");
             let read = import_with_report(&pdf_with(&[page], &[], None), &ImportOptions::default()).unwrap();
-            let diagnostic = read.warnings.iter().find(|w| w.contains("blending space")).unwrap();
+            let diagnostic = read.warnings.iter().find(|w| w.contains("blending space") || w.contains("Uses transparency blending")).unwrap();
             assert_eq!(crate::classify_diagnostic(diagnostic) == crate::DiagnosticClass::FidelityLoss, stops, "{diagnostic}");
             if !stops {
                 assert_eq!(diagnostic, IRRELEVANT_BLEND_SPACE);
             }
+        }
+    }
+
+    #[test]
+    fn unsupported_icc_diagnostic_names_the_component_space() {
+        for (n, expected) in [(4, "ICC-based CMYK"), (3, "ICC-based RGB"), (1, "ICC-based Gray")] {
+            let mut page = PdfPage::new(20., 20., "");
+            page.entries = "/Group <</S /Transparency /CS [/ICCBased 5 0 R]>>".into();
+            let stream = format!("<</N {n} /Length 0>>\nstream\n\nendstream");
+            let bytes = pdf_with(&[page], &[&stream], None);
+            let pdf = crate::pages::open(&bytes, None).unwrap();
+            let group = pdf.pages()[0].raw().get::<Dict<'_>>(b"Group").unwrap();
+            assert_eq!(blending_space(&group), expected);
         }
     }
 

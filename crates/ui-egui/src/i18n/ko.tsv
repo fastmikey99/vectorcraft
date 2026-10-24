@@ -4906,3 +4906,7 @@ lighting	Light	광원
 @msg	unreadable separation form	unreadable separation form
 @msg	couldn't encode separation marks	couldn't encode separation marks
 @msg	unknown separation mark message	unknown separation mark message
+@msg	not enough memory to decode spot image channels	이미지의 별색 채널을 디코딩할 메모리가 부족합니다
+@msg	registration /All image cannot preserve coverage on every output colorant, including document spots	등록색 /All 이미지는 문서의 별색을 포함한 모든 출력 색재의 잉크 피복률을 유지할 수 없습니다
+@msg	spot image has invalid or unreadable channels	별색 이미지에 유효하지 않거나 읽을 수 없는 채널이 있습니다
+@msg	spot image requires {required} decoded ink bytes, exceeding the {limit}-byte limit	별색 이미지에 필요한 디코딩된 잉크 데이터가 {required}바이트로, {limit}바이트 제한을 초과합니다

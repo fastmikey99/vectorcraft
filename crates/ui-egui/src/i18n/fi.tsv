@@ -5292,3 +5292,7 @@ mark-style	Japanese	Japanilainen
 @msg	unreadable separation form	unreadable separation form
 @msg	couldn't encode separation marks	couldn't encode separation marks
 @msg	unknown separation mark message	unknown separation mark message
+@msg	not enough memory to decode spot image channels	muisti ei riitä kuvan spottivärikanavien purkamiseen
+@msg	registration /All image cannot preserve coverage on every output colorant, including document spots	kohdistusvärin /All kuva ei voi säilyttää kaikkien tulostuksen väriaineiden peittävyyttä, mukaan lukien asiakirjan spottivärit
+@msg	spot image has invalid or unreadable channels	spottivärikuvassa on virheellisiä tai lukukelvottomia kanavia
+@msg	spot image requires {required} decoded ink bytes, exceeding the {limit}-byte limit	spottivärikuva vaatii {required} tavua purettua painoväridataa, mikä ylittää {limit} tavun rajan

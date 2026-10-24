@@ -60,6 +60,7 @@ thread_local! {
     /// Images that couldn't be decoded (and so drew nothing) on this thread, counted for exports to
     /// report.
     static DECODE_FAILURES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static SPOT_FAILURE: std::cell::RefCell<Option<(u64, String)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// How many images have failed to decode on this thread so far: an export compares the count
@@ -67,6 +68,30 @@ thread_local! {
 /// the canvas, thumbnails) fail to decode meanwhile are not counted.
 pub fn decode_failures() -> u64 {
     DECODE_FAILURES.with(std::cell::Cell::get)
+}
+
+/// Why a render since `before` could not preserve every image. Production callers must stop.
+pub fn decode_failure_reason(before: u64) -> Option<String> {
+    if decode_failures() <= before {
+        return None;
+    }
+    Some(
+        SPOT_FAILURE
+            .with(|last| last.borrow().as_ref().filter(|(at, _)| *at > before).map(|(_, reason)| reason.clone()))
+            .unwrap_or_else(|| "an image could not be decoded; rendering would lose ink".into()),
+    )
+}
+
+/// Decode spot samples, counting failures so cached effects and production exports report them.
+pub(crate) fn decode_spots(blob: &vectorcraft_doc::ImageBlob) -> Option<Option<vectorcraft_doc::cmyk::SpotInks>> {
+    match blob.spot_inks() {
+        Ok(spots) => Some(spots),
+        Err(error) => {
+            add_decode_failures(1);
+            SPOT_FAILURE.with(|last| *last.borrow_mut() = Some((decode_failures(), error.to_string())));
+            None
+        }
+    }
 }
 
 /// `bytes` decoded within [`MAX_DECODE_ALLOC`] ([`decode_within_allowance`]); a failure is counted

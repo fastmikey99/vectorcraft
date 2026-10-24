@@ -390,9 +390,9 @@ pub(crate) fn ink_image(
     ink: Ink,
     blob: Option<&ImageBlob>,
     touch: bool,
-) -> (ImageKey, Arc<Pixmap>) {
+) -> Option<(ImageKey, Arc<Pixmap>)> {
     if matches!(ink, Ink::Display | Ink::RichBlack) {
-        return (key.clone(), pm.clone());
+        return Some((key.clone(), pm.clone()));
     }
     let (luts, generation) = cached(&SEPARATE, |cms| {
         let intent = cms.settings().intent;
@@ -405,13 +405,17 @@ pub(crate) fn ink_image(
         if touch { s.get(&want) } else { s.peek(&want) }
     };
     if let Some(p) = hit {
-        return (want, p);
+        return Some((want, p));
     }
     // CMYK images (shown through the display table) paint their own inks; the others are separated.
     let size = (pm.width() as u32, pm.height() as u32);
     let cmyk = key.luts.0 != 0 && key.adjust.is_none() && !key.grey;
     let mut inks = blob.filter(|_| cmyk).and_then(ImageBlob::cmyk).filter(|i| (i.width, i.height) == size);
-    if let (Some(inks), Some(spots)) = (inks.as_mut(), blob.filter(|_| key.spots != 0).and_then(ImageBlob::spot_inks)) {
+    let spots = match blob.filter(|_| key.spots != 0) {
+        Some(blob) => crate::paint::decode_spots(blob)?,
+        None => None,
+    };
+    if let (Some(inks), Some(spots)) = (inks.as_mut(), spots) {
         fold_spots(&mut inks.data, &spots, &spot_colors(doc, &spots.names));
     }
     let planes = [Ink::Cmy, Ink::K].map(|plane| {
@@ -439,7 +443,7 @@ pub(crate) fn ink_image(
     let mut s = images::store();
     let cmy = s.insert(plane_key(Ink::Cmy), cmy);
     let k = s.insert(plane_key(Ink::K), k);
-    (want, if ink == Ink::K { k } else { cmy })
+    Some((want, if ink == Ink::K { k } else { cmy }))
 }
 
 #[cfg(test)]

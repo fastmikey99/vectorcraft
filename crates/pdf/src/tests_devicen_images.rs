@@ -102,7 +102,7 @@ fn a_devicen_image_keeps_its_spot_channels_and_mask_and_shares_the_paints_swatch
     assert_eq!(images.len(), 1);
     let b = blob(d, images[0]);
     assert_eq!(b.cmyk().unwrap().data, [255, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 0]);
-    let spots = b.spot_inks().unwrap();
+    let spots = b.spot_inks().unwrap().unwrap();
     assert_eq!(spots.names, ["Spot A", "Spot B"]);
     assert_eq!(spots.data, [0, 0, 255, 0, 0, 128]);
     // The soft mask is the image's opacity mask, as a CMYK image's is.
@@ -144,7 +144,7 @@ fn a_devicen_image_keeps_its_spot_channels_and_mask_and_shares_the_paints_swatch
     let images = image_nodes(&back.document);
     let b = blob(&back.document, images[0]);
     assert_eq!(b.cmyk().unwrap().data, [255, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 0]);
-    assert_eq!(b.spot_inks().unwrap().data, [0, 0, 255, 0, 0, 128]);
+    assert_eq!(b.spot_inks().unwrap().unwrap().data, [0, 0, 255, 0, 0, 128]);
     assert!(images[0].extras().mask.is_some());
     assert_eq!(spot_swatches(&back.document).len(), 2);
 }
@@ -157,7 +157,7 @@ fn separation_images_and_all_and_none_channels_print_on_their_plates() {
     assert!(r.warnings.is_empty(), "{:?}", r.warnings);
     let b = blob(&r.document, image_nodes(&r.document)[0]);
     assert_eq!(b.cmyk().unwrap().data, [0; 12]);
-    let s = b.spot_inks().unwrap();
+    let s = b.spot_inks().unwrap().unwrap();
     assert_eq!((s.names.as_slice(), s.data.as_slice()), (&["Spot A".to_string()][..], &[0, 128, 255][..]));
     assert_eq!(spot_swatches(&r.document), ["Spot A"]);
 
@@ -190,4 +190,25 @@ fn images_in_inks_read_as_rgb_say_why() {
     let dict = "/Width 2 /Height 1 /BitsPerComponent 8 /ColorSpace [/Indexed 6 0 R 1 <00FF>]";
     let r = import_with_report(&pdf((dict, &[0, 1]), &[]), &ImportOptions::default()).unwrap();
     assert!(r.warnings.iter().any(|w| w.contains("indexed images in CMYK or spot inks")), "{:?}", r.warnings);
+}
+
+#[test]
+fn spot_decode_limit_stops_pdf_export_instead_of_falling_back_to_process() {
+    let mut d = Document::new(100., 100.);
+    let blob = vectorcraft_testkit::tiff::oversized_spot_image();
+    assert_eq!(blob.spot_names().len(), 28);
+    assert!(blob.spot_inks().unwrap_err().to_string().contains("decoded ink bytes"));
+    d.images.insert("oversized".into(), blob);
+    let mut node = vectorcraft_doc::Node::group(d.alloc_id(), vec![]);
+    node.kind = NodeKind::Image(Box::new(vectorcraft_doc::ImageObject {
+        key: "oversized".into(),
+        width: 1,
+        height: 1,
+        xf: vectorcraft_geom::Affine::scale(10.),
+        link: None,
+        placement: Default::default(),
+    }));
+    d.insert(Some(d.layers[0].id), 0, node).unwrap();
+    let err = export(&d, &PdfOptions::default()).unwrap_err();
+    assert!(err.to_string().contains("decoded ink bytes"), "{err}");
 }

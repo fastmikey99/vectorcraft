@@ -3,7 +3,7 @@ mod actions;
 mod clean;
 mod coverage;
 mod geometry;
-mod images;
+pub(super) mod images;
 mod intents;
 mod marks;
 mod metallic;
@@ -26,7 +26,12 @@ use vectorcraft_geom::Rect;
 
 const MAX_STEPS: usize = 100_000;
 fn error(e: impl ToString) -> EngineError {
-    EngineError::Other(e.to_string())
+    let message = e.to_string();
+    EngineError::Other(if message == "the shapes are too degenerate to combine" {
+        "The builder cannot combine these artwork outlines accurately; no separation PDF was written".into()
+    } else {
+        message
+    })
 }
 fn required<'a>(p: &'a Element, key: &str) -> Result<&'a str> {
     p.value(key).ok_or_else(|| error(format!("missing PAL parameter {key}")))
@@ -43,10 +48,73 @@ fn number(p: &Element, key: &str) -> Result<f64> {
 }
 
 fn is_trap_ticket(name: &str) -> bool {
-    matches!(
-        name.replace('\\', "/").trim_end_matches(".pal").rsplit('/').next(),
-        Some("Trapping_Supacolour_Standard" | "Trapping_Supacolour_Standard (NEW)")
-    )
+    let normalized = name.replace('\\', "/");
+    let path = Path::new(&normalized);
+    // Match the reader's case-insensitive PAL extension handling.
+    let name = if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("pal")) { path.file_stem() } else { path.file_name() };
+    matches!(name.and_then(|name| name.to_str()), Some("Trapping_Supacolour_Standard" | "Trapping_Supacolour_Standard (NEW)"))
+}
+
+/// Inspect both conditional branches and resolved calls, independent of the current
+/// selection. A wrapper must not disguise a trapping recipe as a Light recipe.
+fn nested_trapping(root: &Path, lists: &[&str], intents: &intents::Intents) -> Result<bool> {
+    fn visit(root: &Path, path: &Path, stack: &mut Vec<PathBuf>, steps: &mut usize) -> Result<bool> {
+        if stack.len() >= 32 || stack.iter().any(|p| p == path) {
+            return Err(error("recursive PAL call or call depth exceeds 32"));
+        }
+        stack.push(path.to_path_buf());
+        let actions = reader::read(path).map_err(error)?;
+        let result = walk(root, path, &actions, stack, steps);
+        stack.pop();
+        result
+    }
+    fn walk(root: &Path, path: &Path, actions: &[Action], stack: &mut Vec<PathBuf>, steps: &mut usize) -> Result<bool> {
+        for action in actions {
+            crate::cancel::check()?;
+            *steps += 1;
+            if *steps > MAX_STEPS {
+                return Err(error("PAL inspection exceeds 100000 steps"));
+            }
+            if action.kind == "TrapTask" {
+                return Ok(true);
+            }
+            if action.kind == "CallActionList" {
+                let name = required(&action.params, "Path")?;
+                if is_trap_ticket(name) {
+                    return Ok(true);
+                }
+                let called = reader::resolve(root, Some(path), name).map_err(error)?;
+                if visit(root, &called, stack, steps)? {
+                    return Ok(true);
+                }
+            }
+            for children in [&action.children, &action.then_actions, &action.else_actions] {
+                if walk(root, path, children, stack, steps)? {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+    let mut steps = 0;
+    for name in lists.iter().filter(|name| !matches!(**name, "TrapTask" | "MetallicIntents")) {
+        let path = reader::resolve(root, None, name).map_err(error)?;
+        if visit(root, &path, &mut Vec::new(), &mut steps)? {
+            return Ok(true);
+        }
+    }
+    // Intent/mark lists are executed by apply_intents, even when absent from lists.
+    // They are real PAL names, not the top-level synthetic task/intent markers.
+    for name in intents.lists() {
+        if is_trap_ticket(name) {
+            return Ok(true);
+        }
+        let path = reader::resolve(root, None, name).map_err(error)?;
+        if visit(root, &path, &mut Vec::new(), &mut steps)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -201,10 +269,11 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let profiles = profiles::folder(p)?;
     let input = string("input")?;
     let output = string("output")?;
-    if !Path::new(input).extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+    let is_pdf = Path::new(input).extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+    if !Path::new(input).extension().is_some_and(|e| ["pdf", "png", "jpg", "jpeg"].iter().any(|kind| e.eq_ignore_ascii_case(kind)))
         || !Path::new(output).extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
     {
-        return Err(error("sep.runActionList input and output must be PDFs"));
+        return Err(error("sep.runActionList requires a PDF, PNG or JPEG input and a PDF output"));
     }
     crate::file_access::check_read(input).map_err(error)?;
     crate::file_access::check_write(output).map_err(error)?;
@@ -235,6 +304,9 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     };
     crate::file_access::check_read(&root.to_string_lossy()).map_err(error)?;
     let root = root.canonicalize().map_err(error)?;
+    if no_trap.is_some() && nested_trapping(&root, &lists, &intents)? {
+        return Err(error("intents.noTrap requires an explicit trap ticket/TrapTask sequence without nested trapping"));
+    }
     let opened = s.execute("document.open", &json!({"path":input,"printProduction":true,"textAs":"outlines"}))?;
     if let Some(reason) = opened
         .get("warnings")
@@ -258,10 +330,17 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
             marks::inherit(d);
             Ok(())
         })?;
-        if intents::from_marks(&s.doc()?.doc).no_trap.is_some() {
+        let marked = intents::from_marks(&s.doc()?.doc);
+        if marked.no_trap.is_some() {
             let tickets: Vec<_> = lists.iter().enumerate().filter(|(_, name)| is_trap_ticket(name)).map(|(i, _)| i).collect();
-            if tickets.len() != 1 || tickets.first().and_then(|i| lists.get(i + 1)).copied() != Some("TrapTask") {
+            // Light recipes do no trapping, so persistent NoTrap marks are already satisfied.
+            let has_trapping = !tickets.is_empty() || lists.contains(&"TrapTask");
+            if has_trapping && (tickets.len() != 1 || tickets.first().and_then(|i| lists.get(i + 1)).copied() != Some("TrapTask")) {
                 return Err(error("NoTrap marks require exactly one trap ticket immediately followed by TrapTask"));
+            }
+            // Even an otherwise valid explicit sequence cannot permit extra traps in wrappers.
+            if nested_trapping(&root, &lists, &marked)? {
+                return Err(error("NoTrap marks require exactly one trap ticket immediately followed by TrapTask; nested trapping is unsupported"));
             }
         }
     }
@@ -269,27 +348,33 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(error("PAL preparation currently requires a single-page PDF"));
     }
     let rect = s.doc()?.doc.artboards.first().ok_or_else(|| error("PDF has no page"))?.rect;
-    let source_info = vectorcraft_pdf::info(&std::fs::read(input).map_err(error)?, None).map_err(error)?;
-    let page = source_info.pages.first().ok_or_else(|| error("PDF has no page"))?;
-    if page.rotation != 0 {
-        return Err(error("PAL preparation requires an unrotated page"));
-    }
-    let media = page.boxes.iter().find(|(b, _)| *b == vectorcraft_pdf::CropTo::Media).map(|(_, r)| *r).unwrap_or(rect);
-    let boxes = page
-        .boxes
-        .iter()
-        .filter_map(|(kind, r)| {
-            let name = match kind {
-                vectorcraft_pdf::CropTo::Media => "MediaBox",
-                vectorcraft_pdf::CropTo::Crop => "CropBox",
-                vectorcraft_pdf::CropTo::Trim => "TrimBox",
-                vectorcraft_pdf::CropTo::Bleed => "BleedBox",
-                vectorcraft_pdf::CropTo::Art => "ArtBox",
-                _ => return None,
-            };
-            Some((name.into(), Rect::new(rect.x0 + r.x0 - media.x0, rect.y0 + media.y1 - r.y1, rect.x0 + r.x1 - media.x0, rect.y0 + media.y1 - r.y0)))
-        })
-        .collect();
+    let boxes = if is_pdf {
+        let source_info = vectorcraft_pdf::info(&std::fs::read(input).map_err(error)?, None).map_err(error)?;
+        let page = source_info.pages.first().ok_or_else(|| error("PDF has no page"))?;
+        if page.rotation != 0 {
+            return Err(error("PAL preparation requires an unrotated page"));
+        }
+        let media = page.boxes.iter().find(|(b, _)| *b == vectorcraft_pdf::CropTo::Media).map(|(_, r)| *r).unwrap_or(rect);
+        page.boxes
+            .iter()
+            .filter_map(|(kind, r)| {
+                let name = match kind {
+                    vectorcraft_pdf::CropTo::Media => "MediaBox",
+                    vectorcraft_pdf::CropTo::Crop => "CropBox",
+                    vectorcraft_pdf::CropTo::Trim => "TrimBox",
+                    vectorcraft_pdf::CropTo::Bleed => "BleedBox",
+                    vectorcraft_pdf::CropTo::Art => "ArtBox",
+                    _ => return None,
+                };
+                Some((
+                    name.into(),
+                    Rect::new(rect.x0 + r.x0 - media.x0, rect.y0 + media.y1 - r.y1, rect.x0 + r.x1 - media.x0, rect.y0 + media.y1 - r.y0),
+                ))
+            })
+            .collect()
+    } else {
+        ["MediaBox", "CropBox", "TrimBox", "BleedBox", "ArtBox"].into_iter().map(|name| (name.into(), rect)).collect()
+    };
     let mut player = Player {
         session: s,
         root,

@@ -5328,3 +5328,7 @@ theme	Appearance	Apparence
 @msg	unreadable separation form	unreadable separation form
 @msg	couldn't encode separation marks	couldn't encode separation marks
 @msg	unknown separation mark message	unknown separation mark message
+@msg	not enough memory to decode spot image channels	mémoire insuffisante pour décoder les canaux de tons directs de l’image
+@msg	registration /All image cannot preserve coverage on every output colorant, including document spots	l’image en couleur de repérage /All ne peut pas préserver la couverture de tous les colorants de sortie, y compris les tons directs du document
+@msg	spot image has invalid or unreadable channels	l’image en tons directs contient des canaux non valides ou illisibles
+@msg	spot image requires {required} decoded ink bytes, exceeding the {limit}-byte limit	l’image en tons directs nécessite {required} octets de données d’encre décodées, ce qui dépasse la limite de {limit} octets

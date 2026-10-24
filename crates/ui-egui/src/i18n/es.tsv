@@ -5271,3 +5271,7 @@ mark-style	Japanese	Japonesas
 @msg	unreadable separation form	unreadable separation form
 @msg	couldn't encode separation marks	couldn't encode separation marks
 @msg	unknown separation mark message	unknown separation mark message
+@msg	not enough memory to decode spot image channels	no hay suficiente memoria para decodificar los canales de tintas planas de la imagen
+@msg	registration /All image cannot preserve coverage on every output colorant, including document spots	la imagen con color de registro /All no puede conservar la cobertura de todos los colorantes de salida, incluidas las tintas planas del documento
+@msg	spot image has invalid or unreadable channels	la imagen con tintas planas tiene canales no válidos o ilegibles
+@msg	spot image requires {required} decoded ink bytes, exceeding the {limit}-byte limit	la imagen con tintas planas requiere {required} bytes de datos de tinta decodificados, lo que supera el límite de {limit} bytes

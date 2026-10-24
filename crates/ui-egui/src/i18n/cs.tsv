@@ -5329,3 +5329,7 @@ mark-style	Japanese	Japonské
 @msg	unreadable separation form	unreadable separation form
 @msg	couldn't encode separation marks	couldn't encode separation marks
 @msg	unknown separation mark message	unknown separation mark message
+@msg	not enough memory to decode spot image channels	nedostatek paměti pro dekódování kanálů přímých barev obrázku
+@msg	registration /All image cannot preserve coverage on every output colorant, including document spots	obrázek s registrační barvou /All nemůže zachovat pokrytí všech výstupních barviv včetně přímých barev dokumentu
+@msg	spot image has invalid or unreadable channels	obrázek s přímými barvami má neplatné nebo nečitelné kanály
+@msg	spot image requires {required} decoded ink bytes, exceeding the {limit}-byte limit	obrázek s přímými barvami vyžaduje {required} bajtů dekódovaných dat tiskových barev, což překračuje limit {limit} bajtů

@@ -55,6 +55,9 @@ pub(super) fn band(occupied: &[bool], eligible: &[bool], union: &[bool], w: usiz
     let mut result = vec![None; n];
     let mut distance = vec![u8::MAX; n];
     for i in 0..n {
+        if i % 16384 == 0 {
+            crate::cancel::check()?;
+        }
         if occupied.get(i) != Some(&true) {
             continue;
         }

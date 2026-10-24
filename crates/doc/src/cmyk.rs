@@ -18,8 +18,9 @@ use crate::ImageBlob;
 pub mod spots;
 pub use spots::SpotInks;
 
-/// Most pixels a CMYK image is decoded with (256 MB of samples): larger ones decode as RGB.
-pub const MAX_CMYK_PIXELS: u64 = 1 << 26;
+/// Most pixels decoded as CMYK. Native supports A2 at 600 dpi (600 MB of samples);
+/// wasm retains its smaller allowance because its entire address space is 4 GB.
+pub const MAX_CMYK_PIXELS: u64 = if cfg!(target_arch = "wasm32") { 1 << 26 } else { 150_000_000 };
 
 /// The ink amounts of a CMYK image: C, M, Y and K bytes per pixel, 0 is no ink.
 #[derive(Clone, Debug, PartialEq)]
@@ -132,7 +133,9 @@ fn tiff(bytes: &[u8]) -> Option<(tiff::ColorType, tiff::decoder::Decoder<Cursor<
     if !is_tiff(bytes) || oversized_tiff(bytes).is_some() {
         return None;
     }
-    let mut d = tiff::decoder::Decoder::new(Cursor::new(bytes)).ok()?;
+    let mut limits = tiff::decoder::Limits::default();
+    limits.decoding_buffer_size = (MAX_CMYK_PIXELS * 4) as usize;
+    let mut d = tiff::decoder::Decoder::new(Cursor::new(bytes)).ok()?.with_limits(limits);
     Some((d.colortype().ok()?, d))
 }
 
@@ -145,7 +148,7 @@ fn planar(d: &mut tiff::decoder::Decoder<Cursor<&[u8]>>) -> bool {
 /// type has), pixel by pixel and 8 bits each (16-bit samples to their high byte), whether the file
 /// stores each pixel's samples together or one plane per channel. `None` when they don't decode to
 /// that many samples, which includes images whose planes together need more than the decoder's
-/// limit (256 MB of samples).
+/// limit (at most 600 MB of samples on native).
 fn read_samples(d: &mut tiff::decoder::Decoder<Cursor<&[u8]>>, n: usize, per: usize) -> Option<Vec<u8>> {
     let mut buf = tiff::decoder::DecodingResult::U8(Vec::new());
     let layout = d.read_image_to_buffer(&mut buf).ok()?;
@@ -511,6 +514,15 @@ impl hayro_ccitt::Decoder for Rows<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoded_cmyk_limit_is_bounded_and_native_accepts_a2() {
+        assert!(pixels(0, 1).is_none());
+        assert!(pixels(u32::MAX, u32::MAX).is_none());
+        assert!(pixels(15001, 10000).is_none());
+        #[cfg(not(target_arch = "wasm32"))]
+        assert_eq!(pixels(9922, 14032), Some(139_225_504));
+    }
 
     #[test]
     fn a_cmyk_tiff_with_alpha_reads_as_rgba() {
