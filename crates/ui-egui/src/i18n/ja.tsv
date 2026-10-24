@@ -4983,3 +4983,7 @@ lighting	Light	ライト
 @msg	unreadable separation form	unreadable separation form
 @msg	couldn't encode separation marks	couldn't encode separation marks
 @msg	unknown separation mark message	unknown separation mark message
+@msg	not enough memory to decode spot image channels	画像の特色チャンネルをデコードするためのメモリが不足しています
+@msg	registration /All image cannot preserve coverage on every output colorant, including document spots	レジストレーションカラー /All の画像では、ドキュメントの特色を含むすべての出力色材の網点面積率を保持できません
+@msg	spot image has invalid or unreadable channels	特色画像に無効または読み取り不能なチャンネルがあります
+@msg	spot image requires {required} decoded ink bytes, exceeding the {limit}-byte limit	特色画像にはデコード後のインクデータが {required} バイト必要なため、上限の {limit} バイトを超えます

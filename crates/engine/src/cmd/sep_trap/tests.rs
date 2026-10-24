@@ -85,7 +85,7 @@ fn spot_inks_stay_on_their_plate_and_excluded_names_block_them() {
     let d = &s.doc().unwrap().doc;
     let image = d.images.values().find(|i| !i.spot_names().is_empty()).unwrap();
     assert!(image.cmyk().unwrap().data.iter().all(|&v| v == 0));
-    assert!(image.spot_inks().unwrap().data.contains(&255));
+    assert!(image.spot_inks().unwrap().unwrap().data.contains(&255));
     let bytes = vectorcraft_pdf::export(d, &Default::default()).unwrap();
     assert!(String::from_utf8_lossy(&bytes).contains("/DeviceN"));
     assert!(String::from_utf8_lossy(&bytes).contains("/SMask"));
@@ -430,4 +430,113 @@ fn adversarial_ownership_falls_back_and_cancellation_is_not_swallowed() {
     token.cancel();
     let result = crate::cancel::scope(&token, None, || colour::samples(&d, &mut nearest, 1, Rect::new(0., 0., 1., 1.), 0.7));
     assert!(matches!(result, Err(crate::EngineError::Cancelled)));
+}
+
+#[test]
+fn band_halo_matches_whole_grid_across_seams_and_holes() {
+    let s = session(Color::cmyk(1., 0., 0., 0.));
+    let source = &s.doc().unwrap().doc;
+    let mut eligible = (**source).clone();
+    for layer in &mut eligible.layers {
+        eligibility(Arc::make_mut(layer), source, 0.7, true, &mut Vec::new()).unwrap();
+    }
+    let region = Rect::new(0., 0., 30., 30.);
+    let mut renderer = Renderer::new();
+    let whole = render_band(source, &eligible, None, &mut renderer, region, 250, 250, 0.7, 0, 250).unwrap();
+    for (start, end) in [(0usize, 47usize), (47, 100), (100, 203), (203, 250)] {
+        let top = start.saturating_sub(8usize);
+        let bottom = (end + 8).min(250);
+        let r = Rect::new(0., top as f64 / SCALE, 30., bottom as f64 / SCALE);
+        let part = render_band(source, &eligible, None, &mut renderer, r, 250, (bottom - top) as u32, 0.7, start - top, end - top).unwrap();
+        assert_eq!(&part.mask[(start - top) * 250..(end - top) * 250], &whole.mask[start * 250..end * 250]);
+        assert_eq!(&part.process[(start - top) * 250 * 4..(end - top) * 250 * 4], &whole.process[start * 250 * 4..end * 250 * 4]);
+    }
+}
+
+#[test]
+fn a2_grid_is_supported_but_pathological_dimensions_are_bounded() {
+    let a2 = Rect::new(0., 0., 420. * MM, 594. * MM).inflate(0.3 * MM, 0.3 * MM);
+    let (w, h) = vectorcraft_render::raster_size(a2, SCALE).unwrap();
+    assert!(w as usize * h as usize <= MAX_PIXELS);
+    let mut rows = 0;
+    for b in bands::rows(w, h, a2, 8) {
+        assert!(w as usize * b.height as usize <= BAND_PIXELS + w as usize * 16);
+        rows += b.last - b.first;
+    }
+    assert_eq!(rows, h as usize);
+    assert!(pixels::band(&[], &[], &[], 15001, 10000, 4.).is_err());
+}
+
+#[test]
+fn rasterize_keeps_process_plates_in_one_image() {
+    let mut s = session(Color::cmyk(1., 0.2, 0., 0.));
+    let id = s.doc().unwrap().doc.layers[0].children().unwrap()[0].id;
+    s.edit("test", |d, _| {
+        let node = d.node_mut(id).unwrap();
+        if let NodeKind::Path { path, .. } = &mut node.kind {
+            *path = shapes::rectangle(Rect::new(0., 0., 120., 600.));
+        }
+        Ok(())
+    })
+    .unwrap();
+    let before = s.doc().unwrap().doc.clone();
+    raster::rasterize_with_limit(&mut s, &[id], 0).unwrap();
+    let d = &s.doc().unwrap().doc;
+    assert_eq!(d.images.len(), 2, "one ink image and its mask, without RIP interpolation seams");
+    let mut renderer = Renderer::new();
+    // Check the ink samples around an internal scanline, including all process plates.
+    let region = Rect::new(0., 479., 120., 481.);
+    for plate in ["Cyan", "Magenta", "Yellow", "Black"] {
+        let a = renderer.render_region_with(&before, region, SCALE, &options(Some(plate)));
+        let b = renderer.render_region_with(d, region, SCALE, &options(Some(plate)));
+        assert_eq!(a.pixels, b.pixels, "{plate}");
+    }
+}
+
+#[test]
+fn contour_budget_bounds_islands_holes_and_single_noisy_contours_before_tracing() {
+    let w = 1024;
+    let noisy: Vec<_> = (0..w * w).map(|i| (i % w + i / w) % 2 == 0).collect();
+    assert!(check_contour_budget(&noisy, w, w, MAX_CONTOUR_ANCHORS).unwrap_err().to_string().contains("contour/anchor memory budget"));
+    // One connected region with a jagged edge, then many holes in one region.
+    for mask in [(0..256).map(|i| i / 16 == 0 || i % 2 == 0).collect::<Vec<_>>(), (0..256).map(|i| i / 16 % 2 == 0 || i % 2 == 0).collect()] {
+        assert!(check_contour_budget(&mask, 16, 16, 20).is_err());
+    }
+    // Large smooth contours consume few anchors regardless of their perimeter.
+    check_contour_budget(&vec![true; w * w], w, w, 5).unwrap();
+    assert!(check_contour_budget(&[true], 1, 1, 4).is_err());
+    check_contour_budget(&[true], 1, 1, 5).unwrap();
+    // Exhaustively verify the bound includes the tracer's extra starting vertices.
+    for bits in 0u32..1 << 16 {
+        let mask: Vec<_> = (0..16).map(|i| bits >> i & 1 == 1).collect();
+        let components = vectorcraft_trace::trace_mask(&mask, 4, 4);
+        let anchors: usize = components.iter().map(|c| c.outer.pts.len() + c.holes.iter().map(|h| h.pts.len()).sum::<usize>()).sum();
+        if anchors > 0 {
+            assert!(check_contour_budget(&mask, 4, 4, anchors - 1).is_err(), "{bits:016b}");
+        }
+        check_contour_budget(&mask, 4, 4, 80).unwrap();
+    }
+}
+
+#[test]
+fn banded_rasterize_contour_stop_preserves_art_and_selection() {
+    let mut s = session(Color::BLACK);
+    let id = s.doc().unwrap().doc.layers[0].children().unwrap()[0].id;
+    let rgba = image::RgbaImage::from_fn(32, 32, |x, y| image::Rgba([255, 0, 0, if (x + y) % 2 == 0 { 255 } else { 0 }]));
+    let mut png = std::io::Cursor::new(Vec::new());
+    rgba.write_to(&mut png, image::ImageFormat::Png).unwrap();
+    s.edit("test", |d, sel| {
+        d.images.insert("noise".into(), ImageBlob::png(png.into_inner()));
+        let image = image_node(d, "noise".into(), 32, 32, Affine::scale(1. / SCALE));
+        d.node_mut(id).unwrap().kind = image.kind;
+        sel.set([id]);
+        Ok(())
+    })
+    .unwrap();
+    let before = s.doc().unwrap().doc.clone();
+    let selected = s.doc().unwrap().selection.objects.clone();
+    let err = raster::rasterize_with_budgets(&mut s, &[id], 0, 64).unwrap_err();
+    assert!(err.to_string().contains("contour/anchor memory budget"), "{err}");
+    assert_eq!(s.doc().unwrap().doc, before);
+    assert_eq!(s.doc().unwrap().selection.objects, selected);
 }

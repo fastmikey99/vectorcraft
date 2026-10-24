@@ -4910,3 +4910,7 @@ effect	Soft	Weich
 @msg	unreadable separation form	unreadable separation form
 @msg	couldn't encode separation marks	couldn't encode separation marks
 @msg	unknown separation mark message	unknown separation mark message
+@msg	not enough memory to decode spot image channels	nicht genügend Speicher zum Dekodieren der Volltonfarbkanäle des Bildes
+@msg	registration /All image cannot preserve coverage on every output colorant, including document spots	ein Bild mit der Passerfarbe /All kann die Deckung nicht für alle Ausgabefarbmittel einschließlich der Volltonfarben des Dokuments erhalten
+@msg	spot image has invalid or unreadable channels	das Volltonfarbbild hat ungültige oder unlesbare Kanäle
+@msg	spot image requires {required} decoded ink bytes, exceeding the {limit}-byte limit	das Volltonfarbbild benötigt {required} Byte dekodierter Druckfarbdaten und überschreitet damit die Grenze von {limit} Byte

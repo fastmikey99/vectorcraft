@@ -383,7 +383,7 @@ impl Player<'_> {
                     }
                     let blob = self.doc()?.images.get(&image.key).ok_or_else(|| error("missing image data"))?;
                     if blob.spot_names().iter().any(|name| inks.contains(name)) {
-                        let spots = blob.spot_inks().ok_or_else(|| error("undecodable image spot channels"))?;
+                        let spots = blob.spot_inks().map_err(error)?.ok_or_else(|| error("undecodable image spot channels"))?;
                         let keep: Vec<_> = spots.names.iter().enumerate().filter(|(_, name)| !inks.contains(name)).map(|(i, _)| i).collect();
                         let process = blob.cmyk().ok_or_else(|| error("undecodable image process channels"))?;
                         let replacement = if keep.is_empty() {

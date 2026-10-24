@@ -17,7 +17,7 @@ mod ink;
 mod live;
 mod lru;
 mod paint;
-pub use paint::decode_failures;
+pub use paint::{decode_failure_reason, decode_failures};
 mod pattern;
 pub mod placed_document;
 pub mod proof;
@@ -1975,12 +1975,14 @@ impl Renderer {
         let mips = f.opts.image_mips;
         let pixels = if outline && !f.doc.setup.outline_images { None } else { self.image_pixmap(f.doc, &im.key, outline, !mips) };
         if let Some((key, pm)) = pixels {
-            let (key, pm) = if outline {
-                (key, pm)
+            let Some((key, pm)) = (if outline {
+                Some((key, pm))
             } else if let Some(proof) = f.opts.proof.as_ref().filter(|p| p.separations.is_some()) {
                 bitmap_proof::image(f.doc, &key, &pm, f.doc.images.get(&im.key), proof, !mips)
             } else {
                 ink::ink_image(f.doc, &key, &pm, f.ink, f.doc.images.get(&im.key), !mips)
+            }) else {
+                return;
             };
             let pm = if mips { image_mip(&key, pm, f.view * im.xf * Affine::scale_non_uniform(im.width as f64, im.height as f64)) } else { pm };
             let sx = im.width as f64 / pm.width().max(1) as f64;
@@ -2114,11 +2116,13 @@ fn blob_pixmap(doc: &Document, blob: &vectorcraft_doc::ImageBlob, touch: bool) -
     if let Some(pm) = lookup(&key, touch) {
         return Some((key, pm));
     }
+    // Decode failure is counted for exports, and no process-only image is cached or drawn.
+    let spots = paint::decode_spots(blob)?;
     // Decoded outside the lock: other renderers carry on meanwhile.
     let pm = match lut.and_then(|(lut, _)| ink::cmyk_pixmap(blob, &lut)) {
         Some(mut pm) => {
             if !colors.is_empty()
-                && let Some(spots) = blob.spot_inks()
+                && let Some(spots) = spots
             {
                 ink::print_spots(&mut pm, &spots, &colors);
             }

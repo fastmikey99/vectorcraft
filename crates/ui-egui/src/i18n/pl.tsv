@@ -5181,3 +5181,7 @@ mark-style	Japanese	Japońskie
 @msg	unreadable separation form	unreadable separation form
 @msg	couldn't encode separation marks	couldn't encode separation marks
 @msg	unknown separation mark message	unknown separation mark message
+@msg	not enough memory to decode spot image channels	za mało pamięci do zdekodowania kanałów kolorów dodatkowych obrazu
+@msg	registration /All image cannot preserve coverage on every output colorant, including document spots	obraz w kolorze pasowania /All nie może zachować pokrycia wszystkich barwników wyjściowych, w tym kolorów dodatkowych dokumentu
+@msg	spot image has invalid or unreadable channels	obraz z kolorami dodatkowymi ma nieprawidłowe lub nieczytelne kanały
+@msg	spot image requires {required} decoded ink bytes, exceeding the {limit}-byte limit	obraz z kolorami dodatkowymi wymaga {required} bajtów zdekodowanych danych farb, co przekracza limit {limit} bajtów

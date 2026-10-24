@@ -233,6 +233,8 @@ pub(crate) struct Writer {
     lab_spots: Vec<(String, vectorcraft_color::cms::Lab)>,
     /// Images with spot channels, drawn as stand-ins until the file is written ([`crate::devicen`]).
     devicen: Vec<crate::devicen::Pending>,
+    /// Failure to preserve image colorants is fatal, including ordinary (non-production) export.
+    ink_error: Option<PdfError>,
     warnings: Vec<String>,
     /// RGB content of a CMYK document, gathered from the exporters ([`Self::absorb`]).
     rgb_in_cmyk: RgbInCmyk,
@@ -320,6 +322,7 @@ impl Writer {
             out: Arc::new(out),
             lab_spots: vec![],
             devicen: vec![],
+            ink_error: None,
             warnings,
             rgb_in_cmyk: RgbInCmyk::default(),
             pdf13: set.pdf13(),
@@ -420,6 +423,7 @@ impl Writer {
             }
         }
         self.devicen.extend(ex.devicen);
+        self.ink_error = self.ink_error.take().or(ex.ink_error);
         // The exporter caches images by their key, followed by their size and mask after a NUL.
         for (cache, image) in ex.images {
             if let (Some(key), Some(image)) = (cache.split('\0').next(), image) {
@@ -433,6 +437,9 @@ impl Writer {
     /// alternates. When the writer couldn't decode one of the images, its key is added to
     /// `left_out` ([`leaving_out_undecodable`]) and the writer's error is returned.
     pub(crate) fn finish(mut self, left_out: &mut HashSet<String>) -> Result<(Vec<u8>, Vec<String>), PdfError> {
+        if let Some(error) = self.ink_error.take() {
+            return Err(error);
+        }
         let images = std::mem::take(&mut self.images);
         let bytes = self.pdf.finish().map_err(|e| {
             if let write::WriteError::Serialization(k) = &e
@@ -578,6 +585,8 @@ pub(crate) struct Exporter<'a> {
     lab_spots: Vec<(String, vectorcraft_color::cms::Lab)>,
     /// Images with spot channels, drawn as stand-ins until the file is written ([`crate::devicen`]).
     devicen: Vec<crate::devicen::Pending>,
+    /// Failure to preserve image colorants is fatal, including ordinary (non-production) export.
+    ink_error: Option<PdfError>,
     /// Images may ask viewers to smooth them (not in PDF/A).
     interpolate: bool,
     /// How images are resampled and compressed.
@@ -646,6 +655,7 @@ impl<'a> Exporter<'a> {
             knockout: doc.page_knockout,
             lab_spots: vec![],
             devicen: vec![],
+            ink_error: None,
             interpolate: set.standard != Standard::PdfA2b && !set.disable_image_interpolation,
             compression: &set.compression,
             non_printing: false,
@@ -1983,8 +1993,9 @@ impl Exporter<'_> {
         let doc = self.doc;
         let out = self.out.clone();
         let img = doc.images.get(key).filter(|_| !self.left_out.contains(key)).and_then(|blob| {
-            if let Some(image) = self.spot_image(blob, None) {
-                return Some(image);
+            let spot_image = self.spot_image(blob, None);
+            if spot_image.is_some() || self.ink_error.is_some() {
+                return spot_image;
             }
             let cmyk_image = blob.is_cmyk();
             if !cmyk_image && self.convert && out.separates_rgb() && doc.color_mode == vectorcraft_doc::ColorMode::Cmyk {
@@ -2045,15 +2056,19 @@ impl Exporter<'_> {
     /// as they are (neither converted nor resampled: they are separations), with `alpha` as its
     /// soft mask. `None` for other images.
     fn spot_image(&mut self, blob: &vectorcraft_doc::ImageBlob, alpha: Option<Vec<u8>>) -> Option<Image> {
-        if blob.spot_names().is_empty() {
-            return None;
-        }
         let doc = self.doc;
         let (out, intent) = (self.out.clone(), self.intent);
         let alt = |name: &str| {
             doc.swatch(name).filter(|s| s.spot).and_then(|s| s.paint.color()).map_or([0.0; 4], |c| out.cmyk(&doc.linked_color(c, true), intent))
         };
-        let (image, pending) = crate::devicen::placeholder(blob, alt, alpha, self.interpolate)?;
+        let (image, pending) = match crate::devicen::placeholder(blob, alt, alpha, self.interpolate) {
+            Ok(Some(image)) => image,
+            Ok(None) => return None,
+            Err(error) => {
+                self.ink_error = Some(error);
+                return None;
+            }
+        };
         self.devicen.push(pending);
         Some(image)
     }

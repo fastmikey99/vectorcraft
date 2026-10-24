@@ -5284,3 +5284,7 @@ theme	Appearance	Utseende
 @msg	unreadable separation form	unreadable separation form
 @msg	couldn't encode separation marks	couldn't encode separation marks
 @msg	unknown separation mark message	unknown separation mark message
+@msg	not enough memory to decode spot image channels	inte tillräckligt med minne för att avkoda bildens dekorfärgskanaler
+@msg	registration /All image cannot preserve coverage on every output colorant, including document spots	bilden med passmärkesfärgen /All kan inte bevara täckningen för alla färgämnen i utdata, inklusive dokumentets dekorfärger
+@msg	spot image has invalid or unreadable channels	bilden med dekorfärger har ogiltiga eller oläsbara kanaler
+@msg	spot image requires {required} decoded ink bytes, exceeding the {limit}-byte limit	bilden med dekorfärger kräver {required} byte avkodade tryckfärgsdata, vilket överskrider gränsen på {limit} byte

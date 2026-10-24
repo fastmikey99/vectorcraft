@@ -4923,3 +4923,7 @@ theme	Appearance	Giao diện
 @msg	unreadable separation form	unreadable separation form
 @msg	couldn't encode separation marks	couldn't encode separation marks
 @msg	unknown separation mark message	unknown separation mark message
+@msg	not enough memory to decode spot image channels	không đủ bộ nhớ để giải mã các kênh màu đặc biệt của ảnh
+@msg	registration /All image cannot preserve coverage on every output colorant, including document spots	ảnh có màu chồng bản /All không thể giữ nguyên độ phủ của mọi chất màu đầu ra, bao gồm cả các màu đặc biệt trong tài liệu
+@msg	spot image has invalid or unreadable channels	ảnh có màu đặc biệt chứa các kênh không hợp lệ hoặc không đọc được
+@msg	spot image requires {required} decoded ink bytes, exceeding the {limit}-byte limit	ảnh có màu đặc biệt cần {required} byte dữ liệu mực đã giải mã, vượt quá giới hạn {limit} byte

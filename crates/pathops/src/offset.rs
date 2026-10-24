@@ -1,6 +1,6 @@
 //! Offset Path and Outline Stroke.
 
-use kurbo::{BezPath, PathEl, Stroke, StrokeOpts};
+use kurbo::{BezPath, PathEl, Shape, Stroke, StrokeOpts};
 use vectorcraft_geom::{FillRule, PathData, SubPath};
 
 pub use kurbo::{Cap, Join};
@@ -67,6 +67,9 @@ pub fn stroke_region(outlines: &[BezPath]) -> PathData {
     let tidy = Tidy::free(DEFAULT_PRECISION);
     let parts: Vec<BezPath> = outlines.iter().map(close_all).filter(|o| !o.elements().is_empty()).collect();
     if let [one] = &parts[..] {
+        if let Some(path) = disjoint_stroke_regions(one, &tidy) {
+            return path;
+        }
         return normalize_bez(one, FillRule::NonZero).map(|c| all_contours_to_path(&c, &tidy)).unwrap_or_default();
     }
     // Each outline is normalised on its own first: a hollow arrowhead may wind against the line
@@ -83,6 +86,87 @@ pub fn stroke_region(outlines: &[BezPath]) -> PathData {
         return PathData::default();
     }
     normalize_bez(&all, FillRule::NonZero).map(|c| all_contours_to_path(&c, &tidy)).unwrap_or_default()
+}
+
+/// Stroke outlines of disconnected glyphs need no common arrangement. Partition by
+/// conservative curve bounds, including cleanup tolerance; nested rings and touching
+/// outlines stay together. The bounded sweep is optional: dense/huge inputs use the
+/// existing global operation. No contour is approximated or discarded here.
+fn disjoint_stroke_regions(path: &BezPath, tidy: &Tidy) -> Option<PathData> {
+    use std::collections::BTreeMap;
+    let count = path.iter().filter(|el| matches!(el, PathEl::MoveTo(_))).count();
+    if !(32..=100_000).contains(&count) {
+        return None;
+    }
+    let mut pieces = Vec::with_capacity(count);
+    let mut piece = BezPath::new();
+    for el in path.iter() {
+        if matches!(el, PathEl::MoveTo(_)) && !piece.elements().is_empty() {
+            pieces.push(std::mem::take(&mut piece));
+        }
+        piece.push(el);
+    }
+    if !piece.elements().is_empty() {
+        pieces.push(piece);
+    }
+    if pieces.len() < 32 || pieces.len() > 100_000 {
+        return None;
+    }
+    let bounds: Vec<_> = pieces.iter().map(|p| p.bounding_box().inflate(2. * DEFAULT_PRECISION, 2. * DEFAULT_PRECISION)).collect();
+    let mut order: Vec<_> = (0..pieces.len()).collect();
+    order.sort_by(|a, b| bounds.get(*a).zip(bounds.get(*b)).map_or(std::cmp::Ordering::Equal, |(a, b)| a.x0.total_cmp(&b.x0)));
+    let mut parents: Vec<_> = (0..pieces.len()).collect();
+    let mut sizes = vec![1usize; pieces.len()];
+    fn root(parents: &[usize], mut i: usize) -> usize {
+        while let Some(&parent) = parents.get(i) {
+            if parent == i {
+                break;
+            }
+            i = parent;
+        }
+        i
+    }
+    let mut active: Vec<usize> = Vec::new();
+    let mut checks = 0usize;
+    for i in order {
+        let b = *bounds.get(i)?;
+        if !b.is_finite() {
+            return None;
+        }
+        active.retain(|j| bounds.get(*j).is_some_and(|a| a.x1 >= b.x0));
+        for &j in &active {
+            checks += 1;
+            if checks > 100_000_000 {
+                return None;
+            }
+            let a = bounds.get(j)?;
+            if a.y0 <= b.y1 && b.y0 <= a.y1 {
+                let (mut r, mut t) = (root(&parents, i), root(&parents, j));
+                if r != t {
+                    if sizes.get(r)? < sizes.get(t)? {
+                        std::mem::swap(&mut r, &mut t);
+                    }
+                    let combined = sizes.get(r)?.checked_add(*sizes.get(t)?)?;
+                    *parents.get_mut(t)? = r;
+                    *sizes.get_mut(r)? = combined;
+                }
+            }
+        }
+        active.push(i);
+    }
+    let mut groups: BTreeMap<usize, BezPath> = BTreeMap::new();
+    for (i, piece) in pieces.into_iter().enumerate() {
+        groups.entry(root(&parents, i)).or_default().extend(piece.iter());
+    }
+    if groups.len() == 1 {
+        return None;
+    }
+    let mut result = PathData::default();
+    for group in groups.into_values() {
+        let contours = normalize_bez(&group, FillRule::NonZero).ok()?;
+        result.subpaths.extend(all_contours_to_path(&contours, tidy).subpaths);
+    }
+    Some(result)
 }
 
 /// Object → Path → Offset Path. Positive `delta` grows the filled area, negative insets it.
@@ -391,5 +475,42 @@ mod tests {
         let (before, after) = (crate::area(&path, FillRule::NonZero), crate::area(&out, FillRule::NonZero));
         assert_eq!(out.subpaths.len(), 1);
         assert!(after > before, "{before} → {after}");
+    }
+}
+
+#[cfg(test)]
+mod disjoint_tests {
+    use super::*;
+    use vectorcraft_geom::{Rect, shapes};
+
+    #[test]
+    fn separated_stroke_islands_keep_holes_touching_edges_and_curve_geometry() {
+        let mut path = PathData::default();
+        for i in 0..40 {
+            let x = f64::from(i % 8) * 20.;
+            let y = f64::from(i / 8) * 20.;
+            path.subpaths.extend(shapes::rectangle(Rect::new(x, y, x + 10., y + 10.)).subpaths);
+            path.subpaths.extend(shapes::ellipse(Rect::new(x + 3., y + 3., x + 7., y + 7.)).subpaths);
+        }
+        // This stroke touches one island and overlaps another. They must remain in
+        // the same arrangement, despite all the other islands being independent.
+        path.subpaths.extend(shapes::rectangle(Rect::new(10., 2., 21., 8.)).subpaths);
+        let raw = stroke_bez(&path.to_bezpath(), 2., Cap::Butt, Join::Round, 4.);
+        let tidy = Tidy::free(DEFAULT_PRECISION);
+        let global = all_contours_to_path(&normalize_bez(&raw, FillRule::NonZero).unwrap(), &tidy);
+        let partitioned = disjoint_stroke_regions(&raw, &tidy).unwrap();
+        let difference =
+            crate::try_boolean(&global, FillRule::NonZero, &partitioned, FillRule::NonZero, crate::BoolOp::Xor, DEFAULT_PRECISION).unwrap();
+        assert!(crate::area(&difference, FillRule::NonZero) < 1e-6);
+        assert_eq!(global.subpaths.len(), partitioned.subpaths.len());
+    }
+
+    #[test]
+    fn dense_stroke_bounds_keep_the_global_operation() {
+        let mut path = BezPath::new();
+        for _ in 0..40 {
+            path.extend(Rect::new(0., 0., 10., 10.).to_path(0.01).iter());
+        }
+        assert!(disjoint_stroke_regions(&path, &Tidy::free(DEFAULT_PRECISION)).is_none());
     }
 }

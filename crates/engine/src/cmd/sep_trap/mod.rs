@@ -11,6 +11,7 @@ use vectorcraft_render::{AntiAlias, RenderOptions, Renderer, proof::ProofSetup};
 use super::{CommandSpec, Session, bad, cmd, has_doc};
 use crate::Result;
 
+mod bands;
 mod colour;
 mod index;
 mod pixels;
@@ -24,7 +25,9 @@ mod vector;
 const C: &str = "sep.trap";
 const SCALE: f64 = 600.0 / 72.0;
 const MM: f64 = 72.0 / 25.4;
-const MAX_PIXELS: usize = 64_000_000;
+// A2 at 600 dpi is ~139.3 MP; include the trap margin, but bound pathological jobs.
+const MAX_PIXELS: usize = 150_000_000;
+const BAND_PIXELS: usize = 4_000_000;
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![cmd!(
@@ -94,14 +97,21 @@ fn gradient_eligibility(g: &vectorcraft_color::gradient::GradientPaint, threshol
     }
 }
 
-fn eligibility(n: &mut Node, doc: &Document, threshold: f32, inherited: bool) -> Result<()> {
+fn eligibility(n: &mut Node, doc: &Document, threshold: f32, inherited: bool, images: &mut Vec<(String, ImageBlob)>) -> Result<()> {
     if n.name.as_deref().is_some_and(specialty_name) {
         return Err(bad(C, "prototype does not support neon artwork"));
     }
-    if !matches!(n.kind, NodeKind::Path { .. } | NodeKind::Compound { .. } | NodeKind::Group { .. } | NodeKind::Layer { .. }) {
-        return Err(bad(C, "prototype supports vector paths and groups only"));
+    if !matches!(n.kind, NodeKind::Path { .. } | NodeKind::Compound { .. } | NodeKind::Group { .. } | NodeKind::Layer { .. } | NodeKind::Image(_)) {
+        return Err(bad(C, "Trap supports paths, groups and raster artwork; this object type must be expanded first"));
     }
     let permission = n.extras().trap_external.unwrap_or(inherited);
+    if let NodeKind::Image(im) = &mut n.kind {
+        let blob = super::sep::images::trap_eligibility(doc, im, threshold, permission)?;
+        let key = blob.content_key();
+        im.key = key.clone();
+        im.link = None;
+        images.push((key, blob));
+    }
     // Recolour each object's own paints, retaining its geometry, clipping, opacity and stacking.
     for item in &mut n.appearance.items {
         let paint = match item {
@@ -131,7 +141,7 @@ fn eligibility(n: &mut Node, doc: &Document, threshold: f32, inherited: bool) ->
     }
     if let Some(children) = n.children_mut() {
         for child in children {
-            eligibility(Arc::make_mut(child), doc, threshold, permission)?;
+            eligibility(Arc::make_mut(child), doc, threshold, permission, images)?;
         }
     }
     Ok(())
@@ -184,7 +194,56 @@ fn options(plate: Option<&str>) -> RenderOptions {
     }
 }
 
-fn outline(mask: &[bool], w: usize, h: usize, region: Rect, cleanup: bool) -> Result<PathData> {
+pub(super) fn outline(mask: &[bool], w: usize, h: usize, region: Rect, cleanup: bool) -> Result<PathData> {
+    outline_with_budget(mask, w, h, region, cleanup, MAX_CONTOUR_ANCHORS)
+}
+
+// Reserve at most the existing ink working allowance for contour/path storage.
+// 1 KiB per anchor conservatively covers simultaneously live Loop, Component,
+// BezPath and PathData allocations, geometric Vec growth and per-loop overhead.
+// Grid scratch is separately bounded by MAX_PIXELS, as in rendering.
+const MAX_CONTOUR_ANCHORS: usize = (vectorcraft_doc::cmyk::spots::MAX_INK_BYTES / 1024) as usize;
+
+fn check_contour_budget(mask: &[bool], w: usize, h: usize, limit: usize) -> Result<()> {
+    if w == 0 || h == 0 || w.checked_mul(h) != Some(mask.len()) || mask.len() > MAX_PIXELS {
+        return Err(bad(C, "invalid contour grid"));
+    }
+    // Count turns without allocating components or contours. At a grid corner,
+    // one/three filled neighbours make one turn; diagonal pairs make two.
+    // Each loop has at least four turns. Allow one extra start vertex per loop
+    // (the tracer retains its starting point even on a straight edge).
+    let mut turns = 0usize;
+    for y in 0..=h {
+        crate::cancel::check()?;
+        let mut nw = false;
+        let mut sw = false;
+        for x in 0..=w {
+            let ne = y > 0 && x < w && mask.get((y - 1) * w + x) == Some(&true);
+            let se = y < h && x < w && mask.get(y * w + x) == Some(&true);
+            let count = usize::from(nw) + usize::from(ne) + usize::from(sw) + usize::from(se);
+            turns += match count {
+                1 | 3 => 1,
+                2 if nw == se => 2,
+                _ => 0,
+            };
+            if turns + turns / 4 > limit {
+                return Err(bad(
+                    C,
+                    format!(
+                        "Raster contour/anchor memory budget exceeded ({limit} anchors); simplify the alpha or clip the artwork before separation"
+                    ),
+                ));
+            }
+            nw = ne;
+            sw = se;
+        }
+    }
+    Ok(())
+}
+
+fn outline_with_budget(mask: &[bool], w: usize, h: usize, region: Rect, cleanup: bool, limit: usize) -> Result<PathData> {
+    // Must precede trace_mask: even its component tables can explode on noise.
+    check_contour_budget(mask, w, h, limit)?;
     let mut path = BezPath::new();
     for component in vectorcraft_trace::trace_mask(mask, w, h) {
         for contour in std::iter::once(component.outer).chain(component.holes) {
@@ -260,10 +319,13 @@ fn build(s: &mut Session, p: &Value, pre_cleanup: bool) -> Result<Value> {
         (bounds.x1 * SCALE).ceil() / SCALE,
         (bounds.y1 * SCALE).ceil() / SCALE,
     );
-    let (w, h) = vectorcraft_render::raster_size(region, SCALE).map_err(|e| bad(C, e))?;
+    let (w, h) = vectorcraft_render::raster_size(region, SCALE).map_err(|e| bad(C, e.to_string()))?;
     let n = w as usize * h as usize;
     if n > MAX_PIXELS {
-        return Err(bad(C, format!("prototype grid {w} x {h} exceeds 64 million pixels at 600 dpi")));
+        return Err(bad(C, format!("prototype grid {w} x {h} exceeds the 150-million-pixel limit (A2 at 600 dpi)")));
+    }
+    if !pre_cleanup && n > 64_000_000 {
+        return Err(bad(C, "Standalone trap exceeds the single-image limit; use the PAL TrapTask for banded transfers up to A2 at 600 dpi"));
     }
     let mut conflicts = [0; 2];
     for layer in &source.layers {
@@ -271,45 +333,59 @@ fn build(s: &mut Session, p: &Value, pre_cleanup: bool) -> Result<Value> {
     }
     let conflicts = json!({"taggedPaintsExcludedByInkRules":conflicts[0],"inkEligiblePaintsExcludedByTags":conflicts[1]});
     let mut eligible = source.clone();
+    let mut eligible_images = Vec::new();
     for layer in &mut eligible.layers {
-        eligibility(Arc::make_mut(layer), &source, threshold as f32, true)?;
+        eligibility(Arc::make_mut(layer), &source, threshold as f32, true, &mut eligible_images)?;
     }
+    eligible.images.extend(eligible_images);
     let mut renderer = Renderer::new();
-    log::debug!("trap: rendering {w} x {h}");
-    let rgba = renderer.render_region_with(&source, region, SCALE, &options(None));
-    let eligible_rgba = renderer.render_region_with(&eligible, region, SCALE, &options(None));
-    crate::cancel::check()?;
-    if rgba.pixels.len() != n * 4 || eligible_rgba.pixels.len() != n * 4 {
-        return Err(bad(C, "incomplete artwork render"));
-    }
-    let occupied: Vec<_> = rgba.pixels.as_chunks::<4>().0.iter().map(|[_, _, _, alpha]| *alpha >= 128).collect();
-    let allowed: Vec<_> = eligible_rgba.pixels.as_chunks::<4>().0.iter().map(|[red, _, _, _]| *red >= 128).collect();
-    drop(rgba);
-    drop(eligible_rgba);
-    log::debug!("trap: vector union");
-    let union = if let Some(path) = union::artwork(&source)? {
+    let silhouette = union::artwork(&source)?.map(|path| {
         let mut silhouette = source.clone();
         let shape = Node::path(silhouette.alloc_id(), path, Appearance::basic(Paint::solid(Color::BLACK), Paint::None, 0.0));
         silhouette.layers = vec![Arc::new(shape)];
         silhouette.drop_lookup_cache();
-        let rgba = renderer.render_region_with(&silhouette, region, SCALE, &options(None));
-        if rgba.pixels.len() != n * 4 {
-            return Err(bad(C, "incomplete art union render"));
-        }
-        rgba.pixels.as_chunks::<4>().0.iter().map(|[_, _, _, a]| *a >= 128).collect()
-    } else {
-        log::debug!("trap: renderer occupancy with one-pixel seam closing");
-        pixels::close_union(&occupied, w as usize, h as usize)
-    };
-    crate::cancel::check()?;
-    log::debug!("trap: nearest features");
-    let mut nearest = pixels::band(&occupied, &allowed, &union, w as usize, h as usize, 0.2 * 600.0 / 25.4)?;
-    let colours = colour::samples(&source, &mut nearest, w as usize, region, threshold as f32)?;
-    let mask: Vec<_> = nearest.iter().map(Option::is_some).collect();
-    let count = mask.iter().filter(|&&v| v).count();
+        silhouette
+    });
+    let plates = vectorcraft_doc::inks::plates(&source);
     let layer_name = if pre_cleanup { "Trap Layer 1" } else { "Auto Trap-1" };
     let existing: Vec<_> = doc.layers.iter().filter(|l| l.name.as_deref() == Some(layer_name)).map(|l| l.id).collect();
-    crate::cancel::check()?;
+    if pre_cleanup && n > 64_000_000 {
+        let mut runs = vector::Runs::default();
+        let mut mask = vec![false; n];
+        let mut next_row = 0;
+        let mut count = 0;
+        for band in bands::rows(w, h, region, 8) {
+            crate::cancel::check()?;
+            let pixels =
+                render_band(&source, &eligible, silhouette.as_ref(), &mut renderer, band.region, w, band.height, threshold, band.first, band.last)?;
+            count += pixels.mask.iter().filter(|&&v| v).count();
+            let core = pixels.mask.get(band.first * w as usize..band.last * w as usize).ok_or_else(|| bad(C, "incomplete trap band"))?;
+            let target = mask.get_mut(next_row * w as usize..next_row * w as usize + core.len()).ok_or_else(|| bad(C, "invalid trap band extent"))?;
+            target.copy_from_slice(core);
+            next_row += band.last - band.first;
+            runs.add(vector::Band {
+                mask: &pixels.mask,
+                process: &pixels.process,
+                spot: &pixels.spot,
+                plates: &plates,
+                width: w as usize,
+                region: band.region,
+            })?;
+        }
+        let clip = outline(&mask, w as usize, h as usize, region, false)?;
+        if count > 0 {
+            runs.insert(s, &plates, clip, &existing)?;
+        } else {
+            s.edit("Trap", |d, _| {
+                d.remove_many(&existing)?;
+                Ok(())
+            })?;
+        }
+        return Ok(json!({"pixels":count,"width":w,"height":h,"blackThreshold":threshold,"seconds":elapsed(),"tagConflicts":conflicts}));
+    }
+    let RasterBand { mask, process, spot } =
+        render_band(&source, &eligible, silhouette.as_ref(), &mut renderer, region, w, h, threshold, 0, h as usize)?;
+    let count = mask.iter().filter(|&&v| v).count();
     if count == 0 {
         s.edit("Trap", |d, _| {
             d.remove_many(&existing)?;
@@ -317,41 +393,15 @@ fn build(s: &mut Session, p: &Value, pre_cleanup: bool) -> Result<Value> {
         })?;
         return Ok(json!({"pixels":0,"width":w,"height":h,"blackThreshold":threshold,"seconds":elapsed(),"tagConflicts":conflicts}));
     }
-    log::debug!("trap: tracing {count} pixels");
     let clip = outline(&mask, w as usize, h as usize, region, !pre_cleanup)?;
     if clip.is_empty() {
         return Err(bad(C, "clip cleanup unexpectedly removed the band"));
     }
-    log::debug!("trap: plate samples");
-    let plates = vectorcraft_doc::inks::plates(&source);
-    if plates.len() > 32 {
-        return Err(bad(C, "too many inks for DeviceN"));
-    }
-    let mut process = vec![0; n * 4];
     let spot_count = plates.len().saturating_sub(4);
-    let mut spot = vec![0; n * spot_count];
-    if let Some(colours) = colours {
-        colours.write(&plates, &mut process, &mut spot);
-    } else {
-        for (channel, plate) in plates.iter().enumerate() {
-            crate::cancel::check()?;
-            let rendered = renderer.render_region_with(&source, region, SCALE, &options(Some(&plate.name)));
-            if rendered.pixels.len() != n * 4 {
-                return Err(bad(C, "incomplete plate render"));
-            }
-            for (i, sample) in nearest.iter().enumerate() {
-                if let Some(sample) = sample {
-                    let ink = 255 - rendered.pixels.get(*sample as usize * 4).copied().unwrap_or(255);
-                    let out = if channel < 4 { process.get_mut(i * 4 + channel) } else { spot.get_mut(i * spot_count + channel - 4) };
-                    if let Some(out) = out {
-                        *out = ink;
-                    }
-                }
-            }
-        }
-    }
     if pre_cleanup {
-        vector::insert(s, vector::Band { mask: &mask, process: &process, spot: &spot, plates: &plates, width: w as usize, region }, clip, &existing)?;
+        let mut runs = vector::Runs::default();
+        runs.add(vector::Band { mask: &mask, process: &process, spot: &spot, plates: &plates, width: w as usize, region })?;
+        runs.insert(s, &plates, clip, &existing)?;
         return Ok(json!({"pixels":count,"width":w,"height":h,"blackThreshold":threshold,"seconds":elapsed(),"tagConflicts":conflicts}));
     }
     let inks = vectorcraft_doc::cmyk::Inks::new(w, h, process).ok_or_else(|| bad(C, "invalid process samples"))?;
@@ -396,4 +446,103 @@ fn build(s: &mut Session, p: &Value, pre_cleanup: bool) -> Result<Value> {
         Ok(())
     })?;
     Ok(json!({"pixels":count,"width":w,"height":h,"blackThreshold":threshold,"seconds":elapsed(),"tagConflicts":conflicts}))
+}
+
+struct RasterBand {
+    mask: Vec<bool>,
+    process: Vec<u8>,
+    spot: Vec<u8>,
+}
+#[allow(clippy::too_many_arguments)]
+fn render_band(
+    source: &Document,
+    eligible: &Document,
+    silhouette: Option<&Document>,
+    renderer: &mut Renderer,
+    region: Rect,
+    w: u32,
+    h: u32,
+    threshold: f64,
+    first_row: usize,
+    last_row: usize,
+) -> Result<RasterBand> {
+    let n = w as usize * h as usize;
+    log::debug!("trap: rendering {w} x {h}");
+    let decoded = vectorcraft_render::decode_failures();
+    let rgba = renderer.render_region_with(source, region, SCALE, &options(None));
+    if let Some(reason) = vectorcraft_render::decode_failure_reason(decoded) {
+        return Err(bad(C, reason));
+    }
+    let decoded = vectorcraft_render::decode_failures();
+    let eligible_rgba = renderer.render_region_with(eligible, region, SCALE, &options(None));
+    if let Some(reason) = vectorcraft_render::decode_failure_reason(decoded) {
+        return Err(bad(C, reason));
+    }
+    crate::cancel::check()?;
+    if rgba.pixels.len() != n * 4 || eligible_rgba.pixels.len() != n * 4 {
+        return Err(bad(C, "incomplete artwork render"));
+    }
+    let occupied: Vec<_> = rgba.pixels.as_chunks::<4>().0.iter().map(|[_, _, _, alpha]| *alpha >= 128).collect();
+    let allowed: Vec<_> = eligible_rgba.pixels.as_chunks::<4>().0.iter().map(|[red, _, _, _]| *red >= 128).collect();
+    drop(rgba);
+    drop(eligible_rgba);
+    log::debug!("trap: vector union");
+    let union = if let Some(silhouette) = silhouette {
+        let decoded = vectorcraft_render::decode_failures();
+        let rgba = renderer.render_region_with(silhouette, region, SCALE, &options(None));
+        if let Some(reason) = vectorcraft_render::decode_failure_reason(decoded) {
+            return Err(bad(C, reason));
+        }
+        if rgba.pixels.len() != n * 4 {
+            return Err(bad(C, "incomplete art union render"));
+        }
+        rgba.pixels.as_chunks::<4>().0.iter().map(|[_, _, _, a]| *a >= 128).collect()
+    } else {
+        log::debug!("trap: renderer occupancy with one-pixel seam closing");
+        pixels::close_union(&occupied, w as usize, h as usize)
+    };
+    crate::cancel::check()?;
+    log::debug!("trap: nearest features");
+    let mut nearest = pixels::band(&occupied, &allowed, &union, w as usize, h as usize, 0.2 * 600.0 / 25.4)?;
+    for (i, sample) in nearest.iter_mut().enumerate() {
+        if i / (w as usize) < first_row || i / w as usize >= last_row {
+            *sample = None;
+        }
+    }
+    let colours = colour::samples(source, &mut nearest, w as usize, region, threshold as f32)?;
+    let mask: Vec<_> = nearest.iter().map(Option::is_some).collect();
+
+    log::debug!("trap: plate samples");
+    let plates = vectorcraft_doc::inks::plates(source);
+    if plates.len() > 32 {
+        return Err(bad(C, "too many inks for DeviceN"));
+    }
+    let mut process = vec![0; n * 4];
+    let spot_count = plates.len().saturating_sub(4);
+    let mut spot = vec![0; n * spot_count];
+    if let Some(colours) = colours {
+        colours.write(&plates, &mut process, &mut spot);
+    } else {
+        for (channel, plate) in plates.iter().enumerate() {
+            crate::cancel::check()?;
+            let decoded = vectorcraft_render::decode_failures();
+            let rendered = renderer.render_region_with(source, region, SCALE, &options(Some(&plate.name)));
+            if let Some(reason) = vectorcraft_render::decode_failure_reason(decoded) {
+                return Err(bad(C, reason));
+            }
+            if rendered.pixels.len() != n * 4 {
+                return Err(bad(C, "incomplete plate render"));
+            }
+            for (i, sample) in nearest.iter().enumerate() {
+                if let Some(sample) = sample {
+                    let ink = 255 - rendered.pixels.get(*sample as usize * 4).copied().unwrap_or(255);
+                    let out = if channel < 4 { process.get_mut(i * 4 + channel) } else { spot.get_mut(i * spot_count + channel - 4) };
+                    if let Some(out) = out {
+                        *out = ink;
+                    }
+                }
+            }
+        }
+    }
+    Ok(RasterBand { mask, process, spot })
 }

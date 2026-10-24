@@ -79,16 +79,22 @@ pub(crate) struct Pending {
 
 /// The stand-in drawn for CMYK image `blob` with spot channels, and what [`write`] puts in its
 /// place: `alt` gives each spot ink's process equivalent, `alpha` (a byte a pixel) is the image's
-/// soft mask. `None` when `blob` has no spot channels or they can't be read.
-pub(crate) fn placeholder(blob: &ImageBlob, alt: impl Fn(&str) -> [f32; 4], alpha: Option<Vec<u8>>, interpolate: bool) -> Option<(Image, Pending)> {
-    let inks = blob.cmyk()?;
-    let spots = blob.spot_inks()?;
+/// soft mask. `Ok(None)` only when `blob` has no spot channels; unreadable inks stop export.
+pub(crate) fn placeholder(
+    blob: &ImageBlob,
+    alt: impl Fn(&str) -> [f32; 4],
+    alpha: Option<Vec<u8>>,
+    interpolate: bool,
+) -> Result<Option<(Image, Pending)>, PdfError> {
+    let Some(spots) = blob.spot_inks().map_err(|e| PdfError::BadSetting(e.to_string()))? else { return Ok(None) };
+    let invalid = || PdfError::BadSetting("cannot preserve spot image channels".into());
+    let inks = blob.cmyk().ok_or_else(invalid)?;
     if (inks.width, inks.height) != (spots.width, spots.height) {
-        return None;
+        return Err(invalid());
     }
-    let n = usize::try_from(u64::from(inks.width) * u64::from(inks.height)).ok()?;
+    let n = usize::try_from(u64::from(inks.width) * u64::from(inks.height)).map_err(|_| invalid())?;
     if alpha.as_ref().is_some_and(|a| a.len() != n) {
-        return None;
+        return Err(invalid());
     }
     let per = spots.names.len();
     let samples: Vec<u8> =
@@ -97,7 +103,7 @@ pub(crate) fn placeholder(blob: &ImageBlob, alt: impl Fn(&str) -> [f32; 4], alph
     mark[..MARK.len()].copy_from_slice(MARK);
     mark[MARK.len()..MARK.len() + 8].copy_from_slice(&NEXT.fetch_add(1, Ordering::Relaxed).to_be_bytes());
     let stand_in = StandIn { mark, alpha: alpha.as_ref().map(|_| [u8::MAX; MARK_PIXELS as usize]) };
-    let image = Image::from_custom(stand_in, interpolate).ok()?;
+    let image = Image::from_custom(stand_in, interpolate).map_err(|_| invalid())?;
     let alts = spots.names.iter().map(|n| alt(n)).collect();
     let pending = Pending {
         mark,
@@ -109,7 +115,7 @@ pub(crate) fn placeholder(blob: &ImageBlob, alt: impl Fn(&str) -> [f32; 4], alph
         alpha: alpha.map(Arc::new),
         interpolate,
     };
-    Some((image, pending))
+    Ok(Some((image, pending)))
 }
 
 /// `name` as a PDF name object.

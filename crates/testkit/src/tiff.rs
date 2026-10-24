@@ -283,3 +283,31 @@ pub fn group3(g: &Group3) -> Vec<u8> {
     };
     file(entries, strips)
 }
+
+/// A tiny original spot TIFF whose headers declare a 100 MP, 28-spot image. Its ink buffer
+/// exceeds native and WASM decode limits; tests must refuse it before allocating/reading pixels.
+pub fn oversized_spot_image() -> vectorcraft_doc::ImageBlob {
+    use vectorcraft_doc::{
+        ImageBlob,
+        cmyk::{Inks, SpotInks},
+    };
+    let inks = Inks::new(1, 1, vec![0; 4]).unwrap();
+    let spots = SpotInks::new(1, 1, (0..28).map(|i| format!("Spot {i}")).collect(), vec![255; 28]).unwrap();
+    let mut bytes = ImageBlob::cmyk_spot_tiff(&inks, &spots).unwrap().bytes.as_ref().clone();
+    assert_eq!(&bytes[..4], b"II*\0");
+    let u32_at = |bytes: &[u8], at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+    let mut at = u32_at(&bytes, 4);
+    while at != 0 {
+        let count = u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap()) as usize;
+        for i in 0..count {
+            let entry = at + 2 + i * 12;
+            let tag = u16::from_le_bytes(bytes[entry..entry + 2].try_into().unwrap());
+            if matches!(tag, 256 | 257 | 278) {
+                assert_eq!(u16::from_le_bytes(bytes[entry + 2..entry + 4].try_into().unwrap()), 4);
+                bytes[entry + 8..entry + 12].copy_from_slice(&10_000u32.to_le_bytes());
+            }
+        }
+        at = u32_at(&bytes, at + 2 + count * 12);
+    }
+    ImageBlob::new("image/tiff", bytes)
+}

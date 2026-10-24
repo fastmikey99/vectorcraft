@@ -1,7 +1,8 @@
 # PAL player — preparation, WE Light, WE Dark, WE Mixed and metallic
 
 `sep.runActionList` runs an ordered sequence of ArtPro PAL XML action lists on a
-single-page, unrotated PDF. It is an engine command available through the CLI, MCP's command
+single-page, unrotated PDF, or PNG/JPEG at its declared physical resolution
+(72 ppi when absent). Output is PDF. It is an engine command available through the CLI, MCP's command
 execution tool, and the control channel.
 
 ```sh
@@ -82,14 +83,20 @@ ink resources remain independently readable.
 - `AddWhiteUnderPrint`: union of the selected painted footprints (including stroke
   outlines), spread/choke in millimetres, Round/Miter/Bevel joins and miter limit.
   `ExcludeCoveredAreas` subtracts unselected knockout paint **above** the selected art, in
-  painting order; overprinting paint and selected objects do not knock selected art out. `ExcludeWhiteObjects`
+  painting order; covering images use fully opaque coverage, including process-white pixels,
+  with intrinsic alpha and opacity masks applied. Partly transparent pixels retain the ink below.
+  Overprinting paint and selected objects do not knock selected art out. `ExcludeWhiteObjects`
   excludes zero-ink objects. The result is added to `White Underprint`, and only the
   new result is selected. `UseSelectedSeparation=0` uses `Opaque White`; otherwise
   exactly one selected ink is required. Subsequent PAL paint and overprint actions
   determine the final ink, tint and overprint state.
 - `Choke`, `Spread`: OriginalPath, CopyInFront and CopyBehind; the resulting paths
-  are selected. A choke that removes a shape is a valid empty result.
+  are selected. A choke that removes a shape is a valid empty result. Raster selections
+  stop without publishing output: a footprint alone cannot preserve their per-pixel paint.
 - `Shaper`: Unite, Intersect, Exclude, MinusFront and MinusBack, with WorkOnCopy.
+  Replacing raster artwork (`WorkOnCopy=0`) stops before mutation because a vector
+  appearance cannot preserve pixel paint. A copied footprint keeps the original
+  image and can be repainted by subsequent PAL steps.
   Uses the same curve boolean and stroke outline operations as Pathfinder.
 - `CreateShapeOnSelection`: a rectangular selection bound; `SetObjectsSize`:
   physical width/height about the selection center. `Mode=Relative` selects that
@@ -113,7 +120,7 @@ It is not a separation rule inferred from shipped output.
 
 Unknown actions and unsupported parameter variants stop with a reason. Pattern
 selection, mixed process/spot flat paint, parameterized calls, dynamic marks,
-nonopaque vector geometry and raster geometry remain unsupported. The result
+nonopaque vector geometry remains unsupported. The result
 reports the stop explicitly; it never silently skips a nonempty unsupported action.
 Layer summaries are in painting order (bottom to top) and include observed fill
 and stroke overprint flags.
@@ -182,11 +189,11 @@ exclusions apply to underprint, not trap tags; `NO POWDER` is not a trap exclusi
 either. The standalone command does not execute those underprint actions. Neon names fail explicitly as outside the experiment's scope. Metallic
 paints follow the same tag and ink eligibility rules as other spot paints. Neither underprint layer is edited.
 
-Limits: solid vector paints and path/group/layer/compound nodes only, plus
+Limits: solid vector paints on path/group/layer/compound nodes, raster images, and
 opaque unlinked CMYK linear/radial gradients whose stop bounds prove uniform
 PAL epsilon/K eligibility. Crossing gradients remain unsupported; accepted
-gradients retain nearest rendered colour samples. There are no raster-art
-inputs. The grid is limited to 64 million pixels at 600 dpi; TrapTask's pre-raster vector
+gradients retain nearest rendered colour samples. Raster-art inputs use per-sample process/spot ink eligibility and retain their alpha and masks.
+The PAL grid is limited to 150 million pixels at 600 dpi (A2 with margin); TrapTask's pre-raster vector
 form is limited to one million horizontal runs. An unsupported input fails before changing the document. The
 exterior is the complement of the art union, including blank enclosed openings;
 ink-to-ink edges never receive a band.
@@ -433,7 +440,12 @@ list on that selection. The opening ink selector cannot replace or expand an
 explicit artist selection; this also fixes the NewSelection case in M-27. Nested
 cleanup and self-selecting list runs retain their literal PAL semantics. NoTrap
 marks are resolved immediately before the Mixed ticket and use the established
-no-trap path. They require the same one-ticket/immediate-TrapTask sequence as
+no-trap path. When the recipe contains neither a trap ticket nor TrapTask (WE Light),
+NoTrap marks are irrelevant and remain in the output without triggering trapping.
+This decision walks resolved calls, groups and both conditional branches. Nested
+trap tickets or TrapTask steps stop a marked recipe before execution because the
+NoTrap split currently requires the explicit top-level sequence.
+Trapping recipes require the same one-ticket/immediate-TrapTask sequence as
 explicit noTrap intents. Any explicit `intents` object, including `{}`, overrides
 all file marks; there is no per-key merge.
 
@@ -583,3 +595,103 @@ all eleven dark files: shared-trap mean error 0.0389 percentage points, 99.913% 
 control has no trap. This does not establish customer-to-shipped preparation-colour
 parity: that separate builder comparison remains unchanged at mean 1.5532 pp and
 72.061% within 2 pp.
+
+
+## Raster transfers and large grids (25 October 2026)
+
+TrapTask processes grids above 64 million pixels in horizontal bands with an
+8-pixel overlap. The overlap covers the fixed trap radius and occupancy closing;
+only each band's core contributes output. One global occupancy mask is traced
+before the PAL's existing Rasterize/TRAPPY actions. Rasterize renders large grids
+in four-million-pixel bands but assembles one lossless ink image and opacity mask,
+preserving continuous RIP interpolation. Rendering walks one ink plane at a time
+and drops its decoded proof-image cache before the next plane. Native CMYK decoding is capped at 150
+million pixels (600 MB of process samples); Rasterize additionally caps combined
+ink samples at one billion bytes. Large flat traps omit only provably unused spot
+channels; registration and complex appearances retain every channel. WASM keeps
+its smaller decoded-image allowance.
+Spot decoding has a separate native 2 GiB ink allowance, retaining support for
+40 MP images with 28 spots; it does not lower the Rasterize working-memory cap.
+A spot-channel limit, allocation or decode failure is an error: render-based PAL
+steps stop, and PDF export refuses process-only fallback. The image is never
+accepted as having no spots just because its channels could not be read.
+Ordinary extra TIFF pages without the private spot-name tag are ignored; tagged
+channels are validated and decoded even when untagged pages occur between them.
+Before tracing alpha contours, a constant-memory pass counts turns and bounds
+the number of loops and anchors. Contour/path storage is budgeted at 1 KiB per
+anchor from the existing ink memory allowance (976,562 anchors on native,
+262,144 on WASM). Exceeding this conservative bound stops with an explicit
+contour/anchor memory diagnostic before allocating contour tables or publishing
+output; it never simplifies or discards ink to fit the budget.
+The hard ceiling is 150 million pixels (A2 at 600 dpi with margin), plus the
+renderer side limit and one million horizontal vector runs. Standalone `sep.trap`
+retains its 64-million-pixel working-grid ceiling; large production transfers
+use the explicit PAL TrapTask.
+
+Raster footprints use decoded process and spot samples. RGB/Gray samples go
+through the assigned document CMS; CMYK and spot values retain their numbers.
+Paper white (no ink) and transparent pixels contribute nothing; white spot ink
+counts as ink. Maximum channel coverage multiplied by intrinsic alpha is carried
+through the object's opacity mask and opacity, then thresholded with the shared
+0.005 ink epsilon. This is an 8-bit coverage calculation on the 600 dpi output
+grid, without image interpolation or antialiasing. Pixel-cell contours retain
+holes; ordinary path normalization joins adjacent bands. Detailed rings (over 16
+anchors) are fitted within 0.5 output pixel (0.0212 mm); short rings remain exact.
+Fits are checked per disconnected region; any changed island/counter count or
+failed normalization retains that region's original contours. A fragile detail
+does not discard valid fits elsewhere on the sheet. No additional dilation,
+background removal or colour backing rule is inferred. The PAL
+continues to supply the actual underprint choke/spread and Shaper operations.
+The footprint limit is 150 million output pixels and one million outline points.
+
+Luke's “clip it, then back it with a similar colour” practice supplies an artist's
+clip and backing before separation. A supplied clip limits the raster footprint;
+a supplied backing contributes its own ink footprint. The builder does not guess
+either from a raster's rectangle or introduce a similar-colour backing absent
+from the PALs/input.
+
+ICC-based RGB/CMYK transparency remains a production stop: the renderer cannot yet
+composite in the imported ICC blending profile. Replacing that profile with a
+device space or doing an RGB composite followed by CMYK conversion would not be
+exact. The diagnostic now names the colour space and affected transparency:
+“Uses transparency blending in ICC-based CMYK, which the builder can't reproduce
+exactly.” Opaque artwork in an otherwise unsupported page blending space retains
+the existing informational diagnostic.
+
+
+The local acceptance rerun completes 51 of 53 requested jobs; the two remaining
+stops concern ICC transparency. All 44 previously completed regular jobs, the
+large performance input, and the two previously completed weekend jobs have
+identical 600 dpi Ghostscript separation pixels. Two directly comparable shipped
+raster examples have WHP/WP footprint intersection-over-union of 98.99–99.24%
+and 99.94–99.95%; another requires the artist's clipping/resizing present in its
+shipped file. An additional CMYK raster still stops on an unresolved outline
+combination, with an explicit no-output diagnostic. Both weekend PNGs complete;
+the PAL's 0.2/0.3 mm chokes visibly erode some of the finest white-underprint
+lettering, while the 0.4 mm powder stroke expands it. No compensating rule is added.
+Job identities, output PDFs, measurements and visual checks remain in the local
+corpus report, not this repository.
+
+An original synthetic A2 coloured rectangle also completes the full Dark chain,
+including a nonempty trap and a single 600 dpi ink image. One native measurement
+is 130.30 seconds and 3.76 GiB peak RSS. The existing large performance input is
+85.39 seconds / 10.44 GiB versus 84.30 seconds / 10.81 GiB at the starting revision:
+its peak memory remains high. These are sequential single runs on a shared
+12-core machine, not statistical benchmarks. All 50k-path performance budgets
+pass. Validation totals 4,193 passing tests, zero failures and six ignored tests
+across engine, PDF, document, pathops and render; native all-target and WASM
+library clippy both pass with warnings denied.
+
+NoTrap recipe inspection includes every PAL named by explicit intents or
+persistent Metallic/Neon marks, recursively following calls and both conditional
+branches as it does for the main list sequence. Nested TrapTask execution or
+trap-ticket calls stop; setting TrappingMode or trap parameters alone remains
+supported, including the 2026-10-21 metallic PALs.
+
+Review follow-up validation (25 October 2026): five new regression tests cover
+intent/mark PAL inspection, contour budgets and untagged TIFF pages. All 4,211
+tests pass (six ignored); native all-target and WASM library clippy pass with
+warnings denied. A noisy-alpha production CLI check stops at the contour budget
+without writing output. Against the local 2026-10-25 P1 review baseline, all six
+regression sets retain identical 600 dpi separation pixels: 51 completed jobs,
+343 plates, plus two unchanged no-output stops. No separation rules were tuned.

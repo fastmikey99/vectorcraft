@@ -5235,3 +5235,7 @@ imageTrace	Outline	კონტური
 @msg	unreadable separation form	unreadable separation form
 @msg	couldn't encode separation marks	couldn't encode separation marks
 @msg	unknown separation mark message	unknown separation mark message
+@msg	not enough memory to decode spot image channels	სურათის სპოტ-ფერის არხების დეკოდირებისთვის საკმარისი მეხსიერება არ არის
+@msg	registration /All image cannot preserve coverage on every output colorant, including document spots	სარეგისტრაციო ფერის /All სურათი ვერ ინარჩუნებს დაფარვას ყველა გამომავალ საღებავზე, დოკუმენტის სპოტ-ფერების ჩათვლით
+@msg	spot image has invalid or unreadable channels	სპოტ-ფერების სურათს აქვს არასწორი ან წაუკითხავი არხები
+@msg	spot image requires {required} decoded ink bytes, exceeding the {limit}-byte limit	სპოტ-ფერების სურათს სჭირდება {required} ბაიტი დეკოდირებული მელნის მონაცემები, რაც აღემატება {limit} ბაიტის ლიმიტს

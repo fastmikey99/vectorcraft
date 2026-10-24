@@ -4943,3 +4943,7 @@ lighting	Light	Luce
 @msg	unreadable separation form	unreadable separation form
 @msg	couldn't encode separation marks	couldn't encode separation marks
 @msg	unknown separation mark message	unknown separation mark message
+@msg	not enough memory to decode spot image channels	memoria insufficiente per decodificare i canali dei colori spot dell’immagine
+@msg	registration /All image cannot preserve coverage on every output colorant, including document spots	l’immagine con colore di registro /All non può mantenere la copertura su tutti i coloranti di uscita, inclusi i colori spot del documento
+@msg	spot image has invalid or unreadable channels	l’immagine con colori spot contiene canali non validi o illeggibili
+@msg	spot image requires {required} decoded ink bytes, exceeding the {limit}-byte limit	l’immagine con colori spot richiede {required} byte di dati di inchiostro decodificati, superando il limite di {limit} byte

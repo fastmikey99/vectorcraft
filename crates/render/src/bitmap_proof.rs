@@ -62,17 +62,20 @@ pub(crate) fn image(
     blob: Option<&ImageBlob>,
     proof: &ProofSetup,
     touch: bool,
-) -> (ImageKey, Arc<Pixmap>) {
+) -> Option<(ImageKey, Arc<Pixmap>)> {
     let t = tables(proof);
     let want = ImageKey { separation: t.generation, ..key.clone() };
     if let Some(hit) = crate::lookup(&want, touch) {
-        return (want, hit);
+        return Some((want, hit));
     }
     let sized = |w: u32, h: u32| w == u32::from(pm.width()) && h == u32::from(pm.height());
     let own = blob.filter(|_| key.luts.0 != 0 && key.adjust.is_none() && !key.grey);
     let inks = own.and_then(ImageBlob::cmyk).filter(|i| sized(i.width, i.height));
     let samples = inks.as_ref().map(|i| i.data.as_chunks::<4>().0);
-    let spots = inks.as_ref().and(own).filter(|_| key.spots != 0).and_then(ImageBlob::spot_inks).filter(|s| sized(s.width, s.height));
+    let spots = match inks.as_ref().and(own).filter(|_| key.spots != 0) {
+        Some(blob) => crate::paint::decode_spots(blob)?.filter(|s| sized(s.width, s.height)),
+        None => None,
+    };
     let visible = proof.separations.as_deref().unwrap_or_default();
     // The spot channel the one visible plate is, or for several plates each visible spot channel's
     // display colour.
@@ -124,7 +127,7 @@ pub(crate) fn image(
         (px.r, px.g, px.b) = (r, g, b);
     }
     let out = images::store().insert(want.clone(), Arc::new(out));
-    (want, out)
+    Some((want, out))
 }
 
 #[cfg(test)]

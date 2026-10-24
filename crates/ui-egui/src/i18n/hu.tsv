@@ -5315,3 +5315,7 @@ imageTrace	Outline	Körvonal
 @msg	unreadable separation form	unreadable separation form
 @msg	couldn't encode separation marks	couldn't encode separation marks
 @msg	unknown separation mark message	unknown separation mark message
+@msg	not enough memory to decode spot image channels	nincs elegendő memória a kép direktszíncsatornáinak dekódolásához
+@msg	registration /All image cannot preserve coverage on every output colorant, including document spots	a /All regisztrációs színű kép nem tudja megőrizni a fedettséget minden kimeneti színezőanyagon, beleértve a dokumentum direktszíneit is
+@msg	spot image has invalid or unreadable channels	a direktszínes kép érvénytelen vagy olvashatatlan csatornákat tartalmaz
+@msg	spot image requires {required} decoded ink bytes, exceeding the {limit}-byte limit	a direktszínes kép {required} bájt dekódolt festékadatot igényel, ami meghaladja a(z) {limit} bájtos korlátot

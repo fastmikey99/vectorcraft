@@ -1059,6 +1059,79 @@ fn assert_same_plates(a: &[u8], b: &[u8]) {
 }
 
 #[test]
+fn light_recipe_ignores_persistent_no_trap_marks_and_preserves_plates_and_marks() {
+    let f = Fixture::new();
+    let (plain, marked) = no_trap_pdf_pair();
+    std::fs::write(f.0.join("plain.pdf"), plain).unwrap();
+    std::fs::write(f.0.join("marked.pdf"), marked).unwrap();
+    f.pal(
+        "WE Light",
+        &[
+            a("SelectAllObjects", ""),
+            a("CreateLayerOnTop", "<LayerName>Artwork</LayerName>"),
+            a("MoveObjectsToLayer", ""),
+            a("AddWhiteUnderPrint", "<TrappingMode>Choke</TrappingMode><Distance>0.2</Distance><JoinType>Round</JoinType>"),
+        ]
+        .concat(),
+    );
+    for variant in ["plain", "marked"] {
+        let mut s = Session::new();
+        let output = f.0.join(format!("{variant}-light.pdf"));
+        let result = s
+            .execute("sep.runActionList", &json!({"root":f.0,"lists":["WE Light"],"input":f.0.join(format!("{variant}.pdf")),"output":output}))
+            .unwrap();
+        assert_eq!(result["status"], "completed", "{result}");
+        assert!(!result["trace"].as_array().unwrap().iter().any(|step| step["action"] == "SelectNoTrap" || step["action"] == "TrapTask"));
+        // Read the exported public PDF content, not its native editing attachment.
+        s.execute("document.open", &json!({"path":output,"printProduction":true})).unwrap();
+        let marks = s.execute("sep.mark.list", &json!({})).unwrap();
+        let marks = marks["marks"].as_array().unwrap();
+        if variant == "marked" {
+            assert_eq!(marks.len(), 1);
+            assert_eq!(marks[0]["mark"], json!({"type":"noTrap"}));
+        } else {
+            assert!(marks.is_empty());
+        }
+    }
+    assert_same_plates(&std::fs::read(f.0.join("plain-light.pdf")).unwrap(), &std::fs::read(f.0.join("marked-light.pdf")).unwrap());
+}
+
+fn no_trap_pdf_pair() -> (Vec<u8>, Vec<u8>) {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({"width":50,"height":40})).unwrap();
+    let id = rect(&mut s, 5., 5., 20., 20.);
+    s.execute("paint.setFill", &json!({"ids":[id],"color":{"c":0.2,"m":0.6,"y":0.1,"k":0.1}})).unwrap();
+    let export = |s: &Session| {
+        super::super::fileio::encode_with_warnings(&s.doc().unwrap().doc, "pdf", &json!({"preserveEditing":false,"output":{"conversion":"none"}}))
+            .unwrap()
+            .0
+    };
+    let plain = export(&s);
+    s.execute("sep.mark.set", &json!({"ids":[id],"mark":{"type":"noTrap"}})).unwrap();
+    (plain, export(&s))
+}
+
+#[test]
+fn persistent_no_trap_marks_still_reject_malformed_trap_recipes() {
+    let f = Fixture::new();
+    std::fs::write(f.0.join("marked.pdf"), no_trap_pdf_pair().1).unwrap();
+    for lists in [
+        vec!["Trapping_Supacolour_Standard"],
+        vec!["Trapping_Supacolour_Standard", "prepare", "TrapTask"],
+        vec!["Trapping_Supacolour_Standard", "TrapTask", "Trapping_Supacolour_Standard (NEW)", "TrapTask"],
+        vec!["TrapTask"],
+    ] {
+        let output = f.0.join("output.pdf");
+        std::fs::write(&output, b"previous output").unwrap();
+        let error = Session::new()
+            .execute("sep.runActionList", &json!({"root":f.0,"lists":lists,"input":f.0.join("marked.pdf"),"output":output}))
+            .unwrap_err();
+        assert!(error.to_string().contains("NoTrap marks require exactly one trap ticket immediately followed by TrapTask"), "{lists:?}: {error}");
+        assert_eq!(std::fs::read(output).unwrap(), b"previous output");
+    }
+}
+
+#[test]
 fn separation_marks_public_pdf_plates_and_builder_match_explicit_intents() {
     let f = Fixture::new();
     f.pal(
@@ -1680,4 +1753,454 @@ fn mask_proofs_do_not_erase_a_short_strip_or_use_cleaned_backing() {
             assert_eq!(p.doc().unwrap(), &before);
         }
     }
+}
+
+#[test]
+fn raster_footprint_uses_ink_epsilon_holes_alpha_and_masks() {
+    use vectorcraft_color::{Color, Paint};
+    use vectorcraft_doc::{Appearance, ImageBlob, Node, NodeKind, OpacityMask};
+    use vectorcraft_geom::{Affine, shapes};
+    // Native samples land exactly on the 600 dpi grid: transparent red, paper white,
+    // sub-epsilon ink, ink just above epsilon, and a solid ring with a real hole.
+    let mut pixels = image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 255, 255, 255]));
+    for y in 1..7 {
+        for x in 1..7 {
+            pixels.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+        }
+    }
+    for y in 3..5 {
+        for x in 3..5 {
+            pixels.put_pixel(x, y, image::Rgba([0, 0, 0, 0]));
+        }
+    }
+    pixels.put_pixel(0, 0, image::Rgba([255, 0, 0, 0]));
+    pixels.put_pixel(1, 1, image::Rgba([0, 0, 0, 1]));
+    pixels.put_pixel(2, 1, image::Rgba([0, 0, 0, 2]));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    pixels.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    let (mut d, id) = image_document(ImageBlob::png(bytes.into_inner()));
+    if let NodeKind::Image(im) = &mut d.node_mut(id).unwrap().kind {
+        im.width = 8;
+        im.height = 8;
+        im.xf = Affine::scale(72. / 600.);
+    }
+    let path = images::footprint(&d, d.node(id).unwrap()).unwrap();
+    let area = vectorcraft_pathops::area(&path, vectorcraft_geom::FillRule::NonZero);
+    assert!((area - 31. * (72_f64 / 600.).powi(2)).abs() < 1e-6, "{area}");
+    let mask = Node::path(
+        d.alloc_id(),
+        shapes::rectangle(Rect::new(0., 0., 4. * 72. / 600., 8. * 72. / 600.)),
+        Appearance::basic(Paint::solid(Color::WHITE), Paint::None, 0.),
+    );
+    d.node_mut(id).unwrap().extras_mut().mask = Some(Box::new(OpacityMask::new(mask, true)));
+    let clipped = images::footprint(&d, d.node(id).unwrap()).unwrap();
+    assert!((vectorcraft_pathops::area(&clipped, vectorcraft_geom::FillRule::NonZero) - 15. * (72_f64 / 600.).powi(2)).abs() < 1e-6);
+    d.node_mut(id).unwrap().extras_mut().mask.as_mut().unwrap().invert = true;
+    let inverted = images::footprint(&d, d.node(id).unwrap()).unwrap();
+    assert!((vectorcraft_pathops::area(&inverted, vectorcraft_geom::FillRule::NonZero) - 16. * (72_f64 / 600.).powi(2)).abs() < 1e-6);
+}
+
+#[test]
+fn raster_footprints_drive_underprint_and_shaper() {
+    use vectorcraft_doc::{
+        ImageBlob,
+        cmyk::{Inks, SpotInks},
+    };
+    // Empty process pixel then white spot ink: white spot is printed ink, paper is not.
+    let blob =
+        ImageBlob::cmyk_spot_tiff(&Inks::new(2, 1, vec![0; 8]).unwrap(), &SpotInks::new(2, 1, vec!["White".into()], vec![0, 255]).unwrap()).unwrap();
+    for action in ["AddWhiteUnderPrint", "Shaper"] {
+        let (d, id) = image_document(blob.clone());
+        let mut s = Session::new();
+        s.add_document(d, None);
+        s.doc_mut().unwrap().selection.set([id]);
+        let mut p = player(&mut s);
+        if action == "AddWhiteUnderPrint" {
+            under(&mut p, false, 0.);
+        } else {
+            step(&mut p, action, "<Operation>Unite</Operation><WorkOnCopy>1</WorkOnCopy>").unwrap();
+        }
+        let area = selected_area(&p);
+        assert!((area - 100.).abs() < 2., "{action}: {area}");
+    }
+}
+
+#[test]
+fn pal_accepts_png_input_at_declared_size_and_exports_pdf() {
+    let f = Fixture::new();
+    let bytes = vectorcraft_doc::ImageBlob::cmyk_tiff(&vectorcraft_doc::cmyk::Inks::new(2, 1, vec![255; 8]).unwrap()).unwrap();
+    let pixels = bytes.decoded().unwrap();
+    pixels.save(f.0.join("input.png")).unwrap();
+    f.pal("main", &a("SelectAllObjects", ""));
+    let mut s = Session::new();
+    let result =
+        s.execute("sep.runActionList", &json!({"root":f.0,"lists":["main"],"input":f.0.join("input.png"),"output":f.0.join("output.pdf")})).unwrap();
+    assert_eq!(result["status"], "completed", "{result}");
+    assert!(f.0.join("output.pdf").exists());
+}
+
+#[test]
+fn raster_trap_eligibility_keeps_epsilon_black_and_permissions() {
+    use vectorcraft_doc::{ImageBlob, NodeKind, cmyk::Inks};
+    let blob =
+        ImageBlob::cmyk_tiff(&Inks::new(6, 1, vec![0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 255, 0, 0, 178, 255, 0, 0, 179, 0, 0, 0, 255]).unwrap())
+            .unwrap();
+    let (d, id) = image_document(blob);
+    let NodeKind::Image(im) = &d.node(id).unwrap().kind else { panic!() };
+    let allowed = images::trap_eligibility(&d, im, 0.7, true).unwrap().decoded().unwrap();
+    assert_eq!(allowed.pixels().map(|p| p[0]).collect::<Vec<_>>(), [0, 0, 255, 255, 0, 0]);
+    let denied = images::trap_eligibility(&d, im, 0.7, false).unwrap().decoded().unwrap();
+    assert!(denied.pixels().all(|p| p[0] == 0 && p[3] == 255));
+}
+
+#[test]
+fn raster_smoothing_retains_small_islands_and_counters_within_one_pixel() {
+    use vectorcraft_color::{Color, Paint};
+    use vectorcraft_doc::{Appearance, ImageBlob, Node, NodeKind};
+    use vectorcraft_geom::Affine;
+    let mut pixels = image::RgbaImage::from_pixel(64, 64, image::Rgba([255, 255, 255, 255]));
+    let mut original = vec![false; 64 * 64];
+    for y in 0i32..64 {
+        for x in 0i32..64 {
+            let r = (x - 32) * (x - 32) + (y - 32) * (y - 32);
+            let on = (400..625).contains(&r) || (x == 3 && y == 3);
+            if on {
+                pixels.put_pixel(x as u32, y as u32, image::Rgba([0, 0, 0, 255]));
+            }
+            original[(y * 64 + x) as usize] = on;
+        }
+    }
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    pixels.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    let (mut d, id) = image_document(ImageBlob::png(bytes.into_inner()));
+    if let NodeKind::Image(im) = &mut d.node_mut(id).unwrap().kind {
+        im.width = 64;
+        im.height = 64;
+        im.xf = Affine::scale(72. / 600.);
+    }
+    let path = images::footprint(&d, d.node(id).unwrap()).unwrap();
+    assert_eq!(path.subpaths.len(), 3, "ring, counter and isolated pixel");
+    d.layers = vec![std::sync::Arc::new(Node::path(d.alloc_id(), path, Appearance::basic(Paint::solid(Color::BLACK), Paint::None, 0.)))];
+    d.drop_lookup_cache();
+    let rendered = vectorcraft_render::Renderer::new().render_region_with(
+        &d,
+        Rect::new(0., 0., 64. * 72. / 600., 64. * 72. / 600.),
+        600. / 72.,
+        &vectorcraft_render::RenderOptions { artboards: false, anti_alias: vectorcraft_render::AntiAlias::None, ..Default::default() },
+    );
+    let actual = rendered.pixels.as_chunks::<4>().0.iter().map(|p| p[3] > 127).collect::<Vec<_>>();
+    assert!(actual[3 * 64 + 3]);
+    assert!(!actual[32 * 64 + 32]);
+    for (i, (&a, &b)) in original.iter().zip(&actual).enumerate() {
+        if a == b {
+            continue;
+        }
+        let (x, y) = ((i % 64) as i32, (i / 64) as i32);
+        assert!(
+            (-1..=1).any(|dy| (-1..=1).any(|dx| {
+                let (xx, yy) = (x + dx, y + dy);
+                (0..64).contains(&xx) && (0..64).contains(&yy) && original[(yy * 64 + xx) as usize] != a
+            })),
+            "fitting changed interior pixel {x},{y}"
+        );
+    }
+}
+
+#[test]
+fn raster_spread_choke_refuses_without_losing_paint_or_publishing() {
+    let f = Fixture::new();
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255])).save(f.0.join("red.png")).unwrap();
+    for action in ["Spread", "Choke"] {
+        for target in ["OriginalPath", "CopyInFront", "CopyBehind"] {
+            let mut s = Session::new();
+            s.execute("document.open", &json!({"path": f.0.join("red.png")})).unwrap();
+            let id = selection::all_objects(&s.doc().unwrap().doc, false)[0];
+            // A path processed before the image must roll back as well.
+            let vector = rect(&mut s, 20., 20., 10., 10.);
+            s.doc_mut().unwrap().selection.set([vector, id]);
+            let before = s.doc().unwrap().doc.clone();
+            let params = format!("<Distance>0.1</Distance><JoinType>Round</JoinType><SpreadTarget>{target}</SpreadTarget>");
+            let err = step(&mut player(&mut s), action, &params).unwrap_err();
+            assert!(err.to_string().contains("cannot preserve raster paint"), "{err}");
+            assert_eq!(s.doc().unwrap().doc, before);
+            assert_eq!(s.doc().unwrap().selection.objects, [vector, id]);
+            f.pal("main", &[a("SelectAllObjects", ""), a(action, &params)].concat());
+            let output = f.0.join("output.pdf");
+            std::fs::write(&output, b"previous output").unwrap();
+            let result =
+                s.execute("sep.runActionList", &json!({"root": f.0, "lists": ["main"], "input": f.0.join("red.png"), "output": output})).unwrap();
+            assert_eq!(result["status"], "stopped");
+            assert_eq!(std::fs::read(&output).unwrap(), b"previous output");
+        }
+    }
+}
+
+#[test]
+fn unselected_raster_knockout_uses_opacity_including_process_white() {
+    use vectorcraft_color::{Color, Paint};
+    use vectorcraft_doc::{Appearance, ImageBlob, Node, NodeKind, OpacityMask};
+    for alpha in [0, 128, 255] {
+        for masked in [false, true] {
+            let pixels = image::RgbaImage::from_pixel(2, 1, image::Rgba([255, 255, 255, alpha]));
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            pixels.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+            let (mut d, image) = image_document(ImageBlob::png(bytes.into_inner()));
+            // Exactly aligned output pixels: the white cover spans 24 x 12 pt.
+            if let NodeKind::Image(im) = &mut d.node_mut(image).unwrap().kind {
+                im.xf = vectorcraft_geom::Affine::scale(12.);
+            }
+            if masked {
+                let mask = Node::path(
+                    d.alloc_id(),
+                    vectorcraft_geom::shapes::rectangle(Rect::new(0., 0., 12., 12.)),
+                    Appearance::basic(Paint::solid(Color::WHITE), Paint::None, 0.),
+                );
+                d.node_mut(image).unwrap().extras_mut().mask = Some(Box::new(OpacityMask::new(mask, true)));
+            }
+            let back = d.alloc_id();
+            let node = Node::path(
+                back,
+                vectorcraft_geom::shapes::rectangle(Rect::new(0., 0., 24., 12.)),
+                Appearance::basic(Paint::solid(Color::BLACK), Paint::None, 0.),
+            );
+            d.insert(d.default_layer(), 0, node).unwrap();
+            let mut s = Session::new();
+            s.add_document(d, None);
+            s.doc_mut().unwrap().selection.set([back]);
+            let mut p = player(&mut s);
+            under(&mut p, true, 0.);
+            let area = if p.ids().unwrap().is_empty() { 0. } else { selected_area(&p) };
+            let expected = if alpha != 255 {
+                288.
+            } else if masked {
+                144.
+            } else {
+                0.
+            };
+            assert!((area - expected).abs() < 0.01, "alpha={alpha}, masked={masked}: {area}");
+        }
+    }
+}
+
+#[test]
+fn no_trap_marks_detect_trapping_in_wrappers_calls_and_both_branches() {
+    let f = Fixture::new();
+    std::fs::write(f.0.join("marked.pdf"), no_trap_pdf_pair().1).unwrap();
+    f.pal("folder/inner", &a("Group", &format!("<Actions>{}</Actions>", a("TrapTask", ""))));
+    let trap = a("CallActionList", "<Path>inner</Path>");
+    for body in [
+        a("TrapTask", ""),
+        a("CallActionList", "<Path>folder/inner.pal</Path>"),
+        a("Conditional", &format!("<Then>{trap}</Then>")),
+        a("Conditional", &format!("<Else>{trap}</Else>")),
+        a("CallActionList", "<Path>Trapping_Supacolour_Standard</Path>"),
+        a("CallActionList", "<Path>Trapping_Supacolour_Standard.PAL</Path>"),
+    ] {
+        f.pal("folder/wrapper", &body);
+        let output = f.0.join("output.pdf");
+        std::fs::write(&output, b"previous output").unwrap();
+        let err = Session::new()
+            .execute(
+                "sep.runActionList",
+                &json!({"root": f.0, "lists": ["folder/wrapper"],
+            "input": f.0.join("marked.pdf"), "output": output}),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("NoTrap marks require"), "{err}");
+        assert_eq!(std::fs::read(&output).unwrap(), b"previous output");
+    }
+    f.pal("folder/inner", &a("SelectAllObjects", ""));
+    f.pal("folder/wrapper", &a("CallActionList", "<Path>inner</Path>"));
+    let result = Session::new()
+        .execute(
+            "sep.runActionList",
+            &json!({"root": f.0, "lists": ["folder/wrapper"],
+        "input": f.0.join("marked.pdf"), "output": f.0.join("light.pdf")}),
+        )
+        .unwrap();
+    assert_eq!(result["status"], "completed", "{result}");
+}
+
+#[test]
+fn raster_knockout_uses_cmyk_opacity_and_image_soft_masks_independent_of_ink() {
+    use vectorcraft_doc::{ImageBlob, NodeKind, OpacityMask, cmyk::Inks};
+    for samples in [[0, 0, 0, 0], [0, 255, 255, 0]] {
+        for opacity in [1., 0.5] {
+            let blob = ImageBlob::cmyk_tiff(&Inks::new(3, 1, samples.repeat(3)).unwrap()).unwrap();
+            let (mut d, id) = image_document(blob);
+            let mut mask_bytes = std::io::Cursor::new(Vec::new());
+            image::GrayImage::from_raw(3, 1, vec![0, 128, 255]).unwrap().write_to(&mut mask_bytes, image::ImageFormat::Png).unwrap();
+            d.images.insert("soft-mask".into(), ImageBlob::png(mask_bytes.into_inner()));
+            let n = d.node_mut(id).unwrap();
+            n.opacity = opacity;
+            if let NodeKind::Image(im) = &mut n.kind {
+                im.width = 3;
+                im.xf = vectorcraft_geom::Affine::scale(12.);
+            }
+            let mut mask = n.clone();
+            mask.id = d.alloc_id();
+            mask.opacity = 1.;
+            if let NodeKind::Image(im) = &mut mask.kind {
+                im.key = "soft-mask".into();
+            }
+            d.node_mut(id).unwrap().extras_mut().mask = Some(Box::new(OpacityMask::new(mask, true)));
+            let mut s = Session::new();
+            s.add_document(d, None);
+            let back = rect(&mut s, 0., 0., 36., 12.);
+            let d = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().doc);
+            let node = d.remove(back).unwrap();
+            d.insert(d.default_layer(), 0, (*node).clone()).unwrap();
+            s.doc_mut().unwrap().selection.set([back]);
+            let mut p = player(&mut s);
+            under(&mut p, true, 0.);
+            let expected = if opacity == 1. { 288. } else { 432. };
+            assert!((selected_area(&p) - expected).abs() < 0.01, "ink={samples:?}, opacity={opacity}");
+        }
+    }
+}
+
+#[test]
+fn no_trap_inspection_rejects_extra_nested_traps_and_recursive_wrappers() {
+    let f = Fixture::new();
+    std::fs::write(f.0.join("marked.pdf"), no_trap_pdf_pair().1).unwrap();
+    f.pal("Trapping_Supacolour_Standard", "");
+    f.pal("wrapper", &a("TrapTask", ""));
+    let output = f.0.join("output.pdf");
+    std::fs::write(&output, b"previous output").unwrap();
+    let mut params = json!({"root": f.0, "lists": ["Trapping_Supacolour_Standard", "TrapTask", "wrapper"],
+        "input": f.0.join("marked.pdf"), "output": output});
+    for explicit in [false, true] {
+        if explicit {
+            params["intents"] = json!({"noTrap":{"rectangles":[{"x":5.,"y":5.,"width":20.,"height":20.}]}});
+        }
+        let err = Session::new().execute("sep.runActionList", &params).unwrap_err();
+        assert!(err.to_string().contains("nested trapping"), "{err}");
+        assert_eq!(std::fs::read(&output).unwrap(), b"previous output");
+    }
+    f.pal("wrapper", &a("CallActionList", "<Path>wrapper</Path>"));
+    params.as_object_mut().unwrap().remove("intents");
+    params["lists"] = json!(["wrapper"]);
+    let err = Session::new().execute("sep.runActionList", &params).unwrap_err();
+    assert!(err.to_string().contains("recursive PAL call"), "{err}");
+    assert_eq!(std::fs::read(&output).unwrap(), b"previous output");
+}
+
+#[test]
+fn no_trap_inspects_every_intent_and_mark_pal_including_neon() {
+    let f = Fixture::new();
+    f.pal("prepare", &a("SelectAllObjects", ""));
+    f.pal("Trapping_Supacolour_Standard", "");
+    let output = f.0.join("output.pdf");
+    std::fs::write(&output, b"previous output").unwrap();
+    for name in ["metal", "Neon", "TrapTask"] {
+        let mut s = Session::new();
+        s.execute(
+            "document.open",
+            &json!({"name":"marked.pdf","dataBase64":vectorcraft_format::base64_encode(&no_trap_pdf_pair().1),"printProduction":true}),
+        )
+        .unwrap();
+        let id = rect(&mut s, 30., 5., 10., 10.);
+        s.execute("sep.mark.set", &json!({"ids":[id],"mark":{"type":"metallic","list":format!("folder/{name}")}})).unwrap();
+        let bytes = super::super::fileio::encode_with_warnings(
+            &s.doc().unwrap().doc,
+            "pdf",
+            &json!({"preserveEditing":false,"output":{"conversion":"none"}}),
+        )
+        .unwrap()
+        .0;
+        std::fs::write(f.0.join("marked.pdf"), bytes).unwrap();
+        f.pal("folder/inner", &a("TrapTask", ""));
+        for body in [
+            a("TrapTask", ""),
+            a("CallActionList", "<Path>inner</Path>"),
+            a("Conditional", &format!("<Then>{}</Then>", a("CallActionList", "<Path>inner</Path>"))),
+            a("Conditional", &format!("<Else>{}</Else>", a("CallActionList", "<Path>inner</Path>"))),
+            a("CallActionList", "<Path>Trapping_Supacolour_Standard.PAL</Path>"),
+        ] {
+            f.pal(&format!("folder/{name}"), &body);
+            for explicit in [false, true] {
+                let mut params = json!({"root":f.0,"lists":["prepare"],"input":f.0.join("marked.pdf"),"output":output});
+                if explicit {
+                    params["lists"] = json!(["prepare", "Trapping_Supacolour_Standard", "TrapTask"]);
+                    params["intents"] = json!({"noTrap":{},"metallic":[{"list":format!("folder/{name}")}]});
+                }
+                let err = Session::new().execute("sep.runActionList", &params).unwrap_err();
+                assert!(err.to_string().contains("nested trapping"), "{name}, explicit={explicit}: {err}");
+                assert_eq!(std::fs::read(&output).unwrap(), b"previous output");
+            }
+        }
+        // Real metallic PALs set trapping parameters without executing TrapTask.
+        // That alone must still work alongside NoTrap in a Light recipe.
+        f.pal(&format!("folder/{name}"), &a("SetTrapTags", &trap_ticket("Always")));
+        let result = Session::new()
+            .execute("sep.runActionList", &json!({"root":f.0,"lists":["prepare"],"input":f.0.join("marked.pdf"),"output":f.0.join("allowed.pdf")}))
+            .unwrap();
+        assert_eq!(result["status"], "completed", "{result}");
+        assert!(result["trace"].as_array().unwrap().iter().any(|step| step["action"] == "SetTrapTags"));
+    }
+}
+
+#[test]
+fn destructive_shaper_refuses_raster_paint_without_mutation_or_publication() {
+    let f = Fixture::new();
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255])).save(f.0.join("red.png")).unwrap();
+    for operation in ["Unite", "Intersect", "Exclude", "MinusFront", "MinusBack"] {
+        for grouped in [false, true] {
+            let mut s = Session::new();
+            s.execute("document.open", &json!({"path": f.0.join("red.png")})).unwrap();
+            let image = selection::all_objects(&s.doc().unwrap().doc, false)[0];
+            let vector = rect(&mut s, 20., 20., 10., 10.);
+            s.doc_mut().unwrap().selection.set([vector, image]);
+            if grouped {
+                step(&mut player(&mut s), "GroupObjects", "").unwrap();
+            }
+            let before = s.doc().unwrap().doc.clone();
+            let selected = s.doc().unwrap().selection.objects.clone();
+            let params = format!("<Operation>{operation}</Operation><WorkOnCopy>0</WorkOnCopy>");
+            let err = step(&mut player(&mut s), "Shaper", &params).unwrap_err();
+            assert!(err.to_string().contains("cannot preserve raster paint"), "{err}");
+            assert_eq!(s.doc().unwrap().doc, before);
+            assert_eq!(s.doc().unwrap().selection.objects, selected);
+        }
+        f.pal("main", &[a("SelectAllObjects", ""), a("Shaper", &format!("<Operation>{operation}</Operation><WorkOnCopy>0</WorkOnCopy>"))].concat());
+        let output = f.0.join("output.pdf");
+        for existing in [false, true] {
+            if existing {
+                std::fs::write(&output, b"previous output").unwrap();
+            }
+            let result = Session::new()
+                .execute("sep.runActionList", &json!({"root": f.0, "lists": ["main"], "input": f.0.join("red.png"), "output": output}))
+                .unwrap();
+            assert_eq!(result["status"], "stopped", "{result}");
+            assert!(result.to_string().contains("cannot preserve raster paint"), "{result}");
+            if existing {
+                assert_eq!(std::fs::read(&output).unwrap(), b"previous output");
+                std::fs::remove_file(&output).unwrap();
+            } else {
+                assert!(!output.exists());
+            }
+        }
+    }
+    // The copy workflow keeps the pixels and selects geometry for subsequent PAL repainting.
+    let mut s = Session::new();
+    s.execute("document.open", &json!({"path": f.0.join("red.png")})).unwrap();
+    let id = selection::all_objects(&s.doc().unwrap().doc, false)[0];
+    let original = s.doc().unwrap().doc.node(id).unwrap().clone();
+    s.doc_mut().unwrap().selection.set([id]);
+    step(&mut player(&mut s), "Shaper", "<Operation>Unite</Operation><WorkOnCopy>1</WorkOnCopy>").unwrap();
+    assert_eq!(s.doc().unwrap().doc.node(id), Some(&original));
+    assert!(selected_area(&player(&mut s)) > 0.);
+}
+
+#[test]
+fn rasterize_stops_on_spot_decode_limit_without_losing_ink() {
+    let (d, id) = image_document(vectorcraft_testkit::tiff::oversized_spot_image());
+    let mut s = Session::new();
+    s.add_document(d, None);
+    s.doc_mut().unwrap().selection.set([id]);
+    let before = s.doc().unwrap().doc.clone();
+    let err = super::super::sep_trap::rasterize(&mut s, &[id]).unwrap_err();
+    assert!(err.to_string().contains("decoded ink bytes"), "{err}");
+    assert_eq!(s.doc().unwrap().doc, before);
+    assert_eq!(s.doc().unwrap().selection.objects, [id]);
 }

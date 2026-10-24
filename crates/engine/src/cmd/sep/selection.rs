@@ -156,9 +156,7 @@ fn ink_channels(doc: &Document, n: &Node, process: bool) -> Result<BTreeMap<Stri
                 out.insert(name.into(), value);
             }
         }
-        let names = blob.spot_names();
-        if !names.is_empty() {
-            let spots = blob.spot_inks().ok_or_else(|| error("image ink selection: undecodable spot channels"))?;
+        if let Some(spots) = blob.spot_inks().map_err(error)? {
             for (i, name) in spots.names.iter().enumerate() {
                 out.insert(name.clone(), f32::from(spots.channel(i).max().unwrap_or(0)) / 255.0);
             }

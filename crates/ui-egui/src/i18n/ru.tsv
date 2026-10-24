@@ -4939,3 +4939,7 @@ lighting	Light	Свет
 @msg	unreadable separation form	unreadable separation form
 @msg	couldn't encode separation marks	couldn't encode separation marks
 @msg	unknown separation mark message	unknown separation mark message
+@msg	not enough memory to decode spot image channels	недостаточно памяти для декодирования каналов плашечных цветов изображения
+@msg	registration /All image cannot preserve coverage on every output colorant, including document spots	изображение с цветом приводки /All не может сохранить покрытие всех выходных красителей, включая плашечные цвета документа
+@msg	spot image has invalid or unreadable channels	изображение с плашечными цветами содержит недопустимые или нечитаемые каналы
+@msg	spot image requires {required} decoded ink bytes, exceeding the {limit}-byte limit	изображению с плашечными цветами требуется {required} байт декодированных данных красок, что превышает предел в {limit} байт

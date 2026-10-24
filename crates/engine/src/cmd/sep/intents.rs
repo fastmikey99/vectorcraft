@@ -57,6 +57,12 @@ pub(super) struct Intents {
     metallic: Vec<Intent>,
 }
 
+impl Intents {
+    pub(super) fn lists(&self) -> impl Iterator<Item = &str> {
+        self.metallic.iter().map(|intent| intent.list.as_str())
+    }
+}
+
 pub(super) fn read(p: &Value) -> Result<Intents> {
     let Some(value) = p.get("intents") else { return Ok(Intents::default()) };
     let values = value.as_object().ok_or_else(|| error("intents must be an object"))?;

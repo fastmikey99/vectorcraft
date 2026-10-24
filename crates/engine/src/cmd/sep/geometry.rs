@@ -74,9 +74,12 @@ fn offset(path: &PathData, options: (f64, Join, f64)) -> Result<PathData> {
 }
 
 /// Painted footprint, including outlined strokes and real clip intersections, never bounds.
-fn footprint(d: &mut Document, n: &Node, brushes: &[vectorcraft_brush::Brush], covered: Option<&Region>) -> Result<PathData> {
+fn footprint(d: &mut Document, n: &Node, brushes: &[vectorcraft_brush::Brush], covered: Option<&Region>, knockout: bool) -> Result<PathData> {
     if !n.visible || n.opacity == 0.0 {
         return Ok(PathData::default());
+    }
+    if matches!(n.kind, NodeKind::Image(_)) {
+        return if knockout { super::images::opacity_footprint(d, n) } else { super::images::footprint(d, n) };
     }
     if let Some(reason) = composition_issue(d, n, n, covered) {
         return Err(error(format!("PAL vector geometry: {reason} on object {}", n.id)));
@@ -91,7 +94,7 @@ fn footprint(d: &mut Document, n: &Node, brushes: &[vectorcraft_brush::Brush], c
         return po::try_normalize(&mesh.outline(), FillRule::NonZero).map_err(error);
     }
     if let Some(out) = pathops::outline_strokes(d, brushes, n) {
-        return footprint(d, &out, brushes, covered);
+        return footprint(d, &out, brushes, covered, knockout);
     }
     if let Some((path, rule)) = pathops::node_path(n) {
         return if n.appearance.fill_paint().is_none() { Ok(PathData::default()) } else { po::try_normalize(&path, rule).map_err(error) };
@@ -99,7 +102,7 @@ fn footprint(d: &mut Document, n: &Node, brushes: &[vectorcraft_brush::Brush], c
     if let Some(cs) = n.children() {
         let mut path = PathData::default();
         for c in cs.iter().skip(usize::from(n.clips())) {
-            path = combine(&path, &footprint(d, c, brushes, covered)?, BoolOp::Union)?;
+            path = combine(&path, &footprint(d, c, brushes, covered, knockout)?, BoolOp::Union)?;
         }
         if n.clips()
             && let Some(mask) = cs.first()
@@ -311,7 +314,7 @@ fn ancestor_prints(d: &Document, n: &Node, covered: Option<&Region>) -> Result<b
     {
         return Ok(false);
     }
-    for parent in ancestors.iter().filter_map(|id| d.node(*id)) {
+    for parent in ancestors.iter().filter_map(|id| d.node(*id)).filter(|p| p.id != n.id || !matches!(n.kind, NodeKind::Image(_))) {
         if let Some(reason) = composition_issue(d, parent, n, covered) {
             return Err(error(format!("PAL underprint {reason} on object/ancestor {}", parent.id)));
         }
@@ -319,11 +322,11 @@ fn ancestor_prints(d: &Document, n: &Node, covered: Option<&Region>) -> Result<b
     Ok(true)
 }
 
-fn clipped_footprint(d: &mut Document, n: &Node, brushes: &[vectorcraft_brush::Brush], covered: Option<&Region>) -> Result<PathData> {
+fn clipped_footprint(d: &mut Document, n: &Node, brushes: &[vectorcraft_brush::Brush], covered: Option<&Region>, knockout: bool) -> Result<PathData> {
     if !ancestor_prints(d, n, covered)? {
         return Ok(PathData::default());
     }
-    let mut path = footprint(d, n, brushes, covered)?;
+    let mut path = footprint(d, n, brushes, covered, knockout)?;
     for id in d.ancestry(n.id).unwrap_or_default() {
         if let Some(parent) = d.node(id).filter(|parent| parent.id != n.id && parent.clips()) {
             let mask = parent.children().and_then(|cs| cs.first()).ok_or_else(|| error("PAL clip mask must be a path"))?;
@@ -452,7 +455,7 @@ impl Player<'_> {
                 }
                 let path = match cached.get(id) {
                     Some(path) => path.clone(),
-                    None => match clipped_footprint(d, &n, &brushes, covered) {
+                    None => match clipped_footprint(d, &n, &brushes, covered, !chosen) {
                         Ok(path) => path,
                         // As in the sequential fold, a cover after an empty region is irrelevant.
                         Err(_) if batched && !chosen && paint_stack(&paths)?.is_empty() => {
@@ -539,6 +542,11 @@ impl Player<'_> {
             let mut results = Vec::new();
             for id in &ids {
                 let n = d.node(*id).cloned().ok_or_else(|| error("PAL object disappeared"))?;
+                // A footprint has geometry, but cannot carry the image's per-pixel paint.
+                // Refuse before replacing/removing any artwork (including copy targets).
+                if matches!(n.kind, NodeKind::Image(_)) {
+                    return Err(error("PAL spread/choke cannot preserve raster paint; convert to painted paths first"));
+                }
                 let (path, rule) = pathops::node_path(&n).ok_or_else(|| error("PAL spread/choke requires paths"))?;
                 let path = offset(&po::try_normalize(&path, rule).map_err(error)?, options)?;
                 let (parent, at, _) = d.position(*id).ok_or_else(|| error("PAL object position disappeared"))?;
@@ -580,13 +588,19 @@ impl Player<'_> {
         if operation == "MinusBack" {
             ids.reverse();
         }
+        // A copied footprint can be repainted by subsequent PAL steps while the original
+        // pixels remain. Replacing raster artwork with a vector appearance loses its ink.
+        let doc = self.doc()?;
+        if !copy && actions::leaf_targets(doc, &ids).iter().any(|id| doc.node(*id).is_some_and(|n| matches!(n.kind, NodeKind::Image(_)))) {
+            return Err(error("PAL Shaper cannot preserve raster paint with WorkOnCopy=0; use a copied footprint and keep the raster artwork"));
+        }
         let brushes = vectorcraft_brush::library(self.doc()?);
         let active = Some(self.active_layer()?);
         self.session.edit("Pathfinder", |d, sel| {
             let mut result = None;
             for id in &ids {
                 let n = d.node(*id).cloned().ok_or_else(|| error("PAL object disappeared"))?;
-                let path = footprint(d, &n, &brushes, None)?;
+                let path = footprint(d, &n, &brushes, None, false)?;
                 result = Some(match result {
                     None => path,
                     Some(ref r) => combine(r, &path, op)?,

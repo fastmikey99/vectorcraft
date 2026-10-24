@@ -5165,3 +5165,7 @@ lighting	Light	光源
 @msg	unreadable separation form	unreadable separation form
 @msg	couldn't encode separation marks	couldn't encode separation marks
 @msg	unknown separation mark message	unknown separation mark message
+@msg	not enough memory to decode spot image channels	内存不足，无法解码图像的专色通道
+@msg	registration /All image cannot preserve coverage on every output colorant, including document spots	使用套版色 /All 的图像无法保留所有输出着色剂的覆盖率，包括文档中的专色
+@msg	spot image has invalid or unreadable channels	专色图像包含无效或无法读取的通道
+@msg	spot image requires {required} decoded ink bytes, exceeding the {limit}-byte limit	专色图像需要 {required} 字节的解码后油墨数据，超出了 {limit} 字节的限制
